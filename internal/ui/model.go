@@ -53,16 +53,18 @@ const (
 	modalError
 )
 
-// host-form field indices.
+// host-form field indices. fAuth is the two-way selector; fKey and fPassword
+// are conditional — only the one matching the selected mode is shown and
+// navigable (key path in key mode, masked password in password mode).
 const (
 	fName = iota
 	fUser
 	fAddr
 	fPort
 	fTags
-	fKey
-	fAuth     // auth-method selector (auto | key | password)
-	fPassword // masked; meaningful for auto/password auth
+	fAuth     // auth-method selector (key | password)
+	fKey      // key path — shown in key mode only
+	fPassword // masked password — shown in password mode only
 	fCount
 )
 
@@ -180,7 +182,7 @@ type Model struct {
 	modal modalKind
 
 	formEditID string         // "" = add, else the ID being edited
-	formVals   [fCount]string // Name, User, Addr, Port, Tags, KeyPath, AuthMethod, Password
+	formVals   [fCount]string // Name, User, Addr, Port, Tags, AuthMethod, KeyPath, Password
 	formFocus  int
 	formErr    string
 

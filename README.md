@@ -42,18 +42,19 @@ Requires Go 1.24+. No root, no daemon. The vault lives at
   shell — vim, htop and tmux behave exactly as over plain `ssh`. Press **`ctrl+\`** to
   detach: the session keeps running while you use the dashboard, and reattaching
   replays recent output. `alt+1..9` jumps straight back into a live session.
-- **Auth chain:** ssh-agent → configured key file (passphrase prompted in the TUI) →
-  password → keyboard-interactive. Host keys are verified against
-  `~/.ssh/known_hosts`; unknown hosts show a fingerprint confirmation (TOFU), and a
-  **changed** host key is a hard refusal — no override.
-- **Password-auth servers are first-class.** Each host has an auth mode —
-  **auto** (full chain), **key**, or **password**. Password mode never offers
-  public keys, so servers with a strict `MaxAuthTries` aren't burned on key
-  attempts they'll never accept. A password can be **saved per host** (it lives
-  only inside the encrypted vault): set it in the host form, or press `ctrl+r`
-  ("remember") in the password prompt — after a successful login it's stored and
-  future connects go straight to the shell. A rejected saved password falls back
-  to the interactive prompt.
+- **Two auth modes per host.** **key** (the default): ssh-agent → configured key
+  file (passphrase prompted in the TUI) → keyboard-interactive (2FA). **password**:
+  stored/prompted password → keyboard-interactive — it never offers public keys,
+  so servers with a strict `MaxAuthTries` aren't burned on key attempts they'll
+  never accept. The host form shows only the field the mode needs (key path or
+  password). Host keys are verified against `~/.ssh/known_hosts`; unknown hosts
+  show a fingerprint confirmation (TOFU), and a **changed** host key is a hard
+  refusal — no override.
+- **Passwords can be saved per host** (they live only inside the encrypted
+  vault): set one in the host form, or press `ctrl+r` ("remember") in the
+  password prompt — after a successful login it's stored and future connects go
+  straight to the shell. A rejected saved password falls back to the interactive
+  prompt.
 - **Probes are advisory.** The online/degraded/offline dots come from an async TCP
   check; they never block connecting.
 

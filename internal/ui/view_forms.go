@@ -50,11 +50,14 @@ func (m Model) hostFormView(t theme.Theme) []string {
 	if m.formEditID != "" {
 		title = "edit host"
 	}
-	labels := [fCount]string{"name", "user", "address", "port", "tags", "key path", "auth", "password"}
-	hints := [fCount]string{"", "", "host or ip", "default 22", "comma-separated", "~/.ssh/id_…", "", ""}
+	labels := [fCount]string{"name", "user", "address", "port", "tags", "auth", "key path", "password"}
+	hints := [fCount]string{"", "", "host or ip", "default 22", "comma-separated", "", "~/.ssh/id_…", ""}
 
 	var body []string
 	for i := 0; i < fCount; i++ {
+		if !m.fieldVisible(i) {
+			continue // hidden conditional field (key path / password)
+		}
 		focused := i == m.formFocus
 		line := stl(t.Dim, t.Panel).Render(padTo2(labels[i], 10))
 		switch i {
@@ -84,7 +87,7 @@ func (m Model) hostFormView(t theme.Theme) []string {
 	return m.modalBox(t, title, "hi", body)
 }
 
-// authSelector renders the three auth options inline with the active one lit.
+// authSelector renders the two auth options inline with the active one lit.
 func (m Model) authSelector(t theme.Theme, focused bool) string {
 	cur := m.formVals[fAuth]
 	var b strings.Builder
@@ -106,12 +109,10 @@ func (m Model) authSelector(t theme.Theme, focused bool) string {
 }
 
 // passwordField renders the masked host-form password (bullets, like the unlock
-// screen), disabled when key auth is selected (its value is then unused).
+// screen). It is only rendered in password mode (the key-mode field is hidden).
 func (m Model) passwordField(t theme.Theme, focused bool) string {
 	var seg string
 	switch {
-	case m.formVals[fAuth] == sshx.AuthKey:
-		seg = stl(t.Dim, t.Panel).Render("(unused with key auth)")
 	case m.formVals[fPassword] != "":
 		seg = stl(t.Hi, t.Panel).Render(strings.Repeat("•", len([]rune(m.formVals[fPassword]))))
 	case !focused:
@@ -124,24 +125,18 @@ func (m Model) passwordField(t theme.Theme, focused bool) string {
 }
 
 // authDetail describes a host's effective auth method for the detail pane.
+// Only two modes exist; a legacy "" / "auto" host reads as key.
 func authDetail(h store.Host) string {
-	switch h.AuthMethod {
-	case sshx.AuthPassword:
+	if h.AuthMethod == sshx.AuthPassword {
 		if h.Password != "" {
 			return "password (saved)"
 		}
 		return "password"
-	case sshx.AuthKey:
-		if h.KeyPath != "" {
-			return "key " + h.KeyPath
-		}
-		return "key"
-	default:
-		if h.Password != "" {
-			return "auto (saved)"
-		}
-		return "auto"
 	}
+	if h.KeyPath != "" {
+		return "key " + h.KeyPath
+	}
+	return "key (agent)"
 }
 
 // --- delete confirm ---------------------------------------------------------

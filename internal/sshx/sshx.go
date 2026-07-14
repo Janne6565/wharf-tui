@@ -46,12 +46,15 @@ type SessionEndedMsg struct {
 	Err    error
 }
 
-// Auth-method preferences for HostSpec.AuthMethod. Auto keeps the full
-// chain; Key and Password restrict it so servers with a low MaxAuthTries are
-// not burned on methods the host will never accept.
+// Auth-method preferences for HostSpec.AuthMethod. There are exactly two
+// modes so servers with a low MaxAuthTries are not burned on methods the host
+// will never accept.
+//
+// An empty or unrecognized AuthMethod is treated as key mode: legacy vaults
+// may still carry "" or "auto" from the retired three-way selector, and those
+// values must keep working as key mode.
 const (
-	AuthAuto     = ""         // agent → key file → password → keyboard-interactive
-	AuthKey      = "key"      // agent + key file (+ keyboard-interactive for 2FA)
+	AuthKey      = "key"      // default: agent + key file (+ keyboard-interactive for 2FA)
 	AuthPassword = "password" // password + keyboard-interactive only
 )
 
@@ -64,6 +67,6 @@ type HostSpec struct {
 	Addr       string
 	Port       int
 	KeyPath    string // optional explicit identity file
-	AuthMethod string // AuthAuto | AuthKey | AuthPassword
+	AuthMethod string // AuthKey (default) | AuthPassword; "" / unknown = key
 	Password   string // stored password; tried once before prompting
 }

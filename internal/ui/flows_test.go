@@ -256,13 +256,11 @@ func TestHostAddPasswordAuth(t *testing.T) {
 	tm = typeStr(tm, "deploy")
 	tm = send(tm, special(tea.KeyTab)) // → address
 	tm = typeStr(tm, "example.com")
-	// Navigate to the auth selector (port, tags, key path, auth).
-	tm = send(tm, special(tea.KeyTab))
-	tm = send(tm, special(tea.KeyTab))
-	tm = send(tm, special(tea.KeyTab))
-	tm = send(tm, special(tea.KeyTab))
-	// Cycle auto → key → password with space.
-	tm = send(tm, runes(" "))
+	// Navigate to the auth selector: port, tags, auth.
+	tm = send(tm, special(tea.KeyTab)) // → port
+	tm = send(tm, special(tea.KeyTab)) // → tags
+	tm = send(tm, special(tea.KeyTab)) // → auth
+	// Toggle key → password with space.
 	tm = send(tm, runes(" "))
 	tm = send(tm, special(tea.KeyTab)) // → password field
 	tm = typeStr(tm, "s3cr3t")
@@ -286,15 +284,14 @@ func TestHostEditPasswordMasked(t *testing.T) {
 	// Seed a password-auth host through the add form.
 	tm = send(tm, runes("a"))
 	tm = typeStr(tm, "web1")
-	tm = send(tm, special(tea.KeyTab))
-	tm = send(tm, special(tea.KeyTab))
+	tm = send(tm, special(tea.KeyTab)) // → user
+	tm = send(tm, special(tea.KeyTab)) // → address
 	tm = typeStr(tm, "example.com")
-	for i := 0; i < 4; i++ {
-		tm = send(tm, special(tea.KeyTab)) // → auth
-	}
-	tm = send(tm, runes(" "))
-	tm = send(tm, runes(" ")) // → password
-	tm = send(tm, special(tea.KeyTab))
+	tm = send(tm, special(tea.KeyTab)) // → port
+	tm = send(tm, special(tea.KeyTab)) // → tags
+	tm = send(tm, special(tea.KeyTab)) // → auth
+	tm = send(tm, runes(" "))          // key → password
+	tm = send(tm, special(tea.KeyTab)) // → password field
 	tm = typeStr(tm, "s3cr3t")
 	tm, _ = step(tm, special(tea.KeyEnter))
 
@@ -316,6 +313,111 @@ func TestHostEditPasswordMasked(t *testing.T) {
 	if h.AuthMethod != sshx.AuthPassword || h.Password != "s3cr3t" {
 		t.Fatalf("edit with no changes should preserve auth=%q pw=%q, got auth=%q pw=%q",
 			sshx.AuthPassword, "s3cr3t", h.AuthMethod, h.Password)
+	}
+}
+
+func TestHostAddDefaultsToKey(t *testing.T) {
+	tm, _ := openedModel(t)
+	tm = send(tm, runes("a")) // open add form
+	tm = typeStr(tm, "web1")
+	tm = send(tm, special(tea.KeyTab)) // → user
+	tm = send(tm, special(tea.KeyTab)) // → address
+	tm = typeStr(tm, "example.com")
+	tm, _ = step(tm, special(tea.KeyEnter)) // submit, no auth changes
+
+	h := hostByName(t, tm, "web1")
+	if h.AuthMethod != sshx.AuthKey {
+		t.Fatalf("a new host should default to key auth, got %q", h.AuthMethod)
+	}
+}
+
+// TestHostFormConditionalFields asserts only the field matching the selected
+// mode renders: key path in key mode, masked password in password mode. The
+// word "password" also appears once as the selector option, so the password
+// FIELD is detected by a second occurrence.
+func TestHostFormConditionalFields(t *testing.T) {
+	tm, _ := openedModel(t)
+	tm = send(tm, runes("a")) // add form — defaults to key mode
+
+	v := tm.View()
+	if !strings.Contains(v, "key path") {
+		t.Fatalf("key mode should render the key path field:\n%s", v)
+	}
+	if n := strings.Count(v, "password"); n != 1 {
+		t.Fatalf("key mode should not render a password field (want 1 selector option, got %d):\n%s", n, v)
+	}
+
+	// Move to the auth selector (name→user→addr→port→tags→auth) and toggle.
+	for i := 0; i < 5; i++ {
+		tm = send(tm, special(tea.KeyTab))
+	}
+	tm = send(tm, runes(" ")) // key → password
+
+	v = tm.View()
+	if strings.Contains(v, "key path") {
+		t.Fatalf("password mode should hide the key path field:\n%s", v)
+	}
+	if n := strings.Count(v, "password"); n != 2 {
+		t.Fatalf("password mode should render the password field plus the selector option (want 2, got %d):\n%s", n, v)
+	}
+}
+
+// TestHostFormTogglePreservesBuffers types into both conditional fields and
+// toggles between modes; both buffers must survive and both persist on submit.
+func TestHostFormTogglePreservesBuffers(t *testing.T) {
+	tm, _ := openedModel(t)
+	tm = send(tm, runes("a"))
+	tm = typeStr(tm, "web1")
+	tm = send(tm, special(tea.KeyTab)) // → user
+	tm = send(tm, special(tea.KeyTab)) // → address
+	tm = typeStr(tm, "example.com")
+	// To the key path field (addr→port→tags→auth→key) and type a path.
+	for i := 0; i < 4; i++ {
+		tm = send(tm, special(tea.KeyTab))
+	}
+	tm = typeStr(tm, "/tmp/id_key")
+	// Back to auth, toggle to password, tab to the password field, type a secret.
+	tm = send(tm, special(tea.KeyShiftTab)) // → auth
+	tm = send(tm, runes(" "))               // key → password
+	tm = send(tm, special(tea.KeyTab))      // → password field
+	tm = typeStr(tm, "s3cr3t")
+	// Toggle back to key and submit.
+	tm = send(tm, special(tea.KeyShiftTab)) // → auth
+	tm = send(tm, runes(" "))               // password → key
+	tm, _ = step(tm, special(tea.KeyEnter))
+
+	h := hostByName(t, tm, "web1")
+	if h.AuthMethod != sshx.AuthKey {
+		t.Fatalf("final auth mode = %q, want key", h.AuthMethod)
+	}
+	if h.KeyPath != "/tmp/id_key" {
+		t.Fatalf("key path buffer lost across toggle, got %q", h.KeyPath)
+	}
+	if h.Password != "s3cr3t" {
+		t.Fatalf("password buffer lost across toggle, got %q", h.Password)
+	}
+}
+
+// TestHostEditLegacyAutoShowsKey injects a host carrying the retired "auto"
+// AuthMethod (as a legacy vault would) and checks the edit form opens on key.
+func TestHostEditLegacyAutoShowsKey(t *testing.T) {
+	tm, _ := openedModel(t)
+	mm := tm.(Model)
+	mm.st = store.NewMemory([]store.Host{
+		{ID: "leg0000000000000", Name: "legacy", Addr: "a.com", Port: 22, AuthMethod: "auto", Source: "manual"},
+	}, mm.settings)
+	var tm2 tea.Model = mm
+
+	tm2 = send(tm2, runes("e")) // edit the selected (legacy) host
+	v := tm2.View()
+	if !strings.Contains(v, "edit host") {
+		t.Fatalf("e should open the edit form:\n%s", v)
+	}
+	if !strings.Contains(v, "key path") {
+		t.Fatalf("a legacy auto host should edit in key mode (key path field shown):\n%s", v)
+	}
+	if n := strings.Count(v, "password"); n != 1 {
+		t.Fatalf("a legacy auto host must not show the password field (want 1 selector option, got %d):\n%s", n, v)
 	}
 }
 

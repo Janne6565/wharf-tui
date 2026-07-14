@@ -10,24 +10,28 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 )
 
-// authMethods assembles the ordered authentication chain, honoring
-// hs.AuthMethod:
+// authMethods assembles the ordered authentication chain for hs.AuthMethod's
+// two modes:
 //
-//	AuthAuto:     agent → key file → password → keyboard-interactive
-//	AuthKey:      agent + key file + keyboard-interactive (2FA), no password
-//	AuthPassword: password + keyboard-interactive only
+//	AuthPassword: password → keyboard-interactive; never offers a public key.
+//	key mode (anything else, incl. "" / legacy "auto"): agent → key file →
+//	              keyboard-interactive; never offers a password.
 //
-// AuthPassword omits every public-key method even when hs.KeyPath is set or an
-// agent is reachable: servers with a low MaxAuthTries must not have their
-// budget burned on pubkey offers the host will never accept. An unknown
-// AuthMethod value is treated as AuthAuto (the store validates; be lenient
-// here). Each interactive method defers its prompt to a callback so the modal
-// only fires when the server actually offers/tries that method.
+// Password mode omits every public-key method even when hs.KeyPath is set or an
+// agent is reachable, so servers with a low MaxAuthTries do not have their
+// budget burned on pubkey offers the host will never accept. keyboard-
+// interactive is offered in both modes for 2FA / PAM. Each interactive method
+// defers its prompt to a callback so the modal only fires when the server
+// actually offers/tries that method.
 func (m *Manager) authMethods(ctx context.Context, hs HostSpec) []ssh.AuthMethod {
 	var methods []ssh.AuthMethod
 
-	// Public-key methods are offered for every mode except AuthPassword.
-	if hs.AuthMethod != AuthPassword {
+	if hs.AuthMethod == AuthPassword {
+		// Password mode: a saved/prompted password only, never a public key.
+		methods = append(methods, m.passwordMethod(ctx, hs))
+	} else {
+		// Key mode (default; also legacy "" / "auto"): agent + key file, no
+		// password. Auto's old password fallback is gone.
 		if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
 			if conn, err := net.Dial("unix", sock); err == nil {
 				ag := agent.NewClient(conn)
@@ -38,11 +42,6 @@ func (m *Manager) authMethods(ctx context.Context, hs HostSpec) []ssh.AuthMethod
 		if hs.KeyPath != "" {
 			methods = append(methods, ssh.PublicKeysCallback(m.keyFileSigners(ctx, hs)))
 		}
-	}
-
-	// Password is offered for AuthAuto and AuthPassword, but never for AuthKey.
-	if hs.AuthMethod != AuthKey {
-		methods = append(methods, m.passwordMethod(ctx, hs))
 	}
 
 	methods = append(methods, ssh.KeyboardInteractive(func(name, instruction string, questions []string, echos []bool) ([]string, error) {

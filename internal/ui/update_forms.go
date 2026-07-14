@@ -11,19 +11,17 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// authMethods is the cycle order for the host-form auth selector.
-var authMethods = []string{sshx.AuthAuto, sshx.AuthKey, sshx.AuthPassword}
+// authMethods is the toggle order for the host-form auth selector: key first
+// (the default), then password.
+var authMethods = []string{sshx.AuthKey, sshx.AuthPassword}
 
-// authLabel is the human-readable name for an auth method value.
+// authLabel is the human-readable name for an auth method value. Anything that
+// is not password renders as key (legacy "" / "auto" included).
 func authLabel(method string) string {
-	switch method {
-	case sshx.AuthKey:
-		return "key"
-	case sshx.AuthPassword:
+	if method == sshx.AuthPassword {
 		return "password"
-	default:
-		return "auto"
 	}
+	return "key"
 }
 
 // cycleAuth advances the auth selector by dir (+1 / -1), wrapping around.
@@ -37,6 +35,32 @@ func cycleAuth(cur string, dir int) string {
 	}
 	idx = (idx + dir + len(authMethods)) % len(authMethods)
 	return authMethods[idx]
+}
+
+// fieldVisible reports whether host-form field i is currently shown. The two
+// conditional fields (key path, password) toggle on the selected auth mode; the
+// hidden one is skipped by navigation and never rendered.
+func (m Model) fieldVisible(i int) bool {
+	switch i {
+	case fKey:
+		return m.formVals[fAuth] != sshx.AuthPassword
+	case fPassword:
+		return m.formVals[fAuth] == sshx.AuthPassword
+	default:
+		return true
+	}
+}
+
+// nextField advances the host-form focus by dir (+1 / -1), skipping the hidden
+// conditional field. fAuth is always visible, so this always terminates.
+func (m Model) nextField(dir int) int {
+	f := m.formFocus
+	for {
+		f = (f + dir + fCount) % fCount
+		if m.fieldVisible(f) {
+			return f
+		}
+	}
 }
 
 // modalKey routes a keypress to the active real-mode modal.
@@ -73,6 +97,7 @@ func (m Model) openHostForm(id string) Model {
 	m.formFocus = 0
 	m.formErr = ""
 	m.formVals = [fCount]string{}
+	m.formVals[fAuth] = sshx.AuthKey // default mode; editSelectedHost overrides
 	if id == "" {
 		m.formVals[fPort] = "22"
 	}
@@ -92,7 +117,12 @@ func (m Model) editSelectedHost() (tea.Model, tea.Cmd) {
 	m.formVals[fPort] = strconv.Itoa(h.Port)
 	m.formVals[fTags] = strings.Join(h.Tags, ", ")
 	m.formVals[fKey] = h.KeyPath
-	m.formVals[fAuth] = h.AuthMethod
+	// Only two modes exist; a legacy "" / "auto" host edits as key.
+	if h.AuthMethod == sshx.AuthPassword {
+		m.formVals[fAuth] = sshx.AuthPassword
+	} else {
+		m.formVals[fAuth] = sshx.AuthKey
+	}
 	// Pre-fill the real password into the buffer; the view only ever renders it
 	// as bullets, so the plaintext is never shown.
 	m.formVals[fPassword] = h.Password
@@ -105,10 +135,10 @@ func (m Model) hostFormKey(key string) (tea.Model, tea.Cmd) {
 		m.modal = modalNone
 		return m, nil
 	case "tab", "down":
-		m.formFocus = (m.formFocus + 1) % fCount
+		m.formFocus = m.nextField(+1)
 		return m, nil
 	case "shift+tab", "up":
-		m.formFocus = (m.formFocus + fCount - 1) % fCount
+		m.formFocus = m.nextField(-1)
 		return m, nil
 	case "enter":
 		return m.submitHostForm()
@@ -149,13 +179,17 @@ func (m Model) submitHostForm() (tea.Model, tea.Cmd) {
 		port = p
 	}
 	h := store.Host{
-		Name:       strings.TrimSpace(m.formVals[fName]),
-		User:       strings.TrimSpace(m.formVals[fUser]),
-		Addr:       strings.TrimSpace(m.formVals[fAddr]),
-		Port:       port,
-		Tags:       parseTags(m.formVals[fTags]),
-		KeyPath:    strings.TrimSpace(m.formVals[fKey]),
-		AuthMethod: m.formVals[fAuth], // "" (auto) | "key" | "password"
+		Name:    strings.TrimSpace(m.formVals[fName]),
+		User:    strings.TrimSpace(m.formVals[fUser]),
+		Addr:    strings.TrimSpace(m.formVals[fAddr]),
+		Port:    port,
+		Tags:    parseTags(m.formVals[fTags]),
+		KeyPath: strings.TrimSpace(m.formVals[fKey]),
+		// Always "key" or "password" now. Both KeyPath and Password are persisted
+		// as typed even though only one is relevant to the selected mode: the
+		// engine ignores the irrelevant one, so keeping both is lossless if the
+		// user toggles the selector by accident and saves.
+		AuthMethod: m.formVals[fAuth],
 		Password:   m.formVals[fPassword],
 	}
 

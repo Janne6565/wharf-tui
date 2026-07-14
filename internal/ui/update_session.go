@@ -134,7 +134,15 @@ func (m Model) handleDialErr(hostID string, err error) (tea.Model, tea.Cmd) {
 	case errors.Is(err, sshx.ErrHostKeyRejected):
 		return m.setToast("host key rejected", "err"), nil
 	case errors.Is(err, sshx.ErrAuthFailed):
-		return m.setToast("authentication failed", "err"), nil
+		msg := "authentication failed"
+		// A key-mode host that fails auth often just wants password auth; point
+		// the user at the fix. Password-mode hosts get the plain message.
+		if m.st != nil {
+			if h, ok := m.st.HostByID(hostID); ok && h.AuthMethod != sshx.AuthPassword {
+				msg += " · hint: this server may want password auth — edit the host (e) and switch auth to password"
+			}
+		}
+		return m.setToast(msg, "err"), nil
 	case errors.Is(err, context.DeadlineExceeded):
 		return m.setToast("connection timed out", "err"), nil
 	default:

@@ -178,22 +178,24 @@ func TestUpsertImported(t *testing.T) {
 }
 
 func TestAuthMethodValidation(t *testing.T) {
-	// "auto" normalizes to the empty (auto) setting on add.
-	s := NewMemory(nil, DefaultSettings())
-	added, err := s.AddHost(Host{Name: "auto-host", Addr: "a.com", AuthMethod: "auto"})
-	if err != nil {
-		t.Fatalf("AddHost auto: %v", err)
-	}
-	if added.AuthMethod != "" {
-		t.Fatalf("AuthMethod %q, want normalized to \"\"", added.AuthMethod)
+	// "", "auto" and "key" all normalize to the default "key" mode on add.
+	for _, in := range []string{"", "auto", "key"} {
+		s := NewMemory(nil, DefaultSettings())
+		added, err := s.AddHost(Host{Name: "h", Addr: "a.com", AuthMethod: in})
+		if err != nil {
+			t.Fatalf("AddHost AuthMethod %q: %v", in, err)
+		}
+		if added.AuthMethod != "key" {
+			t.Fatalf("AuthMethod %q normalized to %q, want \"key\"", in, added.AuthMethod)
+		}
 	}
 
-	// The explicit modes are accepted verbatim.
-	for _, am := range []string{"", "key", "password"} {
-		s := NewMemory(nil, DefaultSettings())
-		if _, err := s.AddHost(Host{Name: "h", Addr: "a.com", AuthMethod: am}); err != nil {
-			t.Fatalf("AddHost AuthMethod %q: %v", am, err)
-		}
+	// "password" is preserved verbatim.
+	sp := NewMemory(nil, DefaultSettings())
+	if p, err := sp.AddHost(Host{Name: "pw", Addr: "a.com", AuthMethod: "password"}); err != nil {
+		t.Fatalf("AddHost password: %v", err)
+	} else if p.AuthMethod != "password" {
+		t.Fatalf("password AuthMethod = %q, want password", p.AuthMethod)
 	}
 
 	// Garbage is rejected on both add and update.
@@ -209,13 +211,42 @@ func TestAuthMethodValidation(t *testing.T) {
 	if err := s2.UpdateHost(h); err == nil {
 		t.Fatalf("UpdateHost with garbage AuthMethod should error")
 	}
-	// "auto" also normalizes on update.
+	// "auto" also normalizes to "key" on update.
 	h.AuthMethod = "auto"
 	if err := s2.UpdateHost(h); err != nil {
 		t.Fatalf("UpdateHost auto: %v", err)
 	}
-	if got, _ := s2.HostByID(h.ID); got.AuthMethod != "" {
-		t.Fatalf("UpdateHost AuthMethod %q, want normalized to \"\"", got.AuthMethod)
+	if got, _ := s2.HostByID(h.ID); got.AuthMethod != "key" {
+		t.Fatalf("UpdateHost AuthMethod %q, want normalized to \"key\"", got.AuthMethod)
+	}
+}
+
+func TestLegacyAuthDocumentReads(t *testing.T) {
+	// A document written by an older build may still hold "" or "auto"
+	// AuthMethods. Opening it must not fail, and the values survive the read
+	// untouched (normalization only runs on Add/Update; the engine treats any
+	// non-"password" value as key mode, so stored legacy values are harmless).
+	payload := []byte(`{"schema":1,"hosts":[` +
+		`{"id":"1111111111111111","name":"legacy-empty","addr":"a.com","port":22,"source":"manual"},` +
+		`{"id":"2222222222222222","name":"legacy-auto","addr":"b.com","port":22,"authMethod":"auto","source":"manual"}` +
+		`],"settings":{}}`)
+	s, err := Open(&fakeBackend{payload: payload})
+	if err != nil {
+		t.Fatalf("Open legacy document: %v", err)
+	}
+	hosts := s.Hosts()
+	if len(hosts) != 2 {
+		t.Fatalf("legacy doc read %d hosts, want 2", len(hosts))
+	}
+	byName := map[string]Host{}
+	for _, h := range hosts {
+		byName[h.Name] = h
+	}
+	if got := byName["legacy-empty"].AuthMethod; got != "" {
+		t.Fatalf("legacy-empty AuthMethod = %q, want \"\" (unchanged by read)", got)
+	}
+	if got := byName["legacy-auto"].AuthMethod; got != "auto" {
+		t.Fatalf("legacy-auto AuthMethod = %q, want \"auto\" (unchanged by read)", got)
 	}
 }
 

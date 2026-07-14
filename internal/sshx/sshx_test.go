@@ -58,6 +58,15 @@ func (ts *testServer) hostSpec() HostSpec {
 	return HostSpec{ID: "h1", Name: "test", User: "tester", Addr: ts.host, Port: ts.port}
 }
 
+// passwordSpec is hostSpec pinned to password mode — the mode under which the
+// engine actually offers a password to a password-only test server (key mode,
+// the default, never does).
+func (ts *testServer) passwordSpec() HostSpec {
+	hs := ts.hostSpec()
+	hs.AuthMethod = AuthPassword
+	return hs
+}
+
 func newHostSigner(t *testing.T) gossh.Signer {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -271,7 +280,7 @@ func TestDialPasswordAuth(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	sess, err := m.Dial(ctx, ts.hostSpec(), 80, 24)
+	sess, err := m.Dial(ctx, ts.passwordSpec(), 80, 24)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -297,7 +306,7 @@ func TestTOFUAcceptAndPersist(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	sess, err := m.Dial(ctx, ts.hostSpec(), 80, 24)
+	sess, err := m.Dial(ctx, ts.passwordSpec(), 80, 24)
 	if err != nil {
 		t.Fatalf("first dial: %v", err)
 	}
@@ -324,7 +333,7 @@ func TestTOFUAcceptAndPersist(t *testing.T) {
 
 	// Second dial must NOT prompt again.
 	before := rec.hostKeyCount()
-	sess2, err := m.Dial(ctx, ts.hostSpec(), 80, 24)
+	sess2, err := m.Dial(ctx, ts.passwordSpec(), 80, 24)
 	if err != nil {
 		t.Fatalf("second dial: %v", err)
 	}
@@ -408,7 +417,7 @@ func TestRingRecordsWhileDetached(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	sess, err := m.Dial(ctx, ts.hostSpec(), 80, 24)
+	sess, err := m.Dial(ctx, ts.passwordSpec(), 80, 24)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -436,7 +445,7 @@ func TestSessionEndedDelivered(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	sess, err := m.Dial(ctx, ts.hostSpec(), 80, 24)
+	sess, err := m.Dial(ctx, ts.passwordSpec(), 80, 24)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -477,7 +486,7 @@ func TestAttachDetachByte(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	sess, err := m.Dial(ctx, ts.hostSpec(), 80, 24)
+	sess, err := m.Dial(ctx, ts.passwordSpec(), 80, 24)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -546,7 +555,7 @@ func TestWrongPasswordFailsCleanly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	sess, err := m.Dial(ctx, ts.hostSpec(), 80, 24)
+	sess, err := m.Dial(ctx, ts.passwordSpec(), 80, 24)
 	if err == nil {
 		_ = sess.Close()
 		t.Fatal("expected auth to fail with wrong password")
@@ -571,7 +580,7 @@ func TestStoredPasswordSucceedsWithoutPrompt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	hs := ts.hostSpec()
+	hs := ts.passwordSpec()
 	hs.Password = testPassword // correct stored password
 	sess, err := m.Dial(ctx, hs, 80, 24)
 	if err != nil {
@@ -599,7 +608,7 @@ func TestStoredPasswordRejectedThenPrompts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	hs := ts.hostSpec()
+	hs := ts.passwordSpec()
 	hs.Password = "wrong-stored" // rejected → must fall through to a prompt
 	sess, err := m.Dial(ctx, hs, 80, 24)
 	if err != nil {

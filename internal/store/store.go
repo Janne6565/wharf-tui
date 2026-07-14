@@ -37,7 +37,9 @@ type Host struct {
 	Port    int      `json:"port"`
 	Tags    []string `json:"tags,omitempty"`
 	KeyPath string   `json:"keyPath,omitempty"`
-	// AuthMethod restricts the SSH auth chain: "" (auto) | "key" | "password".
+	// AuthMethod restricts the SSH auth chain: "key" (default) | "password".
+	// Add/Update normalize the empty string and the legacy "auto" value to
+	// "key"; a document read straight from disk may still hold "" or "auto".
 	AuthMethod string `json:"authMethod,omitempty"`
 	// Password is the saved login password for password-auth hosts. It lives
 	// only inside the encrypted vault — never plaintext on disk.
@@ -282,18 +284,19 @@ func (s *Store) validate(h Host, excludeID string) error {
 	return nil
 }
 
-// normalizeAuthMethod canonicalizes an AuthMethod value and rejects unknown
-// ones. "auto" is accepted as an alias for the empty (auto) setting so callers
-// can spell it explicitly; anything outside the known set is a validation
-// error rather than being silently coerced.
+// normalizeAuthMethod canonicalizes an AuthMethod value to one of the two
+// supported modes and rejects unknown ones. The empty string and the legacy
+// "auto" value (from the retired three-way selector) both map to "key", the
+// default; anything outside the known set is a validation error rather than
+// being silently coerced.
 func normalizeAuthMethod(v string) (string, error) {
 	switch v {
-	case "", "auto":
-		return "", nil
-	case "key", "password":
-		return v, nil
+	case "", "auto", "key":
+		return "key", nil
+	case "password":
+		return "password", nil
 	default:
-		return "", fmt.Errorf("store: invalid auth method %q (want \"\", \"key\", or \"password\")", v)
+		return "", fmt.Errorf("store: invalid auth method %q (want \"key\" or \"password\")", v)
 	}
 }
 
