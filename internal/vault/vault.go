@@ -24,7 +24,12 @@
 //	218  ...  XChaCha20-Poly1305(body nonce, DEK, payload JSON, AAD = bytes[0:218])
 package vault
 
-import "errors"
+import (
+	"crypto/rand"
+	"errors"
+	"os"
+	"path/filepath"
+)
 
 // Params are the argon2id cost parameters recorded in the vault header.
 type Params struct {
@@ -52,12 +57,21 @@ var (
 
 // DefaultPath resolves ${XDG_DATA_HOME:-~/.local/share}/wharf/vault.enc.
 func DefaultPath() (string, error) {
-	panic("vault: unimplemented")
+	base := os.Getenv("XDG_DATA_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		base = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(base, "wharf", "vault.enc"), nil
 }
 
 // Exists reports whether a vault file exists at path.
 func Exists(path string) bool {
-	panic("vault: unimplemented")
+	fi, err := os.Stat(path)
+	return err == nil && !fi.IsDir()
 }
 
 // Create initializes a new vault at path with an empty payload, protected by
@@ -65,41 +79,266 @@ func Exists(path string) bool {
 // (40 chars Crockford base32, formatted XXXXX-XXXXX-... in the UI). The code
 // is never stored anywhere.
 func Create(path string, password []byte) (v *Vault, recoveryCode string, err error) {
-	panic("vault: unimplemented")
+	return createWithParams(path, password, DefaultParams)
+}
+
+// createWithParams is the Create implementation with explicit cost parameters.
+// Tests use it with tiny params; the exported Create pins DefaultParams.
+func createWithParams(path string, password []byte, params Params) (*Vault, string, error) {
+	if !validParams(params) {
+		return nil, "", errors.New("vault: invalid argon2 parameters")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return nil, "", err
+	}
+	lock, err := acquireLock(path)
+	if err != nil {
+		return nil, "", err
+	}
+
+	dek := make([]byte, dekLen)
+	if _, err := rand.Read(dek); err != nil {
+		lock.Close()
+		return nil, "", err
+	}
+
+	h := header{version: fileVersion, kdf: kdfArgon2id, params: params}
+	if _, err := rand.Read(h.pwSalt[:]); err != nil {
+		lock.Close()
+		return nil, "", err
+	}
+	if _, err := rand.Read(h.pwNonce[:]); err != nil {
+		lock.Close()
+		return nil, "", err
+	}
+	pwWrap, err := wrapDEK(deriveKEK(password, h.pwSalt[:], params), h.pwNonce[:], dek)
+	if err != nil {
+		lock.Close()
+		return nil, "", err
+	}
+	copy(h.pwWrap[:], pwWrap)
+
+	code, secret, err := newRecoveryCode()
+	if err != nil {
+		lock.Close()
+		return nil, "", err
+	}
+	if _, err := rand.Read(h.recSalt[:]); err != nil {
+		lock.Close()
+		return nil, "", err
+	}
+	if _, err := rand.Read(h.recNonce[:]); err != nil {
+		lock.Close()
+		return nil, "", err
+	}
+	recWrap, err := wrapDEK(deriveKEK(secret, h.recSalt[:], params), h.recNonce[:], dek)
+	if err != nil {
+		lock.Close()
+		return nil, "", err
+	}
+	copy(h.recWrap[:], recWrap)
+
+	v := &Vault{path: path, hdr: h, dek: dek, payload: []byte{}, lock: lock}
+	if err := v.save(v.payload); err != nil {
+		lock.Close()
+		return nil, "", err
+	}
+	return v, code, nil
 }
 
 // Open unlocks the vault at path with the master password.
 func Open(path string, password []byte) (*Vault, error) {
-	panic("vault: unimplemented")
+	return openVault(path, func(h header) ([]byte, error) {
+		kek := deriveKEK(password, h.pwSalt[:], h.params)
+		return unwrapDEK(kek, h.pwNonce[:], h.pwWrap[:])
+	})
 }
 
 // OpenWithRecovery unlocks the vault with the recovery code (case- and
 // dash-insensitive). Callers must follow up with ChangePassword and
 // RegenerateRecovery to complete the reset flow.
 func OpenWithRecovery(path, code string) (*Vault, error) {
-	panic("vault: unimplemented")
+	return openVault(path, func(h header) ([]byte, error) {
+		secret, err := recoverySecret(code)
+		if err != nil {
+			return nil, err
+		}
+		kek := deriveKEK(secret, h.recSalt[:], h.params)
+		return unwrapDEK(kek, h.recNonce[:], h.recWrap[:])
+	})
+}
+
+// openVault is the shared unlock path: it enforces existence, takes the lock,
+// reads and validates the header, then delegates DEK recovery to unwrap.
+func openVault(path string, unwrap func(header) ([]byte, error)) (*Vault, error) {
+	if !Exists(path) {
+		return nil, ErrNotFound
+	}
+	lock, err := acquireLock(path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		lock.Close()
+		if os.IsNotExist(err) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	h, body, err := parseHeader(data)
+	if err != nil {
+		lock.Close()
+		return nil, err
+	}
+	dek, err := unwrap(h)
+	if err != nil {
+		lock.Close()
+		// Any wrap-open failure is indistinguishable "wrong secret".
+		return nil, ErrWrongSecret
+	}
+	payload, err := openBody(dek, h.bodyNonce[:], body, data[:headerLen])
+	if err != nil {
+		zero(dek)
+		lock.Close()
+		return nil, ErrCorrupt
+	}
+	return &Vault{path: path, hdr: h, dek: dek, payload: payload, lock: lock}, nil
 }
 
 // Vault is an unlocked vault holding the DEK in memory and an exclusive
 // flock for the process lifetime.
 type Vault struct {
-	// implemented in WP1
+	path    string
+	hdr     header
+	dek     []byte
+	payload []byte
+	lock    *os.File
 }
 
 // Payload returns the current decrypted payload (JSON document owned by
 // internal/store).
-func (v *Vault) Payload() []byte { panic("vault: unimplemented") }
+func (v *Vault) Payload() []byte { return v.payload }
 
 // Save re-seals the payload with a fresh body nonce and atomically rewrites
 // the file (tmp + fsync + rename + fsync dir).
-func (v *Vault) Save(payload []byte) error { panic("vault: unimplemented") }
+func (v *Vault) Save(payload []byte) error { return v.save(payload) }
+
+// save re-seals under a fresh body nonce and atomically replaces the file. A
+// fresh nonce is mandatory: it never repeats under the same DEK, and because it
+// lives inside the AAD-protected header the whole file must be rewritten.
+func (v *Vault) save(payload []byte) error {
+	if _, err := rand.Read(v.hdr.bodyNonce[:]); err != nil {
+		return err
+	}
+	hdrBytes := v.hdr.marshal()
+	body, err := sealBody(v.dek, v.hdr.bodyNonce[:], payload, hdrBytes)
+	if err != nil {
+		return err
+	}
+	fileBytes := make([]byte, 0, len(hdrBytes)+len(body))
+	fileBytes = append(fileBytes, hdrBytes...)
+	fileBytes = append(fileBytes, body...)
+
+	if err := writeFileAtomic(v.path, fileBytes); err != nil {
+		return err
+	}
+	v.payload = append([]byte(nil), payload...)
+	return nil
+}
+
+// writeFileAtomic writes data to <path>.tmp, fsyncs it, renames it onto path,
+// then fsyncs the directory so the rename is durable.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmpPath := path + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if d, err := os.Open(dir); err == nil {
+		d.Sync()
+		d.Close()
+	}
+	return nil
+}
 
 // ChangePassword rewrites the password slot; the recovery slot stays valid.
-func (v *Vault) ChangePassword(newPassword []byte) error { panic("vault: unimplemented") }
+func (v *Vault) ChangePassword(newPassword []byte) error {
+	var salt [saltLen]byte
+	var nonce [nonceLen]byte
+	if _, err := rand.Read(salt[:]); err != nil {
+		return err
+	}
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
+	}
+	wrapped, err := wrapDEK(deriveKEK(newPassword, salt[:], v.hdr.params), nonce[:], v.dek)
+	if err != nil {
+		return err
+	}
+	v.hdr.pwSalt = salt
+	v.hdr.pwNonce = nonce
+	copy(v.hdr.pwWrap[:], wrapped)
+	return v.save(v.payload)
+}
 
 // RegenerateRecovery replaces the recovery slot with a new code and returns
 // it; the old code is invalid from that moment.
-func (v *Vault) RegenerateRecovery() (string, error) { panic("vault: unimplemented") }
+func (v *Vault) RegenerateRecovery() (string, error) {
+	code, secret, err := newRecoveryCode()
+	if err != nil {
+		return "", err
+	}
+	var salt [saltLen]byte
+	var nonce [nonceLen]byte
+	if _, err := rand.Read(salt[:]); err != nil {
+		return "", err
+	}
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	wrapped, err := wrapDEK(deriveKEK(secret, salt[:], v.hdr.params), nonce[:], v.dek)
+	if err != nil {
+		return "", err
+	}
+	v.hdr.recSalt = salt
+	v.hdr.recNonce = nonce
+	copy(v.hdr.recWrap[:], wrapped)
+	if err := v.save(v.payload); err != nil {
+		return "", err
+	}
+	return code, nil
+}
 
 // Close zeroes the DEK and releases the lock file.
-func (v *Vault) Close() error { panic("vault: unimplemented") }
+func (v *Vault) Close() error {
+	if v.dek != nil {
+		zero(v.dek)
+		v.dek = nil
+	}
+	if v.lock == nil {
+		return nil
+	}
+	err := v.lock.Close()
+	v.lock = nil
+	return err
+}
