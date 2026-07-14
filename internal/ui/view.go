@@ -147,13 +147,18 @@ func centerInArea(block []string, w, areaH int, bg lipgloss.Color) []string {
 	return vpad(hcenter(block, w, bg), w, areaH, bg, true)
 }
 
+// topInArea centers a block horizontally but pins it to the top of w×areaH.
+func topInArea(block []string, w, areaH int, bg lipgloss.Color) []string {
+	return vpad(hcenter(block, w, bg), w, areaH, bg, false)
+}
+
 // --- auth / login (simulated account) ---------------------------------------
 
 func (m Model) authView(t theme.Theme) []string {
 	logo := bold(t.Hi, t.Bg).Render("⚓ wharf") + m.cur(t.Hi, t.Bg)
 	subtitle := stl(t.Dim, t.Bg).Render("your fleet, one terminal · v1.0.0")
 
-	pw := 68
+	pw := 72
 	if pw > m.w-6 {
 		pw = m.w - 6
 	}
@@ -191,7 +196,7 @@ func (m Model) authView(t theme.Theme) []string {
 		}
 	}
 
-	box := panel(t, "sign in", t.Hi, pw, len(body)+2, body)
+	box := boxPanelAuto(t, "sign in", t.Hi, pw, body)
 	footer := stl(t.Dim, t.Bg).Render("api.wharf.sh · e2e-encrypted vault · ") + stl(t.Ok, t.Bg).Render("● service up")
 
 	block := []string{logo, subtitle, ""}
@@ -224,7 +229,9 @@ func (m Model) mainView(t theme.Theme) []string {
 	strip := m.sessionStrip(t)
 	toast := m.toastLine(t)
 	hint := m.hintBar(t)
-	contentH := m.h - len(header) - len(strip) - len(toast) - len(hint)
+	// One blank margin row between the header rule and the top of the panels
+	// (design: content area padding-top ≈ 14px).
+	contentH := m.h - len(header) - len(strip) - len(toast) - len(hint) - 1
 	if contentH < 3 {
 		contentH = 3
 	}
@@ -241,6 +248,7 @@ func (m Model) mainView(t theme.Theme) []string {
 	}
 	out := append([]string{}, header...)
 	out = append(out, strip...)
+	out = append(out, bgpad(m.w, t.Bg))
 	out = append(out, content...)
 	out = append(out, toast...)
 	out = append(out, hint...)
@@ -309,17 +317,31 @@ func (m Model) toastLine(t theme.Theme) []string {
 	return []string{barLine(t, m.w, " "+stl(c, t.Bg).Render("› "+m.toast), "")}
 }
 
-// twoPane lays out a list panel and a detail panel with 1-col margins/gap.
-func (m Model) twoPane(t theme.Theme, contentH int, lTitle string, lBorder lipgloss.Color, lBody []string, lw int, rTitle string, rBorder lipgloss.Color, rBody []string, rw int) []string {
-	avail := m.w - 3
+// paneAvail is the total width available to the two panes (screen minus the
+// outer margins and the inter-pane gap).
+func (m Model) paneAvail() int {
+	avail := m.w - 2*marginX - paneGap
 	if avail < 10 {
 		avail = 10
 	}
+	return avail
+}
+
+// paneSplit divides paneAvail into a left and right pane width in the ratio
+// lw:rw.
+func (m Model) paneSplit(lw, rw int) (int, int) {
+	avail := m.paneAvail()
 	leftW := avail * lw / (lw + rw)
-	rightW := avail - leftW
-	left := panel(t, lTitle, lBorder, leftW, contentH, lBody)
-	right := panel(t, rTitle, rBorder, rightW, contentH, rBody)
-	return hjoin(col(1, contentH, t.Bg), left, col(1, contentH, t.Bg), right, col(1, contentH, t.Bg))
+	return leftW, avail - leftW
+}
+
+// twoPane lays out a list panel (full-width selection rows) and a detail panel
+// (inset content) with outer margins and an inter-pane gap.
+func (m Model) twoPane(t theme.Theme, contentH int, lTitle string, lBorder lipgloss.Color, lRows []string, lw int, rTitle string, rBorder lipgloss.Color, rBody []string, rw int) []string {
+	leftW, rightW := m.paneSplit(lw, rw)
+	left := listPanel(t, lTitle, lBorder, leftW, contentH, lRows)
+	right := boxPanel(t, rTitle, rBorder, rightW, contentH, rBody)
+	return hjoin(col(marginX, contentH, t.Bg), left, col(paneGap, contentH, t.Bg), right, col(marginX, contentH, t.Bg))
 }
 
 func (m Model) listBorder(t theme.Theme) lipgloss.Color {
@@ -353,23 +375,26 @@ func (m Model) hostsTab(t theme.Theme, contentH int) []string {
 	fh := m.filteredHosts()
 	hIdx := clampIdx(m.hostIdx, len(fh))
 
-	var lBody []string
+	leftW, rightW := m.paneSplit(3, 2)
+	innerW := leftW - 2
+	pad := bgpad(padX, t.Panel)
+
+	var lRows []string
 	if m.searchActive || m.query != "" {
-		lBody = append(lBody, stl(t.Warn, t.Panel).Render(" /"+m.query)+m.cur(t.Warn, t.Panel))
+		lRows = append(lRows, pad+stl(t.Warn, t.Panel).Render("/"+m.query)+m.cur(t.Warn, t.Panel))
 	}
-	innerW := m.hostsInnerW()
 	for i, h := range fh {
 		res, ok := m.probes[h.ID]
-		lBody = append(lBody, hostRow(t, h, res, ok, m.hostLive(h.ID), i == hIdx, innerW))
+		lRows = append(lRows, hostRow(t, h, res, ok, m.hostLive(h.ID), i == hIdx, innerW))
 	}
 	if len(fh) == 0 {
-		lBody = append(lBody, stl(t.Dim, t.Panel).Render(" no hosts match"))
+		lRows = append(lRows, pad+stl(t.Dim, t.Panel).Render("no hosts match"))
 	}
 
+	rw := boxContentW(rightW)
 	var rBody []string
 	if len(fh) > 0 {
 		h := fh[hIdx]
-		rw := m.hostsDetailInnerW()
 		res, ok := m.probes[h.ID]
 		statusTxt, statusRole := probeStatusText(res, ok)
 		rtt := "—"
@@ -377,30 +402,31 @@ func (m Model) hostsTab(t theme.Theme, contentH int) []string {
 			rtt = res.RTT.Round(time.Millisecond).String()
 		}
 		rBody = []string{
-			stl(t.Hi, t.Panel).Bold(true).Render(" " + h.Name),
+			stl(t.Hi, t.Panel).Bold(true).Render(h.Name),
 			"",
-			kv(t, " address", h.Conn(), t.Fg, rw),
-			kv(t, " identity", orDash(h.KeyPath), t.Fg, rw),
-			kv(t, " auth", authDetail(h), t.Fg, rw),
-			kv(t, " tags", orDash(tagStr(h)), t.Blue, rw),
-			kv(t, " source", h.Source, t.Dim, rw),
-			kv(t, " last seen", lastSeenStr(h.LastSeen), t.Dim, rw),
-			kv(t, " status", statusTxt, colorFor(t, statusRole), rw),
-			kv(t, " rtt", rtt, t.Dim, rw),
+			kv(t, "address", h.Conn(), t.Fg, rw),
+			kv(t, "identity", orDash(h.KeyPath), t.Fg, rw),
+			kv(t, "auth", authDetail(h), t.Fg, rw),
+			kv(t, "tags", orDash(tagStr(h)), t.Blue, rw),
+			kv(t, "source", h.Source, t.Dim, rw),
+			kv(t, "last seen", lastSeenStr(h.LastSeen), t.Dim, rw),
+			kv(t, "status", statusTxt, colorFor(t, statusRole), rw),
+			kv(t, "rtt", rtt, t.Dim, rw),
 		}
 		if m.hostLive(h.ID) {
-			rBody = append(rBody, "", stl(t.Ok, t.Panel).Render(" ● live session — enter reattaches"))
+			rBody = append(rBody, "", stl(t.Ok, t.Panel).Render("● live session — enter reattaches"))
 		}
 		rBody = append(rBody, "",
-			stl(t.Dim, t.Panel).Render(" ─────"),
-			stl(t.Hi, t.Panel).Render(" enter")+stl(t.Dim, t.Panel).Render(" connect · ")+
+			ruleIn(t, rw),
+			"",
+			stl(t.Hi, t.Panel).Render("enter")+stl(t.Dim, t.Panel).Render(" connect · ")+
 				stl(t.Hi, t.Panel).Render("a/e/d")+stl(t.Dim, t.Panel).Render(" add/edit/del"))
 	} else {
-		rBody = []string{stl(t.Dim, t.Panel).Render(" no match")}
+		rBody = []string{stl(t.Dim, t.Panel).Render("no match")}
 	}
 
 	title := "hosts · " + itoa(len(fh)) + "/" + itoa(len(m.storeHosts()))
-	return m.twoPane(t, contentH, title, m.listBorder(t), lBody, 3, "host", m.detailBorder(t), rBody, 2)
+	return m.twoPane(t, contentH, title, m.listBorder(t), lRows, 3, "host", m.detailBorder(t), rBody, 2)
 }
 
 // hostsEmpty renders the friendly empty state for a fresh vault.
@@ -415,29 +441,22 @@ func (m Model) hostsEmpty(t theme.Theme, contentH int) []string {
 		stl(t.Hi, t.Panel).Render("a") + stl(t.Dim, t.Panel).Render("   add a host"),
 		stl(t.Hi, t.Panel).Render("m") + stl(t.Dim, t.Panel).Render("   import ~/.ssh/config"),
 	}
-	box := panel(t, "hosts", t.Hi, pw, len(body)+2, body)
+	box := boxPanelAuto(t, "hosts", t.Hi, pw, body)
 	return centerInArea(box, m.w, contentH, t.Bg)
-}
-
-func (m Model) hostsInnerW() int {
-	avail := m.w - 3
-	return avail*3/5 - 2
-}
-func (m Model) hostsDetailInnerW() int {
-	avail := m.w - 3
-	return avail - avail*3/5 - 2
 }
 
 func hostRow(t theme.Theme, h store.Host, res probe.Result, known, live, sel bool, innerW int) string {
 	bg := t.Panel
-	if sel {
-		bg = t.Sel
-	}
 	mark := " "
 	nameFg := t.Fg
 	if sel {
+		bg = t.Sel
 		mark = "▸"
 		nameFg = t.Hi
+	}
+	avail := innerW - 2*padX
+	if avail < 10 {
+		avail = 10
 	}
 	liveSeg := bgpad(2, bg)
 	if live {
@@ -446,19 +465,25 @@ func hostRow(t theme.Theme, h store.Host, res probe.Result, known, live, sel boo
 	tags := tagStr(h)
 	statusTxt, statusRole := probeStatusText(res, known)
 	tagW := len([]rune(tags))
-	connW := innerW - (3 + 2 + 16 + 1 + tagW + 1 + 10)
+	const (
+		nameW   = 16
+		statusW = 10
+	)
+	// mark(2) + live(2) + name + 3 single-space gaps + tags + status; conn flexes.
+	connW := avail - (2 + 2 + nameW + 3 + tagW + statusW)
 	if connW < 6 {
 		connW = 6
 	}
-	return stl(t.Hi, bg).Render(" "+mark+" ") +
+	mid := stl(t.Hi, bg).Render(mark+" ") +
 		liveSeg +
-		rowSeg(h.Name, 16, nameFg, bg, false) +
+		rowSeg(h.Name, nameW, nameFg, bg, false) +
 		bgpad(1, bg) +
 		rowSeg(h.Conn(), connW, t.Dim, bg, false) +
 		bgpad(1, bg) +
 		rowSeg(tags, tagW, t.Blue, bg, false) +
 		bgpad(1, bg) +
-		rowSeg(statusTxt, 10, colorFor(t, statusRole), bg, true)
+		rowSeg(statusTxt, statusW, colorFor(t, statusRole), bg, true)
+	return selRow(innerW, bg, mid)
 }
 
 func tagStr(h store.Host) string {
@@ -475,35 +500,34 @@ func (m Model) projectsTab(t theme.Theme, contentH int) []string {
 		return m.projectsGate(t, contentH)
 	}
 	pIdx := clampIdx(m.projIdx, len(m.projects))
-	var lBody []string
-	dw := m.w - 3
-	lInner := dw*11/25 - 2
+	leftW, rightW := m.paneSplit(11, 14)
+	lInner := leftW - 2
+	var lRows []string
 	for i, p := range m.projects {
-		lBody = append(lBody, projRow(t, p, i == pIdx, lInner))
+		lRows = append(lRows, projRow(t, p, i == pIdx, lInner))
 	}
 	p := m.projects[pIdx]
-	rw := dw - dw*11/25 - 2
 	rBody := []string{
-		stl(t.Hi, t.Panel).Bold(true).Render(" " + p.Name),
-		stl(t.Dim, t.Panel).Render(" " + p.Desc),
+		stl(t.Hi, t.Panel).Bold(true).Render(p.Name),
+		stl(t.Dim, t.Panel).Render(p.Desc),
 		"",
-		stl(t.Dim, t.Panel).Render(" members"),
+		stl(t.Dim, t.Panel).Render("members"),
 	}
 	for _, mem := range p.Members {
-		rBody = append(rBody, stl(t.Fg, t.Panel).Render(" "+padTo2(mem.Name, 16))+stl(t.Dim, t.Panel).Render(mem.Role))
+		rBody = append(rBody, stl(t.Fg, t.Panel).Render(padTo2(mem.Name, 16))+stl(t.Dim, t.Panel).Render(mem.Role))
 	}
 	if len(p.Invites) > 0 {
-		rBody = append(rBody, "", stl(t.Dim, t.Panel).Render(" pending invites"))
+		rBody = append(rBody, "", stl(t.Dim, t.Panel).Render("pending invites"))
 		for _, e := range p.Invites {
-			rBody = append(rBody, stl(t.Warn, t.Panel).Render(" ○ "+padTo2(e, 20))+stl(t.Dim, t.Panel).Render("invited · awaiting accept"))
+			rBody = append(rBody, stl(t.Warn, t.Panel).Render("○ "+padTo2(e, 20))+stl(t.Dim, t.Panel).Render("invited · awaiting accept"))
 		}
 	}
 	rBody = append(rBody, "",
-		stl(t.Hi, t.Panel).Render(" i")+stl(t.Dim, t.Panel).Render(" invite member · ")+
+		stl(t.Hi, t.Panel).Render("i")+stl(t.Dim, t.Panel).Render(" invite member · ")+
 			stl(t.Hi, t.Panel).Render("enter")+stl(t.Dim, t.Panel).Render(" filter hosts to project"))
-	_ = rw
+	_ = rightW
 	title := "projects · " + itoa(len(m.projects))
-	return m.twoPane(t, contentH, title, m.listBorder(t), lBody, 11, "project", m.detailBorder(t), rBody, 14)
+	return m.twoPane(t, contentH, title, m.listBorder(t), lRows, 11, "project", m.detailBorder(t), rBody, 14)
 }
 
 func projRow(t theme.Theme, p data.Project, sel bool, innerW int) string {
@@ -515,15 +539,21 @@ func projRow(t theme.Theme, p data.Project, sel bool, innerW int) string {
 		mark = "▸"
 		nameFg = t.Hi
 	}
+	avail := innerW - 2*padX
+	if avail < 8 {
+		avail = 8
+	}
+	const nameW = 18
 	meta := itoa(p.Hosts) + " hosts · " + itoa(len(p.Members)) + " members"
-	metaW := innerW - (3 + 18 + 1)
+	metaW := avail - (2 + nameW + 1)
 	if metaW < 4 {
 		metaW = 4
 	}
-	return stl(t.Hi, bg).Render(" "+mark+" ") +
-		rowSeg(p.Name, 18, nameFg, bg, false) +
+	mid := stl(t.Hi, bg).Render(mark+" ") +
+		rowSeg(p.Name, nameW, nameFg, bg, false) +
 		bgpad(1, bg) +
 		rowSeg(meta, metaW, t.Dim, bg, false)
+	return selRow(innerW, bg, mid)
 }
 
 func (m Model) projectsGate(t theme.Theme, contentH int) []string {
@@ -541,7 +571,7 @@ func (m Model) projectsGate(t theme.Theme, contentH int) []string {
 		stl(t.Hi, t.Panel).Render("enter") + stl(t.Dim, t.Panel).Render(" sign in   ·   ") +
 			stl(t.Dim, t.Panel).Render("you're using Wharf locally"),
 	}
-	box := panel(t, "projects · sign in required", t.Warn, pw, len(body)+2, body)
+	box := boxPanelAuto(t, "projects · sign in required", t.Warn, pw, body)
 	return centerInArea(box, m.w, contentH, t.Bg)
 }
 
@@ -551,29 +581,29 @@ func (m Model) keysTab(t theme.Theme, contentH int) []string {
 		return m.keysEmpty(t, contentH)
 	}
 	kIdx := clampIdx(m.keyIdx, len(m.keyInfos))
-	dw := m.w - 3
-	lInner := dw*11/25 - 2
-	var lBody []string
+	leftW, rightW := m.paneSplit(11, 14)
+	lInner := leftW - 2
+	var lRows []string
 	for i, k := range m.keyInfos {
-		lBody = append(lBody, keyRow(t, k, i == kIdx, lInner))
+		lRows = append(lRows, keyRow(t, k, i == kIdx, lInner))
 	}
 	k := m.keyInfos[kIdx]
-	rw := dw - dw*11/25 - 2
+	rw := boxContentW(rightW)
 	enc, encC := "no", t.Ok
 	if k.Encrypted {
 		enc, encC = "yes", t.Warn
 	}
 	rBody := []string{
-		stl(t.Hi, t.Panel).Bold(true).Render(" " + k.Name),
+		stl(t.Hi, t.Panel).Bold(true).Render(k.Name),
 		"",
-		kv(t, " type", orDash(k.Type), t.Fg, rw),
-		kv(t, " fingerprint", orDash(k.Fingerprint), t.Dim, rw),
-		kv(t, " path", orDash(k.Path), t.Fg, rw),
-		kv(t, " encrypted", enc, encC, rw),
+		kv(t, "type", orDash(k.Type), t.Fg, rw),
+		kv(t, "fingerprint", orDash(k.Fingerprint), t.Dim, rw),
+		kv(t, "path", orDash(k.Path), t.Fg, rw),
+		kv(t, "encrypted", enc, encC, rw),
 		"",
-		stl(t.Hi, t.Panel).Render(" g") + stl(t.Dim, t.Panel).Render(" generate a new ed25519 key"),
+		stl(t.Hi, t.Panel).Render("g") + stl(t.Dim, t.Panel).Render(" generate a new ed25519 key"),
 	}
-	return m.twoPane(t, contentH, "identities · "+itoa(len(m.keyInfos)), m.listBorder(t), lBody, 11, "identity", m.detailBorder(t), rBody, 14)
+	return m.twoPane(t, contentH, "identities · "+itoa(len(m.keyInfos)), m.listBorder(t), lRows, 11, "identity", m.detailBorder(t), rBody, 14)
 }
 
 func (m Model) keysEmpty(t theme.Theme, contentH int) []string {
@@ -586,7 +616,7 @@ func (m Model) keysEmpty(t theme.Theme, contentH int) []string {
 		"",
 		stl(t.Hi, t.Panel).Render("g") + stl(t.Dim, t.Panel).Render("   generate an ed25519 key"),
 	}
-	box := panel(t, "identities", t.Hi, pw, len(body)+2, body)
+	box := boxPanelAuto(t, "identities", t.Hi, pw, body)
 	return centerInArea(box, m.w, contentH, t.Bg)
 }
 
@@ -599,22 +629,28 @@ func keyRow(t theme.Theme, k keys.KeyInfo, sel bool, innerW int) string {
 		mark = "▸"
 		nameFg = t.Hi
 	}
+	avail := innerW - 2*padX
+	if avail < 8 {
+		avail = 8
+	}
+	const nameW = 20
 	badge := ""
 	badgeC := t.Dim
 	if k.Encrypted {
 		badge, badgeC = "encrypted", t.Warn
 	}
 	badgeW := len([]rune(badge))
-	typeW := innerW - (3 + 20 + 1 + badgeW + 1)
+	typeW := avail - (2 + nameW + 1 + 1 + badgeW)
 	if typeW < 4 {
 		typeW = 4
 	}
-	return stl(t.Hi, bg).Render(" "+mark+" ") +
-		rowSeg(k.Name, 20, nameFg, bg, false) +
+	mid := stl(t.Hi, bg).Render(mark+" ") +
+		rowSeg(k.Name, nameW, nameFg, bg, false) +
 		bgpad(1, bg) +
 		rowSeg(orDash(k.Type), typeW, t.Dim, bg, false) +
 		bgpad(1, bg) +
 		rowSeg(badge, badgeW, badgeC, bg, true)
+	return selRow(innerW, bg, mid)
 }
 
 // settingsTab renders the centered settings panel from store.Settings.
@@ -624,6 +660,12 @@ func (m Model) settingsTab(t theme.Theme, contentH int) []string {
 		pw = m.w - 6
 	}
 	inner := pw - 2
+	avail := inner - 2*padX
+	if avail < 8 {
+		avail = 8
+	}
+	const valW = 16
+	pad := bgpad(padX, t.Panel)
 	var body []string
 	for i, d := range settingDefs {
 		sel := i == m.setIdx
@@ -653,15 +695,17 @@ func (m Model) settingsTab(t theme.Theme, contentH int) []string {
 				val, vc = "[off]", t.Dim
 			}
 		}
-		row := stl(t.Hi, bg).Render(" "+mark+" ") +
-			rowSeg(d.label, inner-3-16, labelFg, bg, false) +
-			rowSeg(val, 16, vc, bg, true)
-		body = append(body, row)
+		mid := stl(t.Hi, bg).Render(mark+" ") +
+			rowSeg(d.label, avail-2-valW, labelFg, bg, false) +
+			rowSeg(val, valW, vc, bg, true)
+		body = append(body, selRow(inner, bg, mid))
 	}
 	body = append(body, "",
-		stl(t.Hi, t.Panel).Render(" enter")+stl(t.Dim, t.Panel).Render(" toggle / cycle / sign in · theme applies live"))
-	box := panel(t, "settings", t.Hi, pw, len(body)+2, body)
-	return centerInArea(box, m.w, contentH, t.Bg)
+		pad+ruleIn(t, avail),
+		"",
+		pad+stl(t.Hi, t.Panel).Render("enter")+stl(t.Dim, t.Panel).Render(" toggle / cycle / sign in · theme applies live"))
+	box := listPanel(t, "settings", t.Hi, pw, len(body)+4, body)
+	return topInArea(box, m.w, contentH, t.Bg)
 }
 
 // settingOn reports the current boolean setting value.
@@ -705,18 +749,30 @@ func (m Model) sessionView(t theme.Theme) []string {
 			stl(t.Ok, t.Bg).Render("● connected")+" "),
 	}
 
-	contentH := m.h - len(header) - len(hint)
+	// One blank margin row between the header rule and the terminal panel.
+	contentH := m.h - len(header) - len(hint) - 1
 	if contentH < 3 {
 		contentH = 3
 	}
 
+	paneW := m.w - 2*marginX
+	if paneW < 4 {
+		paneW = 4
+	}
+	inner := boxContentW(paneW)
+
 	s := m.sessions[m.active]
-	inner := m.w - 3 - 2
 	var body []string
 	if s != nil {
+		// Visible scrollback: interior minus borders, the two padding rows and
+		// the live prompt line.
+		maxLines := contentH - 4 - 1
+		if maxLines < 1 {
+			maxLines = 1
+		}
 		start := 0
-		if len(s.lines) > contentH-3 {
-			start = len(s.lines) - (contentH - 3)
+		if len(s.lines) > maxLines {
+			start = len(s.lines) - maxLines
 		}
 		for _, ln := range s.lines[start:] {
 			seg := ""
@@ -734,9 +790,10 @@ func (m Model) sessionView(t theme.Theme) []string {
 	if s != nil {
 		title = "ssh · " + s.host.Conn()
 	}
-	pane := hjoin(col(1, contentH, t.Bg), panel(t, title, t.Hi, m.w-3, contentH, body), col(1, contentH, t.Bg))
+	pane := hjoin(col(marginX, contentH, t.Bg), boxPanel(t, title, t.Hi, paneW, contentH, body), col(marginX, contentH, t.Bg))
 
 	out := append([]string{}, header...)
+	out = append(out, bgpad(m.w, t.Bg))
 	out = append(out, pane...)
 	out = append(out, hint...)
 	return out
@@ -787,7 +844,7 @@ func (m Model) hintBar(t theme.Theme) []string {
 	b.WriteString(" ")
 	for i, h := range hints {
 		if i > 0 {
-			b.WriteString(bgpad(2, t.Bg))
+			b.WriteString(bgpad(hintGap, t.Bg))
 		}
 		b.WriteString(stl(t.Hi, t.Bg).Render(h.k) + stl(t.Dim, t.Bg).Render(" "+h.l))
 	}
@@ -811,7 +868,7 @@ func (m Model) inviteView(t theme.Theme) []string {
 		stl(t.Hi, t.Panel).Render("enter") + stl(t.Dim, t.Panel).Render(" send invite · ") +
 			stl(t.Hi, t.Panel).Render("esc") + stl(t.Dim, t.Panel).Render(" cancel"),
 	}
-	box := panel(t, "invite to "+p.Name, t.Hi, pw, len(body)+2, body)
+	box := boxPanelAuto(t, "invite to "+p.Name, t.Hi, pw, body)
 	return centerInArea(box, m.w, m.h, t.Bg)
 }
 
@@ -834,16 +891,38 @@ func (m Model) helpView(t theme.Theme) []string {
 		{"ctrl+q", "quit wharf"},
 		{"?", "toggle this help"},
 	}
-	pw := 62
+	pw := 96
 	if pw > m.w-6 {
 		pw = m.w - 6
 	}
+	cw := boxContentW(pw)
+	const keyW = 10
+	gap := hintGap
+	cellW := (cw - gap) / 2
+	if cellW < keyW+4 {
+		cellW = keyW + 4
+	}
+	half := (len(rows) + 1) / 2
 	var body []string
-	for _, r := range rows {
-		body = append(body, stl(t.Hi, t.Panel).Render(padTo2(r[0], 12))+stl(t.Dim, t.Panel).Render(r[1]))
+	for i := 0; i < half; i++ {
+		left := helpCell(t, rows[i], keyW, cellW)
+		right := ""
+		if j := i + half; j < len(rows) {
+			right = helpCell(t, rows[j], keyW, cellW)
+		}
+		body = append(body, left+bgpad(gap, t.Panel)+right)
 	}
 	body = append(body, "",
+		ruleIn(t, cw),
+		"",
 		stl(t.Dim, t.Panel).Render("Wharf is local-first — sign in only to sync & use projects."))
-	box := panel(t, "keybindings", t.Hi, pw, len(body)+2, body)
+	box := boxPanelAuto(t, "keybindings", t.Hi, pw, body)
 	return centerInArea(box, m.w, m.h, t.Bg)
+}
+
+// helpCell renders one key/label pair padded to cellW for the help grid.
+func helpCell(t theme.Theme, r [2]string, keyW, cellW int) string {
+	key := stl(t.Hi, t.Panel).Render(padTo2(r[0], keyW))
+	label := stl(t.Dim, t.Panel).Render(trunc(r[1], cellW-keyW))
+	return padTo(key+label, cellW, t.Panel)
 }

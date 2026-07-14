@@ -19,7 +19,7 @@ func (m Model) unlockView(t theme.Theme) []string {
 
 	title, border, body := m.unlockBody(t)
 
-	box := panel(t, title, colorFor(t, border), pw, len(body)+2, body)
+	box := boxPanelAuto(t, title, colorFor(t, border), pw, body)
 	block := []string{logo, subtitle, ""}
 	block = append(block, box...)
 	return centerInArea(block, m.w, m.h, t.Bg)
@@ -165,11 +165,12 @@ func formatRecoveryCode(code string) string {
 	return strings.Join(parts, "-")
 }
 
-// panelInner is the interior width of a centered gate panel.
+// panelInner is the usable content width of a centered gate / modal panel
+// (interior minus the horizontal padding on both sides).
 func panelInner(w int) int {
 	pw := 66
 	if pw > w-6 {
 		pw = w - 6
 	}
-	return pw - 2
+	return boxContentW(pw)
 }
