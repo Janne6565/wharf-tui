@@ -1,0 +1,23 @@
+# Global defaults applied to every host (an explicit user-written wildcard).
+Host *
+    ForwardAgent yes
+
+Host web
+    HostName web.example.com
+    User deploy
+    Port 2222
+    IdentityFile ~/.ssh/id_web
+
+# One block, several concrete aliases.
+Host db1 db2
+    HostName db.example.com
+    User admin
+
+# No HostName: the address falls back to the alias itself.
+Host localonly
+
+# Wildcard block: skipped and reported.
+Host *.internal
+    User internal
+
+Include included.conf

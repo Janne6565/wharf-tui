@@ -3,7 +3,11 @@
 // still be connected to.
 package probe
 
-import "time"
+import (
+	"net"
+	"strconv"
+	"time"
+)
 
 // Status is the traffic-light shown next to a host.
 type Status int
@@ -29,5 +33,22 @@ type Result struct {
 
 // Dial TCP-connects to addr:port within timeout and classifies the result.
 func Dial(addr string, port int, timeout time.Duration) Result {
-	panic("probe: unimplemented")
+	target := net.JoinHostPort(addr, strconv.Itoa(port))
+
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", target, timeout)
+	rtt := time.Since(start)
+	if err != nil {
+		// Refused, unreachable, or timed out — all "offline" for the UI. RTT is
+		// meaningless without a connection, so we report zero.
+		return Result{Status: StatusOffline, RTT: 0}
+	}
+	// We only care that the port is reachable; drop the connection immediately.
+	conn.Close()
+
+	status := StatusOnline
+	if rtt > DegradedRTT {
+		status = StatusDegraded
+	}
+	return Result{Status: status, RTT: rtt}
 }
