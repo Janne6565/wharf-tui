@@ -3,10 +3,15 @@ package ui
 import (
 	"strings"
 
-	"github.com/Janne6565/wharf-tui/internal/data"
+	"github.com/Janne6565/wharf-tui/internal/probe"
+	"github.com/Janne6565/wharf-tui/internal/sshx"
+	"github.com/Janne6565/wharf-tui/internal/store"
 	"github.com/Janne6565/wharf-tui/internal/theme"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// toastTTL is how many ticks (~120ms each) a status toast stays visible.
+const toastTTL = 40
 
 // Update is the Bubble Tea reducer: it routes messages to per-screen handlers.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -17,16 +22,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tickMsg:
 		m.tick++
+		if m.toast != "" && m.tick-m.toastAt > toastTTL {
+			m.toast, m.toastRole = "", ""
+		}
+		// Suspend the ticker while the TTY is handed to a session so ticks don't
+		// pile up during the takeover; detachedMsg restarts it.
+		if m.attaching {
+			return m, nil
+		}
 		return m, tickCmd()
 	case authDoneMsg:
 		if m.screen == scAuth && m.authStep == 2 {
 			m.signedIn = true
 			m.email = "deniz@wharf.sh"
 			m.screen = scMain
+			m.tab = m.postAuthTab
 			m.authStep = 0
 			m.code = ""
 		}
 		return m, nil
+
+	// vault gate results.
+	case vaultCreatedMsg, vaultOpenedMsg, vaultRecoveredMsg, vaultResetMsg:
+		return m.handleVaultMsg(msg)
+
+	// data-layer results.
+	case probeResultMsg:
+		if m.probes == nil {
+			m.probes = map[string]probe.Result{}
+		}
+		m.probes[msg.HostID] = msg.Result
+		return m, nil
+	case keysScannedMsg:
+		if msg.err != nil {
+			return m.setToast("key scan failed: "+msg.err.Error(), "err"), nil
+		}
+		m.keyInfos = msg.keys
+		m.keyIdx = clampIdx(m.keyIdx, len(m.keyInfos))
+		return m, nil
+	case keyGeneratedMsg:
+		return m.handleKeyGenerated(msg)
+	case importDoneMsg:
+		return m.handleImportDone(msg)
+
+	// session engine results and prompts.
+	case dialDoneMsg:
+		return m.handleDialDone(msg)
+	case detachedMsg:
+		return m.handleDetached(msg)
+	case sshx.HostKeyPromptMsg:
+		return m.handleHostKeyPrompt(msg)
+	case sshx.SecretPromptMsg:
+		return m.handleSecretPrompt(msg)
+	case sshx.SessionEndedMsg:
+		return m.handleSessionEnded(msg)
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -35,8 +85,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := k.String()
+	// ctrl+c is no longer a quit; while attached it's a byte to the remote, and
+	// in the TUI it does nothing.
 	if key == "ctrl+c" {
-		return m, tea.Quit
+		return m, nil
+	}
+	if key == "ctrl+q" {
+		return m.requestQuit()
 	}
 	// Help overlay swallows everything until dismissed.
 	if m.helpOpen {
@@ -45,7 +100,13 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// Real-mode modals take priority over the screen underneath.
+	if m.modal != modalNone {
+		return m.modalKey(k, key)
+	}
 	switch m.screen {
+	case scUnlock:
+		return m.unlockKey(key)
 	case scAuth:
 		return m.authKey(key)
 	case scMain:
@@ -59,7 +120,7 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// authKey drives the login screen: sign in, or skip to a local-only vault.
+// authKey drives the simulated account sign-in (device code).
 func (m Model) authKey(key string) (tea.Model, tea.Cmd) {
 	switch m.authStep {
 	case 0:
@@ -67,8 +128,16 @@ func (m Model) authKey(key string) (tea.Model, tea.Cmd) {
 		case "enter":
 			m.authStep = 1
 			m.code = ""
-		case "l", "L": // skip login — use the local vault on this machine only
-			m.screen = scMain
+		case "l", "L": // demo: skip login — use the local sample vault
+			if m.demo {
+				m.screen = scMain
+			}
+		case "esc":
+			// real mode: back out of an on-demand sign-in to the dashboard.
+			if !m.demo {
+				m.screen = scMain
+				m.tab = m.postAuthTab
+			}
 		case "?":
 			m.helpOpen = true
 		}
@@ -130,14 +199,21 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		m.helpOpen = true
 		return m, nil
 	case "q":
-		// Lock: return to the login screen. The local vault is untouched;
-		// signing back in (or skipping again) resumes from here.
-		m.signedIn = false
-		m.email = ""
-		m.screen = scAuth
-		m.authStep = 0
-		m.code = ""
-		return m, nil
+		if m.demo {
+			// Demo: sign out back to the simulated login screen.
+			m.signedIn = false
+			m.email = ""
+			m.screen = scAuth
+			m.authStep = 0
+			m.code = ""
+			return m, nil
+		}
+		return m.lock()
+	}
+
+	// alt+1..9 reattaches a live session from anywhere on the dashboard.
+	if strings.HasPrefix(key, "alt+") && len(key) == 5 && key[4] >= '1' && key[4] <= '9' {
+		return m.reattachByIndex(int(key[4] - '1'))
 	}
 
 	if key == "esc" && m.query != "" {
@@ -175,6 +251,30 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 			m.inviteOpen = true
 			m.inviteEmail = ""
 		}
+	case "a":
+		if m.tab == 0 && !m.demo {
+			return m.openHostForm(""), nil
+		}
+	case "e":
+		if m.tab == 0 && !m.demo {
+			return m.editSelectedHost()
+		}
+	case "d":
+		if m.tab == 0 && !m.demo {
+			return m.deleteSelectedHost()
+		}
+	case "m":
+		if m.tab == 0 && !m.demo {
+			return m.setToast("importing ~/.ssh/config…", "ok"), m.importCmd()
+		}
+	case "R":
+		if m.tab == 0 && !m.demo {
+			return m.setToast("re-probing hosts…", "ok"), m.probeCmds()
+		}
+	case "g":
+		if m.tab == 2 && !m.demo {
+			return m.openKeygenForm(), nil
+		}
 	case "enter", " ":
 		return m.mainEnter()
 	}
@@ -190,12 +290,14 @@ func (m Model) mainEnter() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		h := fh[clampIdx(m.hostIdx, len(fh))]
-		if h.Status != "offline" {
-			m = m.connect(h)
+		if m.demo {
+			return m.connect(h), nil
 		}
+		return m.startConnect(h)
 	case 1: // projects
 		if !m.signedIn {
 			// Gate: projects are an online feature — enter starts sign-in.
+			m.postAuthTab = 1
 			m.screen = scAuth
 			m.authStep = 0
 			m.code = ""
@@ -207,7 +309,7 @@ func (m Model) mainEnter() (tea.Model, tea.Cmd) {
 		m.searchActive = true
 		m.hostIdx = 0
 	case 3: // settings → toggle/cycle
-		m = m.toggleSetting()
+		return m.toggleSetting()
 	}
 	return m, nil
 }
@@ -278,23 +380,62 @@ func (m *Model) move(d int) {
 	case 1:
 		m.projIdx = clampIdx(m.projIdx+d, len(m.projects))
 	case 2:
-		m.keyIdx = clampIdx(m.keyIdx+d, len(m.keys))
+		m.keyIdx = clampIdx(m.keyIdx+d, len(m.keyInfos))
 	case 3:
 		m.setIdx = clampIdx(m.setIdx+d, len(settingDefs))
 	}
 }
 
-func (m Model) toggleSetting() Model {
+// toggleSetting toggles or actions the selected settings row and persists.
+func (m Model) toggleSetting() (tea.Model, tea.Cmd) {
 	def := settingDefs[clampIdx(m.setIdx, len(settingDefs))]
-	if def.key == "theme" {
-		m.themeName = theme.Next(m.themeName)
-	} else {
-		m.settings[def.key] = !m.settings[def.key]
+	switch def.key {
+	case "theme":
+		next := theme.Next(m.themeName)
+		m.themeName = next
+		m.settings.Theme = next
+		return m.persistSettings(), nil
+	case "account":
+		if m.signedIn {
+			m.signedIn = false
+			m.email = ""
+			return m, nil
+		}
+		m.postAuthTab = 3
+		m.screen = scAuth
+		m.authStep = 0
+		m.code = ""
+		return m, nil
+	case "agent":
+		m.settings.Agent = !m.settings.Agent
+	case "keepalive":
+		m.settings.Keepalive = !m.settings.Keepalive
+	case "telemetry":
+		m.settings.Telemetry = !m.settings.Telemetry
+	}
+	return m.persistSettings(), nil
+}
+
+// persistSettings writes the working settings through the store (best-effort).
+func (m Model) persistSettings() Model {
+	if m.st != nil {
+		m.st.SetSettings(m.settings)
+		_ = m.st.Save()
 	}
 	return m
 }
 
-func (m Model) connect(h data.Host) Model {
+// setToast raises a transient status line.
+func (m Model) setToast(text, role string) Model {
+	m.toast = text
+	m.toastRole = role
+	m.toastAt = m.tick
+	return m
+}
+
+// --- demo simulated session -------------------------------------------------
+
+func (m Model) connect(h store.Host) Model {
 	if m.sessions[h.Name] == nil {
 		m.sessions[h.Name] = &session{host: h, lines: initLines(h)}
 	}
@@ -312,8 +453,7 @@ func (m Model) connect(h data.Host) Model {
 	return m
 }
 
-// exec runs the (simulated) shell command in the active session. This is the
-// seam where a real x/crypto/ssh channel will replace the canned responses.
+// exec runs the simulated shell command in the active demo session.
 func (m Model) exec() {
 	s := m.sessions[m.active]
 	if s == nil {
@@ -343,10 +483,10 @@ func (m Model) exec() {
 	s.input = ""
 }
 
-func initLines(h data.Host) []line {
+func initLines(h store.Host) []line {
 	return []line{
 		{text: "Connecting to " + h.Conn() + " …", role: "dim"},
-		{text: "✓ " + h.Key + " accepted · host key verified", role: "ok"},
+		{text: "✓ host key verified · agent authentication accepted", role: "ok"},
 		{text: "Welcome to Ubuntu 24.04.2 LTS (" + h.Name + ")", role: "fg"},
 		{text: "Last login: Fri Jul 10 09:12:44 2026 from 84.112.9.20", role: "dim"},
 		{text: "", role: "fg"},

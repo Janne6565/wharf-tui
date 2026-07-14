@@ -3,8 +3,12 @@ package ui
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Janne6565/wharf-tui/internal/data"
+	"github.com/Janne6565/wharf-tui/internal/keys"
+	"github.com/Janne6565/wharf-tui/internal/probe"
+	"github.com/Janne6565/wharf-tui/internal/store"
 	"github.com/Janne6565/wharf-tui/internal/theme"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -19,6 +23,10 @@ func (m Model) View() string {
 	switch {
 	case m.helpOpen:
 		lines = m.helpView(t)
+	case m.modal != modalNone:
+		lines = m.modalView(t)
+	case m.screen == scUnlock:
+		lines = m.unlockView(t)
 	case m.screen == scAuth:
 		lines = m.authView(t)
 	case m.inviteOpen:
@@ -54,14 +62,44 @@ func colorFor(t theme.Theme, role string) lipgloss.Color {
 	}
 }
 
-func statusColor(t theme.Theme, s string) lipgloss.Color {
-	switch s {
-	case "online":
-		return t.Ok
-	case "offline":
-		return t.Err
+// probeStatusText maps an (optional) probe result to a status label and role.
+func probeStatusText(res probe.Result, known bool) (string, string) {
+	if !known {
+		return "? unknown", "dim"
+	}
+	switch res.Status {
+	case probe.StatusOnline:
+		return "● online", "ok"
+	case probe.StatusDegraded:
+		return "● degraded", "warn"
 	default:
-		return t.Dim
+		return "● offline", "err"
+	}
+}
+
+// orDash renders "—" for an empty value.
+func orDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
+// lastSeenStr renders a coarse "time ago" for a host's last connection.
+func lastSeenStr(ts time.Time) string {
+	if ts.IsZero() {
+		return "never"
+	}
+	d := time.Since(ts)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return itoa(int(d.Minutes())) + "m ago"
+	case d < 24*time.Hour:
+		return itoa(int(d.Hours())) + "h ago"
+	default:
+		return itoa(int(d.Hours()/24)) + "d ago"
 	}
 }
 
@@ -109,27 +147,31 @@ func centerInArea(block []string, w, areaH int, bg lipgloss.Color) []string {
 	return vpad(hcenter(block, w, bg), w, areaH, bg, true)
 }
 
-// --- auth / login -----------------------------------------------------------
+// --- auth / login (simulated account) ---------------------------------------
 
 func (m Model) authView(t theme.Theme) []string {
-	logo := bold(t.Hi, t.Bg).Render("⌢ wharf") + m.cur(t.Hi, t.Bg)
-	subtitle := stl(t.Dim, t.Bg).Render("your fleet, one terminal · v0.5.0")
+	logo := bold(t.Hi, t.Bg).Render("⚓ wharf") + m.cur(t.Hi, t.Bg)
+	subtitle := stl(t.Dim, t.Bg).Render("your fleet, one terminal · v1.0.0")
 
 	pw := 68
 	if pw > m.w-6 {
 		pw = m.w - 6
 	}
-	inner := pw - 2
 
 	var body []string
 	switch m.authStep {
 	case 0:
+		intro := stl(t.Fg, t.Panel).Render("Sign in to sync your vault across machines and use team projects.")
 		body = []string{
-			stl(t.Fg, t.Panel).Render("Sign in to sync your vault across machines and use team projects."),
+			intro,
 			stl(t.Dim, t.Panel).Render("Authentication happens in your browser — Google, GitHub or email."),
 			"",
 			stl(t.Hi, t.Panel).Render("enter") + stl(t.Dim, t.Panel).Render("  open browser & get a device code"),
-			stl(t.Hi, t.Panel).Render("l") + stl(t.Dim, t.Panel).Render("      skip · use Wharf locally on this machine"),
+		}
+		if m.demo {
+			body = append(body, stl(t.Hi, t.Panel).Render("l")+stl(t.Dim, t.Panel).Render("      skip · use Wharf locally on this machine"))
+		} else {
+			body = append(body, stl(t.Hi, t.Panel).Render("esc")+stl(t.Dim, t.Panel).Render("    back to your local vault"))
 		}
 	case 1:
 		body = []string{
@@ -145,7 +187,7 @@ func (m Model) authView(t theme.Theme) []string {
 	case 2:
 		body = []string{
 			stl(t.Warn, t.Panel).Render(m.spinner() + " verifying device code…"),
-			stl(t.Dim, t.Panel).Render("exchanging for session token · unlocking vault"),
+			stl(t.Dim, t.Panel).Render("exchanging for session token · unlocking sync"),
 		}
 	}
 
@@ -155,7 +197,6 @@ func (m Model) authView(t theme.Theme) []string {
 	block := []string{logo, subtitle, ""}
 	block = append(block, box...)
 	block = append(block, "", footer)
-	_ = inner
 	return centerInArea(block, m.w, m.h, t.Bg)
 }
 
@@ -180,8 +221,10 @@ func (m Model) codeLine(t theme.Theme) string {
 
 func (m Model) mainView(t theme.Theme) []string {
 	header := m.header(t, m.dashTabs(t))
+	strip := m.sessionStrip(t)
+	toast := m.toastLine(t)
 	hint := m.hintBar(t)
-	contentH := m.h - len(header) - len(hint)
+	contentH := m.h - len(header) - len(strip) - len(toast) - len(hint)
 	if contentH < 3 {
 		contentH = 3
 	}
@@ -197,20 +240,25 @@ func (m Model) mainView(t theme.Theme) []string {
 		content = m.settingsTab(t, contentH)
 	}
 	out := append([]string{}, header...)
+	out = append(out, strip...)
 	out = append(out, content...)
+	out = append(out, toast...)
 	out = append(out, hint...)
 	return out
 }
 
-// header renders the two-line top bar (badge + tabs + account status).
+// header renders the two-line top bar (badge + tabs + account/vault status).
 func (m Model) header(t theme.Theme, tabs string) []string {
-	badge := bold(t.Ink, t.Hi).Render(" ⌢ wharf ")
+	badge := bold(t.Ink, t.Hi).Render(" ⚓ wharf ")
 	left := badge + bgpad(1, t.Bg) + tabs
 	var right string
-	if m.signedIn {
-		right = stl(t.Dim, t.Bg).Render(m.email+" · ") + stl(t.Ok, t.Bg).Render("● synced 12s ago")
-	} else {
+	switch {
+	case m.signedIn:
+		right = stl(t.Dim, t.Bg).Render(m.email+" · ") + stl(t.Ok, t.Bg).Render("● synced")
+	case m.demo:
 		right = stl(t.Dim, t.Bg).Render("○ local vault · ") + stl(t.Hi, t.Bg).Render("q") + stl(t.Dim, t.Bg).Render(" sign in")
+	default:
+		right = stl(t.Ok, t.Bg).Render("● vault open · ") + stl(t.Hi, t.Bg).Render("q") + stl(t.Dim, t.Bg).Render(" lock")
 	}
 	return []string{barLine(t, m.w, " "+left, right+" "), rule(t, m.w)}
 }
@@ -226,6 +274,39 @@ func (m Model) dashTabs(t theme.Theme) string {
 		}
 	}
 	return b.String()
+}
+
+// sessionStrip lists live SSH sessions (real mode only).
+func (m Model) sessionStrip(t theme.Theme) []string {
+	if m.demo || m.mgr == nil {
+		return nil
+	}
+	sessions := m.mgr.List()
+	if len(sessions) == 0 {
+		return nil
+	}
+	left := " " + stl(t.Dim, t.Bg).Render("live ")
+	for i, s := range sessions {
+		if i >= 9 {
+			break
+		}
+		label := " " + itoa(i+1) + ":" + s.Host().Name + " "
+		left += stl(t.Hi, t.Sel).Render(label) + bgpad(1, t.Bg)
+	}
+	right := stl(t.Dim, t.Bg).Render("alt+# reattach") + " "
+	return []string{barLine(t, m.w, left, right)}
+}
+
+// toastLine renders the transient status toast, or nothing.
+func (m Model) toastLine(t theme.Theme) []string {
+	if m.toast == "" {
+		return nil
+	}
+	c := t.Ok
+	if m.toastRole == "err" {
+		c = t.Err
+	}
+	return []string{barLine(t, m.w, " "+stl(c, t.Bg).Render("› "+m.toast), "")}
 }
 
 // twoPane lays out a list panel and a detail panel with 1-col margins/gap.
@@ -255,48 +336,86 @@ func (m Model) detailBorder(t theme.Theme) lipgloss.Color {
 	return t.Border
 }
 
-// hostsTab renders the hosts list + host detail.
+// hostLive reports whether a live session exists for the host.
+func (m Model) hostLive(id string) bool {
+	if m.mgr == nil {
+		return false
+	}
+	s := m.mgr.Get(id)
+	return s != nil && s.Alive()
+}
+
+// hostsTab renders the hosts list + host detail (or an empty state).
 func (m Model) hostsTab(t theme.Theme, contentH int) []string {
+	if len(m.storeHosts()) == 0 && m.query == "" {
+		return m.hostsEmpty(t, contentH)
+	}
 	fh := m.filteredHosts()
 	hIdx := clampIdx(m.hostIdx, len(fh))
 
-	// list body: optional search line, then rows.
 	var lBody []string
 	if m.searchActive || m.query != "" {
 		lBody = append(lBody, stl(t.Warn, t.Panel).Render(" /"+m.query)+m.cur(t.Warn, t.Panel))
 	}
 	innerW := m.hostsInnerW()
 	for i, h := range fh {
-		lBody = append(lBody, hostRow(t, h, i == hIdx, innerW))
+		res, ok := m.probes[h.ID]
+		lBody = append(lBody, hostRow(t, h, res, ok, m.hostLive(h.ID), i == hIdx, innerW))
 	}
 	if len(fh) == 0 {
 		lBody = append(lBody, stl(t.Dim, t.Panel).Render(" no hosts match"))
 	}
 
-	// detail body.
 	var rBody []string
 	if len(fh) > 0 {
 		h := fh[hIdx]
 		rw := m.hostsDetailInnerW()
+		res, ok := m.probes[h.ID]
+		statusTxt, statusRole := probeStatusText(res, ok)
+		rtt := "—"
+		if ok && res.Status != probe.StatusOffline && res.RTT > 0 {
+			rtt = res.RTT.Round(time.Millisecond).String()
+		}
 		rBody = []string{
 			stl(t.Hi, t.Panel).Bold(true).Render(" " + h.Name),
 			"",
 			kv(t, " address", h.Conn(), t.Fg, rw),
-			kv(t, " project", h.Project, t.Mag, rw),
-			kv(t, " identity", h.Key, t.Fg, rw),
-			kv(t, " tags", tagStr(h), t.Blue, rw),
-			kv(t, " last", h.Last, t.Dim, rw),
-			kv(t, " status", "● "+h.Status, statusColor(t, h.Status), rw),
-			"",
-			stl(t.Dim, t.Panel).Render(" ─────"),
-			stl(t.Hi, t.Panel).Render(" enter") + stl(t.Dim, t.Panel).Render(" connect · detach keeps it alive"),
+			kv(t, " identity", orDash(h.KeyPath), t.Fg, rw),
+			kv(t, " tags", orDash(tagStr(h)), t.Blue, rw),
+			kv(t, " source", h.Source, t.Dim, rw),
+			kv(t, " last seen", lastSeenStr(h.LastSeen), t.Dim, rw),
+			kv(t, " status", statusTxt, colorFor(t, statusRole), rw),
+			kv(t, " rtt", rtt, t.Dim, rw),
 		}
+		if m.hostLive(h.ID) {
+			rBody = append(rBody, "", stl(t.Ok, t.Panel).Render(" ● live session — enter reattaches"))
+		}
+		rBody = append(rBody, "",
+			stl(t.Dim, t.Panel).Render(" ─────"),
+			stl(t.Hi, t.Panel).Render(" enter")+stl(t.Dim, t.Panel).Render(" connect · ")+
+				stl(t.Hi, t.Panel).Render("a/e/d")+stl(t.Dim, t.Panel).Render(" add/edit/del"))
 	} else {
 		rBody = []string{stl(t.Dim, t.Panel).Render(" no match")}
 	}
 
-	title := "hosts · " + itoa(len(fh)) + "/" + itoa(len(m.hosts))
+	title := "hosts · " + itoa(len(fh)) + "/" + itoa(len(m.storeHosts()))
 	return m.twoPane(t, contentH, title, m.listBorder(t), lBody, 3, "host", m.detailBorder(t), rBody, 2)
+}
+
+// hostsEmpty renders the friendly empty state for a fresh vault.
+func (m Model) hostsEmpty(t theme.Theme, contentH int) []string {
+	pw := 60
+	if pw > m.w-6 {
+		pw = m.w - 6
+	}
+	body := []string{
+		stl(t.Fg, t.Panel).Render("No hosts yet."),
+		"",
+		stl(t.Hi, t.Panel).Render("a") + stl(t.Dim, t.Panel).Render("   add a host"),
+		stl(t.Hi, t.Panel).Render("m") + stl(t.Dim, t.Panel).Render("   import ~/.ssh/config"),
+	}
+	box := panel(t, "hosts", t.Hi, pw, len(body)+2, body)
+	return centerInArea(box, m.w, contentH, t.Bg)
 }
 
 func (m Model) hostsInnerW() int {
@@ -308,7 +427,7 @@ func (m Model) hostsDetailInnerW() int {
 	return avail - avail*3/5 - 2
 }
 
-func hostRow(t theme.Theme, h data.Host, sel bool, innerW int) string {
+func hostRow(t theme.Theme, h store.Host, res probe.Result, known, live, sel bool, innerW int) string {
 	bg := t.Panel
 	if sel {
 		bg = t.Sel
@@ -319,24 +438,29 @@ func hostRow(t theme.Theme, h data.Host, sel bool, innerW int) string {
 		mark = "▸"
 		nameFg = t.Hi
 	}
+	liveSeg := bgpad(2, bg)
+	if live {
+		liveSeg = stl(t.Ok, bg).Render("● ")
+	}
 	tags := tagStr(h)
-	status := "● " + h.Status
+	statusTxt, statusRole := probeStatusText(res, known)
 	tagW := len([]rune(tags))
-	connW := innerW - (3 + 16 + 1 + 1 + tagW + 1 + 10)
+	connW := innerW - (3 + 2 + 16 + 1 + tagW + 1 + 10)
 	if connW < 6 {
 		connW = 6
 	}
 	return stl(t.Hi, bg).Render(" "+mark+" ") +
+		liveSeg +
 		rowSeg(h.Name, 16, nameFg, bg, false) +
 		bgpad(1, bg) +
 		rowSeg(h.Conn(), connW, t.Dim, bg, false) +
 		bgpad(1, bg) +
 		rowSeg(tags, tagW, t.Blue, bg, false) +
 		bgpad(1, bg) +
-		rowSeg(status, 10, statusColor(t, h.Status), bg, true)
+		rowSeg(statusTxt, 10, colorFor(t, statusRole), bg, true)
 }
 
-func tagStr(h data.Host) string {
+func tagStr(h store.Host) string {
 	out := make([]string, len(h.Tags))
 	for i, tg := range h.Tags {
 		out[i] = "#" + tg
@@ -420,38 +544,52 @@ func (m Model) projectsGate(t theme.Theme, contentH int) []string {
 	return centerInArea(box, m.w, contentH, t.Bg)
 }
 
-// keysTab renders identities list + detail.
+// keysTab renders identities scanned from ~/.ssh + detail.
 func (m Model) keysTab(t theme.Theme, contentH int) []string {
-	kIdx := clampIdx(m.keyIdx, len(m.keys))
+	if len(m.keyInfos) == 0 {
+		return m.keysEmpty(t, contentH)
+	}
+	kIdx := clampIdx(m.keyIdx, len(m.keyInfos))
 	dw := m.w - 3
 	lInner := dw*11/25 - 2
 	var lBody []string
-	for i, k := range m.keys {
+	for i, k := range m.keyInfos {
 		lBody = append(lBody, keyRow(t, k, i == kIdx, lInner))
 	}
-	k := m.keys[kIdx]
+	k := m.keyInfos[kIdx]
 	rw := dw - dw*11/25 - 2
-	storage := "encrypted vault"
-	storageC := t.Ok
-	if k.Badge == "hardware" {
-		storage = "security key (resident)"
-		storageC = t.Warn
+	enc, encC := "no", t.Ok
+	if k.Encrypted {
+		enc, encC = "yes", t.Warn
 	}
 	rBody := []string{
 		stl(t.Hi, t.Panel).Bold(true).Render(" " + k.Name),
 		"",
-		kv(t, " type", k.Type, t.Fg, rw),
-		kv(t, " fingerprint", k.Fp, t.Dim, rw),
-		kv(t, " created", k.Created, t.Fg, rw),
-		kv(t, " used by", itoa(k.Hosts)+" hosts", t.Fg, rw),
-		kv(t, " storage", storage, storageC, rw),
+		kv(t, " type", orDash(k.Type), t.Fg, rw),
+		kv(t, " fingerprint", orDash(k.Fingerprint), t.Dim, rw),
+		kv(t, " path", orDash(k.Path), t.Fg, rw),
+		kv(t, " encrypted", enc, encC, rw),
 		"",
-		stl(t.Dim, t.Panel).Render(" private key never leaves the vault · agent signs in-memory"),
+		stl(t.Hi, t.Panel).Render(" g") + stl(t.Dim, t.Panel).Render(" generate a new ed25519 key"),
 	}
-	return m.twoPane(t, contentH, "identities · "+itoa(len(m.keys)), m.listBorder(t), lBody, 11, "identity", m.detailBorder(t), rBody, 14)
+	return m.twoPane(t, contentH, "identities · "+itoa(len(m.keyInfos)), m.listBorder(t), lBody, 11, "identity", m.detailBorder(t), rBody, 14)
 }
 
-func keyRow(t theme.Theme, k data.Key, sel bool, innerW int) string {
+func (m Model) keysEmpty(t theme.Theme, contentH int) []string {
+	pw := 58
+	if pw > m.w-6 {
+		pw = m.w - 6
+	}
+	body := []string{
+		stl(t.Fg, t.Panel).Render("No SSH keys found in ~/.ssh."),
+		"",
+		stl(t.Hi, t.Panel).Render("g") + stl(t.Dim, t.Panel).Render("   generate an ed25519 key"),
+	}
+	box := panel(t, "identities", t.Hi, pw, len(body)+2, body)
+	return centerInArea(box, m.w, contentH, t.Bg)
+}
+
+func keyRow(t theme.Theme, k keys.KeyInfo, sel bool, innerW int) string {
 	bg := t.Panel
 	mark := " "
 	nameFg := t.Fg
@@ -460,14 +598,12 @@ func keyRow(t theme.Theme, k data.Key, sel bool, innerW int) string {
 		mark = "▸"
 		nameFg = t.Hi
 	}
+	badge := ""
 	badgeC := t.Dim
-	switch k.Badge {
-	case "default":
-		badgeC = t.Ok
-	case "hardware":
-		badgeC = t.Warn
+	if k.Encrypted {
+		badge, badgeC = "encrypted", t.Warn
 	}
-	badgeW := len([]rune(k.Badge))
+	badgeW := len([]rune(badge))
 	typeW := innerW - (3 + 20 + 1 + badgeW + 1)
 	if typeW < 4 {
 		typeW = 4
@@ -475,12 +611,12 @@ func keyRow(t theme.Theme, k data.Key, sel bool, innerW int) string {
 	return stl(t.Hi, bg).Render(" "+mark+" ") +
 		rowSeg(k.Name, 20, nameFg, bg, false) +
 		bgpad(1, bg) +
-		rowSeg(k.Type, typeW, t.Dim, bg, false) +
+		rowSeg(orDash(k.Type), typeW, t.Dim, bg, false) +
 		bgpad(1, bg) +
-		rowSeg(k.Badge, badgeW, badgeC, bg, true)
+		rowSeg(badge, badgeW, badgeC, bg, true)
 }
 
-// settingsTab renders the centered settings panel.
+// settingsTab renders the centered settings panel from store.Settings.
 func (m Model) settingsTab(t theme.Theme, contentH int) []string {
 	pw := 66
 	if pw > m.w-6 {
@@ -500,30 +636,50 @@ func (m Model) settingsTab(t theme.Theme, contentH int) []string {
 		}
 		var val string
 		var vc lipgloss.Color
-		if d.key == "theme" {
-			val = "‹ " + m.themeName + " ›"
-			vc = t.Hi
-		} else if m.settings[d.key] {
-			val, vc = "[on]", t.Ok
-		} else {
-			val, vc = "[off]", t.Dim
+		switch d.key {
+		case "theme":
+			val, vc = "‹ "+m.themeName+" ›", t.Hi
+		case "account":
+			if m.signedIn {
+				val, vc = m.email, t.Ok
+			} else {
+				val, vc = "signed out", t.Dim
+			}
+		default:
+			if m.settingOn(d.key) {
+				val, vc = "[on]", t.Ok
+			} else {
+				val, vc = "[off]", t.Dim
+			}
 		}
 		row := stl(t.Hi, bg).Render(" "+mark+" ") +
-			rowSeg(d.label, inner-3-12, labelFg, bg, false) +
-			rowSeg(val, 12, vc, bg, true)
+			rowSeg(d.label, inner-3-16, labelFg, bg, false) +
+			rowSeg(val, 16, vc, bg, true)
 		body = append(body, row)
 	}
 	body = append(body, "",
-		stl(t.Hi, t.Panel).Render(" enter")+stl(t.Dim, t.Panel).Render(" toggle / cycle · theme applies live"))
+		stl(t.Hi, t.Panel).Render(" enter")+stl(t.Dim, t.Panel).Render(" toggle / cycle / sign in · theme applies live"))
 	box := panel(t, "settings", t.Hi, pw, len(body)+2, body)
 	return centerInArea(box, m.w, contentH, t.Bg)
 }
 
-// --- session ----------------------------------------------------------------
+// settingOn reports the current boolean setting value.
+func (m Model) settingOn(key string) bool {
+	switch key {
+	case "agent":
+		return m.settings.Agent
+	case "keepalive":
+		return m.settings.Keepalive
+	case "telemetry":
+		return m.settings.Telemetry
+	}
+	return false
+}
+
+// --- session (simulated, demo only) -----------------------------------------
 
 func (m Model) sessionView(t theme.Theme) []string {
-	// header with session tabs.
-	badge := bold(t.Ink, t.Hi).Render(" ⌢ wharf ")
+	badge := bold(t.Ink, t.Hi).Render(" ⚓ wharf ")
 	var tabs strings.Builder
 	for i, nm := range m.open {
 		label := " " + itoa(i+1) + ":" + nm + " "
@@ -559,7 +715,7 @@ func (m Model) sessionView(t theme.Theme) []string {
 	if s != nil {
 		start := 0
 		if len(s.lines) > contentH-3 {
-			start = len(s.lines) - (contentH - 3) // keep the tail visible
+			start = len(s.lines) - (contentH - 3)
 		}
 		for _, ln := range s.lines[start:] {
 			seg := ""
@@ -600,20 +756,31 @@ func (m Model) hintBar(t theme.Theme) []string {
 	switch m.tab {
 	case 0:
 		hints = append(hints, hk{"enter", "connect"}, hk{"/", "filter"})
+		if !m.demo {
+			hints = append(hints, hk{"a/e/d", "add/edit/del"}, hk{"m", "import"}, hk{"R", "probe"})
+		}
 	case 1:
 		if m.signedIn {
 			hints = append(hints, hk{"enter", "view hosts"}, hk{"i", "invite"})
 		} else {
 			hints = append(hints, hk{"enter", "sign in"})
 		}
+	case 2:
+		if !m.demo {
+			hints = append(hints, hk{"g", "generate"})
+		}
 	case 3:
 		hints = append(hints, hk{"enter", "toggle"})
 	}
-	signLabel := "sign in"
-	if m.signedIn {
-		signLabel = "sign out"
+	if m.demo {
+		signLabel := "sign in"
+		if m.signedIn {
+			signLabel = "sign out"
+		}
+		hints = append(hints, hk{"1-4", "tabs"}, hk{"q", signLabel})
+	} else {
+		hints = append(hints, hk{"1-4", "tabs"}, hk{"q", "lock"}, hk{"⌃q", "quit"})
 	}
-	hints = append(hints, hk{"1-4", "tabs"}, hk{"tab", "pane"}, hk{"q", signLabel})
 
 	var b strings.Builder
 	b.WriteString(" ")
@@ -654,14 +821,19 @@ func (m Model) helpView(t theme.Theme) []string {
 		{"/", "filter hosts"},
 		{"tab", "cycle pane focus"},
 		{"enter", "connect / open / toggle"},
+		{"a / e / d", "add / edit / delete host"},
+		{"m", "import ~/.ssh/config"},
+		{"R", "re-probe all hosts"},
+		{"g", "generate a key (keys tab)"},
 		{"i", "invite member (projects)"},
-		{"esc", "back / clear / detach"},
-		{"q", "sign in / out (login screen)"},
-		{"l", "skip login · use local (on login screen)"},
-		{"alt+1..9", "switch session tab"},
+		{"esc", "back / clear / detach / cancel"},
+		{"ctrl+\\", "detach from a live session"},
+		{"alt+1..9", "reattach a live session"},
+		{"q", "lock vault (sign in/out in demo)"},
+		{"ctrl+q", "quit wharf"},
 		{"?", "toggle this help"},
 	}
-	pw := 60
+	pw := 62
 	if pw > m.w-6 {
 		pw = m.w - 6
 	}

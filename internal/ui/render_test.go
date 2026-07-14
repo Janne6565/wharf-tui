@@ -25,7 +25,7 @@ func dump(t *testing.T, m tea.Model, caption string) {
 func TestDumpFrames(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.Ascii) // strip ANSI so frames are readable text
 
-	var m tea.Model = New()
+	var m tea.Model = New(Config{Demo: true})
 	m = send(m, tea.WindowSizeMsg{Width: 108, Height: 34})
 
 	dump(t, m, "01 login (entry)")
@@ -88,7 +88,7 @@ func TestDumpFrames(t *testing.T) {
 // assertions on structure.
 func TestLocalFlow(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.Ascii)
-	var m tea.Model = New()
+	var m tea.Model = New(Config{Demo: true})
 	m = send(m, tea.WindowSizeMsg{Width: 100, Height: 30})
 
 	if !strings.Contains(m.View(), "sign in") {
