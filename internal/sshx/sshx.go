@@ -46,13 +46,24 @@ type SessionEndedMsg struct {
 	Err    error
 }
 
+// Auth-method preferences for HostSpec.AuthMethod. Auto keeps the full
+// chain; Key and Password restrict it so servers with a low MaxAuthTries are
+// not burned on methods the host will never accept.
+const (
+	AuthAuto     = ""         // agent → key file → password → keyboard-interactive
+	AuthKey      = "key"      // agent + key file (+ keyboard-interactive for 2FA)
+	AuthPassword = "password" // password + keyboard-interactive only
+)
+
 // HostSpec is the connection recipe the UI hands to Dial (derived from
 // store.Host; kept separate so sshx does not depend on the store).
 type HostSpec struct {
-	ID      string
-	Name    string
-	User    string
-	Addr    string
-	Port    int
-	KeyPath string // optional explicit identity file
+	ID         string
+	Name       string
+	User       string
+	Addr       string
+	Port       int
+	KeyPath    string // optional explicit identity file
+	AuthMethod string // AuthAuto | AuthKey | AuthPassword
+	Password   string // stored password; tried once before prompting
 }

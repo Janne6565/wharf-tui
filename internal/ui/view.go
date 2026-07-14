@@ -381,6 +381,7 @@ func (m Model) hostsTab(t theme.Theme, contentH int) []string {
 			"",
 			kv(t, " address", h.Conn(), t.Fg, rw),
 			kv(t, " identity", orDash(h.KeyPath), t.Fg, rw),
+			kv(t, " auth", authDetail(h), t.Fg, rw),
 			kv(t, " tags", orDash(tagStr(h)), t.Blue, rw),
 			kv(t, " source", h.Source, t.Dim, rw),
 			kv(t, " last seen", lastSeenStr(h.LastSeen), t.Dim, rw),

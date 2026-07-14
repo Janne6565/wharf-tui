@@ -46,6 +46,14 @@ Requires Go 1.24+. No root, no daemon. The vault lives at
   password → keyboard-interactive. Host keys are verified against
   `~/.ssh/known_hosts`; unknown hosts show a fingerprint confirmation (TOFU), and a
   **changed** host key is a hard refusal — no override.
+- **Password-auth servers are first-class.** Each host has an auth mode —
+  **auto** (full chain), **key**, or **password**. Password mode never offers
+  public keys, so servers with a strict `MaxAuthTries` aren't burned on key
+  attempts they'll never accept. A password can be **saved per host** (it lives
+  only inside the encrypted vault): set it in the host form, or press `ctrl+r`
+  ("remember") in the password prompt — after a successful login it's stored and
+  future connects go straight to the shell. A rejected saved password falls back
+  to the interactive prompt.
 - **Probes are advisory.** The online/degraded/offline dots come from an async TCP
   check; they never block connecting.
 
@@ -80,6 +88,7 @@ Requires Go 1.24+. No root, no daemon. The vault lives at
 | `m` | import `~/.ssh/config` |
 | `R` | re-probe reachability |
 | `g` | generate an ed25519 key *(keys tab)* |
+| `ctrl+r` | remember the typed password *(password prompt)* |
 | `ctrl+\` | **detach** the attached session |
 | `alt`+`1..9` | reattach a live session |
 | `q` | lock the vault |

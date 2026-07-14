@@ -3,6 +3,8 @@ package ui
 import (
 	"strings"
 
+	"github.com/Janne6565/wharf-tui/internal/sshx"
+	"github.com/Janne6565/wharf-tui/internal/store"
 	"github.com/Janne6565/wharf-tui/internal/theme"
 )
 
@@ -48,20 +50,27 @@ func (m Model) hostFormView(t theme.Theme) []string {
 	if m.formEditID != "" {
 		title = "edit host"
 	}
-	labels := [fCount]string{"name", "user", "address", "port", "tags", "key path"}
-	hints := [fCount]string{"", "", "host or ip", "default 22", "comma-separated", "~/.ssh/id_…"}
+	labels := [fCount]string{"name", "user", "address", "port", "tags", "key path", "auth", "password"}
+	hints := [fCount]string{"", "", "host or ip", "default 22", "comma-separated", "~/.ssh/id_…", "", ""}
 
 	var body []string
 	for i := 0; i < fCount; i++ {
 		focused := i == m.formFocus
 		line := stl(t.Dim, t.Panel).Render(" " + padTo2(labels[i], 10))
-		if m.formVals[i] == "" && !focused && hints[i] != "" {
-			line += stl(t.Dim, t.Panel).Render(hints[i])
-		} else {
-			line += stl(t.Hi, t.Panel).Render(m.formVals[i])
-		}
-		if focused {
-			line += m.cur(t.Hi, t.Panel)
+		switch i {
+		case fAuth:
+			line += m.authSelector(t, focused)
+		case fPassword:
+			line += m.passwordField(t, focused)
+		default:
+			if m.formVals[i] == "" && !focused && hints[i] != "" {
+				line += stl(t.Dim, t.Panel).Render(hints[i])
+			} else {
+				line += stl(t.Hi, t.Panel).Render(m.formVals[i])
+			}
+			if focused {
+				line += m.cur(t.Hi, t.Panel)
+			}
 		}
 		body = append(body, line)
 	}
@@ -73,6 +82,66 @@ func (m Model) hostFormView(t theme.Theme) []string {
 			stl(t.Hi, t.Panel).Render("enter")+stl(t.Dim, t.Panel).Render(" save · ")+
 			stl(t.Hi, t.Panel).Render("esc")+stl(t.Dim, t.Panel).Render(" cancel"))
 	return m.modalBox(t, title, "hi", body)
+}
+
+// authSelector renders the three auth options inline with the active one lit.
+func (m Model) authSelector(t theme.Theme, focused bool) string {
+	cur := m.formVals[fAuth]
+	var b strings.Builder
+	for i, a := range authMethods {
+		if i > 0 {
+			b.WriteString(stl(t.Dim, t.Panel).Render("  "))
+		}
+		if a == cur {
+			b.WriteString(stl(t.Hi, t.Sel).Render(" " + authLabel(a) + " "))
+		} else {
+			b.WriteString(stl(t.Dim, t.Panel).Render(authLabel(a)))
+		}
+	}
+	seg := b.String()
+	if focused {
+		seg += m.cur(t.Hi, t.Panel)
+	}
+	return seg
+}
+
+// passwordField renders the masked host-form password (bullets, like the unlock
+// screen), disabled when key auth is selected (its value is then unused).
+func (m Model) passwordField(t theme.Theme, focused bool) string {
+	var seg string
+	switch {
+	case m.formVals[fAuth] == sshx.AuthKey:
+		seg = stl(t.Dim, t.Panel).Render("(unused with key auth)")
+	case m.formVals[fPassword] != "":
+		seg = stl(t.Hi, t.Panel).Render(strings.Repeat("•", len([]rune(m.formVals[fPassword]))))
+	case !focused:
+		seg = stl(t.Dim, t.Panel).Render("(optional)")
+	}
+	if focused {
+		seg += m.cur(t.Hi, t.Panel)
+	}
+	return seg
+}
+
+// authDetail describes a host's effective auth method for the detail pane.
+func authDetail(h store.Host) string {
+	switch h.AuthMethod {
+	case sshx.AuthPassword:
+		if h.Password != "" {
+			return "password (saved)"
+		}
+		return "password"
+	case sshx.AuthKey:
+		if h.KeyPath != "" {
+			return "key " + h.KeyPath
+		}
+		return "key"
+	default:
+		if h.Password != "" {
+			return "auto (saved)"
+		}
+		return "auto"
+	}
 }
 
 // --- delete confirm ---------------------------------------------------------
@@ -145,7 +214,17 @@ func (m Model) secretView(t theme.Theme) []string {
 	}
 	body = append(body,
 		"",
-		stl(t.Hi, t.Panel).Render(" "+shown)+m.cur(t.Hi, t.Panel),
+		stl(t.Hi, t.Panel).Render(" "+shown)+m.cur(t.Hi, t.Panel))
+	// Offer to persist the secret only for interactive password prompts.
+	if p.Title == "password" {
+		mark := "[ ]"
+		if m.secretRemember {
+			mark = "[x]"
+		}
+		body = append(body, "",
+			stl(t.Hi, t.Panel).Render(" "+mark+" remember password")+stl(t.Dim, t.Panel).Render("  ctrl+r"))
+	}
+	body = append(body,
 		"",
 		stl(t.Hi, t.Panel).Render(" enter")+stl(t.Dim, t.Panel).Render(" submit · ")+
 			stl(t.Hi, t.Panel).Render("esc")+stl(t.Dim, t.Panel).Render(" cancel"))

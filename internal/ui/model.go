@@ -61,6 +61,8 @@ const (
 	fPort
 	fTags
 	fKey
+	fAuth     // auth-method selector (auto | key | password)
+	fPassword // masked; meaningful for auto/password auth
 	fCount
 )
 
@@ -178,7 +180,7 @@ type Model struct {
 	modal modalKind
 
 	formEditID string         // "" = add, else the ID being edited
-	formVals   [fCount]string // Name, User, Addr, Port, Tags, KeyPath
+	formVals   [fCount]string // Name, User, Addr, Port, Tags, KeyPath, AuthMethod, Password
 	formFocus  int
 	formErr    string
 
@@ -199,6 +201,11 @@ type Model struct {
 	pendingHostKey *sshx.HostKeyPromptMsg
 	pendingSecret  *sshx.SecretPromptMsg
 	secretInput    string
+	secretRemember bool // "remember password" toggle in the secret modal
+
+	// pendingPW holds a typed password captured with "remember" on, kept until
+	// the matching dial succeeds so it can be written to the vault.
+	pendingPW *rememberedPassword
 
 	errTitle string
 	errBody  string

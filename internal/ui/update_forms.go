@@ -6,9 +6,38 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// authMethods is the cycle order for the host-form auth selector.
+var authMethods = []string{sshx.AuthAuto, sshx.AuthKey, sshx.AuthPassword}
+
+// authLabel is the human-readable name for an auth method value.
+func authLabel(method string) string {
+	switch method {
+	case sshx.AuthKey:
+		return "key"
+	case sshx.AuthPassword:
+		return "password"
+	default:
+		return "auto"
+	}
+}
+
+// cycleAuth advances the auth selector by dir (+1 / -1), wrapping around.
+func cycleAuth(cur string, dir int) string {
+	idx := 0
+	for i, a := range authMethods {
+		if a == cur {
+			idx = i
+			break
+		}
+	}
+	idx = (idx + dir + len(authMethods)) % len(authMethods)
+	return authMethods[idx]
+}
 
 // modalKey routes a keypress to the active real-mode modal.
 func (m Model) modalKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
@@ -63,6 +92,10 @@ func (m Model) editSelectedHost() (tea.Model, tea.Cmd) {
 	m.formVals[fPort] = strconv.Itoa(h.Port)
 	m.formVals[fTags] = strings.Join(h.Tags, ", ")
 	m.formVals[fKey] = h.KeyPath
+	m.formVals[fAuth] = h.AuthMethod
+	// Pre-fill the real password into the buffer; the view only ever renders it
+	// as bullets, so the plaintext is never shown.
+	m.formVals[fPassword] = h.Password
 	return m, nil
 }
 
@@ -79,17 +112,29 @@ func (m Model) hostFormKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		return m.submitHostForm()
+	}
+	// The auth field is a selector, not a text input: arrows/space cycle it and
+	// every other key is inert.
+	if m.formFocus == fAuth {
+		switch key {
+		case "left":
+			m.formVals[fAuth] = cycleAuth(m.formVals[fAuth], -1)
+		case "right", " ":
+			m.formVals[fAuth] = cycleAuth(m.formVals[fAuth], +1)
+		}
+		return m, nil
+	}
+	switch key {
 	case "backspace":
 		if v := m.formVals[m.formFocus]; len(v) > 0 {
 			m.formVals[m.formFocus] = v[:len(v)-1]
 		}
-		return m, nil
 	default:
 		if isPrintable(key) {
 			m.formVals[m.formFocus] += key
 		}
-		return m, nil
 	}
+	return m, nil
 }
 
 func (m Model) submitHostForm() (tea.Model, tea.Cmd) {
@@ -104,12 +149,14 @@ func (m Model) submitHostForm() (tea.Model, tea.Cmd) {
 		port = p
 	}
 	h := store.Host{
-		Name:    strings.TrimSpace(m.formVals[fName]),
-		User:    strings.TrimSpace(m.formVals[fUser]),
-		Addr:    strings.TrimSpace(m.formVals[fAddr]),
-		Port:    port,
-		Tags:    parseTags(m.formVals[fTags]),
-		KeyPath: strings.TrimSpace(m.formVals[fKey]),
+		Name:       strings.TrimSpace(m.formVals[fName]),
+		User:       strings.TrimSpace(m.formVals[fUser]),
+		Addr:       strings.TrimSpace(m.formVals[fAddr]),
+		Port:       port,
+		Tags:       parseTags(m.formVals[fTags]),
+		KeyPath:    strings.TrimSpace(m.formVals[fKey]),
+		AuthMethod: m.formVals[fAuth], // "" (auto) | "key" | "password"
+		Password:   m.formVals[fPassword],
 	}
 
 	if m.formEditID == "" {

@@ -22,7 +22,7 @@ func (m Model) startConnect(h store.Host) (tea.Model, tea.Cmd) {
 	m.dialCancel = cancel
 	m.dialHostID = h.ID
 	m.modal = modalConnecting
-	spec := sshx.HostSpec{ID: h.ID, Name: h.Name, User: h.User, Addr: h.Addr, Port: h.Port, KeyPath: h.KeyPath}
+	spec := sshx.HostSpec{ID: h.ID, Name: h.Name, User: h.User, Addr: h.Addr, Port: h.Port, KeyPath: h.KeyPath, AuthMethod: h.AuthMethod, Password: h.Password}
 	return m, dialCmd(m.mgr, ctx, spec, m.w, m.h)
 }
 
@@ -57,6 +57,7 @@ func (m Model) handleDialDone(msg dialDoneMsg) (tea.Model, tea.Cmd) {
 		m.modal = modalNone
 	}
 	if msg.err != nil {
+		m.pendingPW = nil // dial failed → never persist the remembered password
 		return m.handleDialErr(msg.hostID, msg.err)
 	}
 	// Record a successful connection, then hand over the terminal.
@@ -67,7 +68,56 @@ func (m Model) handleDialDone(msg dialDoneMsg) (tea.Model, tea.Cmd) {
 			_ = m.st.Save()
 		}
 	}
+	// Persist a remembered password before attaching, so the takeover is never
+	// blocked on disk I/O. A pending value for any other host is discarded.
+	if m.pendingPW != nil {
+		if m.pendingPW.hostID == msg.hostID {
+			m = m.persistPassword(msg.hostID, m.pendingPW.pw)
+		}
+		m.pendingPW = nil
+	}
+	if msg.sess == nil {
+		// No live session to hand over (degenerate dial / test): stay put so the
+		// toast remains visible instead of driving a nil attach.
+		return m, nil
+	}
 	return m.attach(msg.hostID, msg.sess)
+}
+
+// rememberedPassword is a typed password captured from the secret prompt with
+// "remember" on, held until the matching dial succeeds.
+type rememberedPassword struct {
+	hostID string
+	pw     string
+}
+
+// persistPassword writes pw onto the stored host and raises a confirming toast.
+func (m Model) persistPassword(hostID, pw string) Model {
+	if m.st == nil {
+		return m
+	}
+	h, ok := m.st.HostByID(hostID)
+	if !ok {
+		return m
+	}
+	h.Password = pw
+	if err := m.st.UpdateHost(h); err != nil {
+		return m
+	}
+	_ = m.st.Save()
+	return m.setToast("password saved to vault", "ok")
+}
+
+// samePassword reports whether pw already matches the host's stored password,
+// so a no-op "remember" never bothers to re-save.
+func (m Model) samePassword(hostID, pw string) bool {
+	if m.st == nil {
+		return false
+	}
+	if h, ok := m.st.HostByID(hostID); ok {
+		return h.Password == pw
+	}
+	return false
 }
 
 func (m Model) handleDialErr(hostID string, err error) (tea.Model, tea.Cmd) {
@@ -137,6 +187,7 @@ func (m Model) handleSecretPrompt(msg sshx.SecretPromptMsg) (tea.Model, tea.Cmd)
 	pending := msg
 	m.pendingSecret = &pending
 	m.secretInput = ""
+	m.secretRemember = false
 	m.modal = modalSecret
 	return m, nil
 }
@@ -148,15 +199,31 @@ func (m Model) secretModalKey(key string) (tea.Model, tea.Cmd) {
 	}
 	switch key {
 	case "enter":
-		m.pendingSecret.Reply <- []byte(m.secretInput)
+		typed := m.secretInput
+		title, hostID := m.pendingSecret.Title, m.pendingSecret.HostID
+		// Reply channel is buffered(1): send exactly once.
+		m.pendingSecret.Reply <- []byte(typed)
 		m.pendingSecret = nil
 		m.secretInput = ""
+		// Stash the password for persistence once this host's dial succeeds.
+		if m.secretRemember && title == "password" && !m.samePassword(hostID, typed) {
+			m.pendingPW = &rememberedPassword{hostID: hostID, pw: typed}
+		}
+		m.secretRemember = false
 		return m.restoreAfterPrompt(), nil
 	case "esc":
 		m.pendingSecret.Reply <- nil // nil cancels authentication
 		m.pendingSecret = nil
 		m.secretInput = ""
+		m.secretRemember = false
+		m.pendingPW = nil
 		return m.restoreAfterPrompt(), nil
+	case "ctrl+r":
+		// Toggle "remember" only for interactive password prompts.
+		if m.pendingSecret.Title == "password" {
+			m.secretRemember = !m.secretRemember
+		}
+		return m, nil
 	case "backspace":
 		if len(m.secretInput) > 0 {
 			m.secretInput = m.secretInput[:len(m.secretInput)-1]

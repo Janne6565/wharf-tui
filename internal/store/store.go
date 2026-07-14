@@ -30,13 +30,18 @@ type Backend interface {
 // AddHost. Source distinguishes manually created hosts from ssh_config
 // imports (import merges never touch "manual" hosts).
 type Host struct {
-	ID       string    `json:"id"`
-	Name     string    `json:"name"`
-	User     string    `json:"user"`
-	Addr     string    `json:"addr"`
-	Port     int       `json:"port"`
-	Tags     []string  `json:"tags,omitempty"`
-	KeyPath  string    `json:"keyPath,omitempty"`
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	User    string   `json:"user"`
+	Addr    string   `json:"addr"`
+	Port    int      `json:"port"`
+	Tags    []string `json:"tags,omitempty"`
+	KeyPath string   `json:"keyPath,omitempty"`
+	// AuthMethod restricts the SSH auth chain: "" (auto) | "key" | "password".
+	AuthMethod string `json:"authMethod,omitempty"`
+	// Password is the saved login password for password-auth hosts. It lives
+	// only inside the encrypted vault — never plaintext on disk.
+	Password string    `json:"password,omitempty"`
 	Source   string    `json:"source"` // "manual" | "ssh_config"
 	LastSeen time.Time `json:"lastSeen,omitempty"`
 }
@@ -147,6 +152,11 @@ func (s *Store) AddHost(h Host) (Host, error) {
 	if h.Source == "" {
 		h.Source = "manual"
 	}
+	am, err := normalizeAuthMethod(h.AuthMethod)
+	if err != nil {
+		return Host{}, err
+	}
+	h.AuthMethod = am
 	if err := s.validate(h, ""); err != nil {
 		return Host{}, err
 	}
@@ -164,6 +174,11 @@ func (s *Store) UpdateHost(h Host) error {
 	if i < 0 {
 		return fmt.Errorf("store: no host with id %q", h.ID)
 	}
+	am, err := normalizeAuthMethod(h.AuthMethod)
+	if err != nil {
+		return err
+	}
+	h.AuthMethod = am
 	if err := s.validate(h, h.ID); err != nil {
 		return err
 	}
@@ -206,10 +221,16 @@ func (s *Store) UpsertImported(hs []Host) (added, updated, skipped int) {
 		}
 
 		// Re-imported ssh_config host: keep our stable ID and LastSeen so the
-		// merge is idempotent, then diff to decide update vs. no-op.
+		// merge is idempotent, then diff to decide update vs. no-op. Imports
+		// never carry auth secrets, so preserve any AuthMethod/Password the
+		// user added locally — a re-import must not wipe a saved password.
+		// Inheriting them here also makes the DeepEqual below ignore those two
+		// fields, so an otherwise-unchanged host still counts as skipped.
 		merged := in
 		merged.ID = existing.ID
 		merged.LastSeen = existing.LastSeen
+		merged.AuthMethod = existing.AuthMethod
+		merged.Password = existing.Password
 		if reflect.DeepEqual(existing, merged) {
 			skipped++
 			continue
@@ -259,6 +280,21 @@ func (s *Store) validate(h Host, excludeID string) error {
 		}
 	}
 	return nil
+}
+
+// normalizeAuthMethod canonicalizes an AuthMethod value and rejects unknown
+// ones. "auto" is accepted as an alias for the empty (auto) setting so callers
+// can spell it explicitly; anything outside the known set is a validation
+// error rather than being silently coerced.
+func normalizeAuthMethod(v string) (string, error) {
+	switch v {
+	case "", "auto":
+		return "", nil
+	case "key", "password":
+		return v, nil
+	default:
+		return "", fmt.Errorf("store: invalid auth method %q (want \"\", \"key\", or \"password\")", v)
+	}
 }
 
 // indexByID returns the slice index of the host with id, or -1.

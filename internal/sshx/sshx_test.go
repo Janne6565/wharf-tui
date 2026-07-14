@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -99,6 +101,63 @@ func startServer(t *testing.T, password string, handler gliderssh.Handler) *test
 		port:    tcp.Port,
 		hostPub: signer.PublicKey(),
 	}
+}
+
+// startServerWithPubKeyCounter is like startServer but also installs a
+// PublicKeyHandler that rejects every key while counting the attempts, so a
+// test can assert the client never even offered a public key.
+func startServerWithPubKeyCounter(t *testing.T, password string, pubKeyAttempts *int32) *testServer {
+	t.Helper()
+	signer := newHostSigner(t)
+
+	srv := &gliderssh.Server{
+		Handler: echoHandler(nil, nil),
+		PasswordHandler: func(ctx gliderssh.Context, pass string) bool {
+			return password != "" && pass == password
+		},
+		PublicKeyHandler: func(ctx gliderssh.Context, key gliderssh.PublicKey) bool {
+			atomic.AddInt32(pubKeyAttempts, 1)
+			return false
+		},
+	}
+	srv.AddHostKey(signer)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		_ = ln.Close()
+	})
+
+	tcp := ln.Addr().(*net.TCPAddr)
+	return &testServer{
+		host:    "127.0.0.1",
+		port:    tcp.Port,
+		hostPub: signer.PublicKey(),
+	}
+}
+
+// writeTestKey generates an ed25519 private key and writes it, unencrypted in
+// OpenSSH PEM form, into a temp file — a real on-disk identity for exercising
+// the key-file leg of the auth chain.
+func writeTestKey(t *testing.T) string {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	block, err := gossh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "id_ed25519")
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	return path
 }
 
 // echoHandler copies stdin back to stdout (and into capture, if non-nil),
@@ -497,5 +556,122 @@ func TestWrongPasswordFailsCleanly(t *testing.T) {
 	}
 	if len(m.List()) != 0 {
 		t.Fatalf("failed dial left %d sessions registered", len(m.List()))
+	}
+}
+
+func TestStoredPasswordSucceedsWithoutPrompt(t *testing.T) {
+	rec := newRecorder()
+	ts := startServer(t, testPassword, echoHandler(nil, nil))
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	t.Setenv("SSH_AUTH_SOCK", "")
+	m := NewManager(khPath, false)
+	m.SetNotify(rec.notify)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	hs := ts.hostSpec()
+	hs.Password = testPassword // correct stored password
+	sess, err := m.Dial(ctx, hs, 80, 24)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	if !sess.Alive() {
+		t.Fatal("session not alive after dial")
+	}
+	if rec.secretCount() != 0 {
+		t.Fatalf("stored password must not prompt, got %d prompts", rec.secretCount())
+	}
+}
+
+func TestStoredPasswordRejectedThenPrompts(t *testing.T) {
+	rec := newRecorder() // default secretReply returns the correct testPassword
+	ts := startServer(t, testPassword, echoHandler(nil, nil))
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	t.Setenv("SSH_AUTH_SOCK", "")
+	m := NewManager(khPath, false)
+	m.SetNotify(rec.notify)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	hs := ts.hostSpec()
+	hs.Password = "wrong-stored" // rejected → must fall through to a prompt
+	sess, err := m.Dial(ctx, hs, 80, 24)
+	if err != nil {
+		t.Fatalf("dial after prompt fallback: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	if rec.secretCount() == 0 {
+		t.Fatal("expected a prompt after the stored password was rejected")
+	}
+	rec.mu.Lock()
+	got := rec.secret[0]
+	rec.mu.Unlock()
+	if got.Title != "password" {
+		t.Fatalf("prompt Title = %q, want exactly \"password\"", got.Title)
+	}
+	if !strings.Contains(got.Detail, "reject") {
+		t.Fatalf("prompt Detail = %q, want it to mention the rejection", got.Detail)
+	}
+}
+
+func TestAuthPasswordNeverOffersPublicKey(t *testing.T) {
+	rec := newRecorder()
+	var pubKeyAttempts int32
+	ts := startServerWithPubKeyCounter(t, testPassword, &pubKeyAttempts)
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	t.Setenv("SSH_AUTH_SOCK", "")
+	m := NewManager(khPath, false)
+	m.SetNotify(rec.notify)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	hs := ts.hostSpec()
+	hs.AuthMethod = AuthPassword
+	hs.KeyPath = writeTestKey(t) // present, but AuthPassword must ignore it
+	sess, err := m.Dial(ctx, hs, 80, 24)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	if n := atomic.LoadInt32(&pubKeyAttempts); n != 0 {
+		t.Fatalf("AuthPassword offered %d public keys, want 0", n)
+	}
+}
+
+func TestAuthKeyAgainstPasswordServerFailsWithoutPrompt(t *testing.T) {
+	rec := newRecorder()
+	ts := startServer(t, testPassword, echoHandler(nil, nil)) // password-only server
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	t.Setenv("SSH_AUTH_SOCK", "")
+	m := NewManager(khPath, false)
+	m.SetNotify(rec.notify)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	hs := ts.hostSpec()
+	hs.AuthMethod = AuthKey
+	hs.KeyPath = writeTestKey(t) // key the server won't accept
+	sess, err := m.Dial(ctx, hs, 80, 24)
+	if err == nil {
+		_ = sess.Close()
+		t.Fatal("expected AuthKey to fail against a password-only server")
+	}
+	if !errors.Is(err, ErrAuthFailed) {
+		t.Fatalf("expected ErrAuthFailed, got %v", err)
+	}
+	if rec.secretCount() != 0 {
+		t.Fatalf("AuthKey must not deliver a password prompt, got %d", rec.secretCount())
 	}
 }

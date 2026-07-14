@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Janne6565/wharf-tui/internal/sshx"
+	"github.com/Janne6565/wharf-tui/internal/store"
 	"github.com/Janne6565/wharf-tui/internal/vault"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -231,6 +232,141 @@ func TestSecretModalSendsBytes(t *testing.T) {
 		}
 	default:
 		t.Fatal("secret modal should send a reply on enter")
+	}
+}
+
+// hostByName looks a stored host up by name, failing the test if absent.
+func hostByName(t *testing.T, m tea.Model, name string) store.Host {
+	t.Helper()
+	for _, h := range m.(Model).st.Hosts() {
+		if h.Name == name {
+			return h
+		}
+	}
+	t.Fatalf("host %q not found in store", name)
+	return store.Host{}
+}
+
+func TestHostAddPasswordAuth(t *testing.T) {
+	tm, _ := openedModel(t)
+
+	tm = send(tm, runes("a")) // open add form
+	tm = typeStr(tm, "web1")
+	tm = send(tm, special(tea.KeyTab)) // → user
+	tm = typeStr(tm, "deploy")
+	tm = send(tm, special(tea.KeyTab)) // → address
+	tm = typeStr(tm, "example.com")
+	// Navigate to the auth selector (port, tags, key path, auth).
+	tm = send(tm, special(tea.KeyTab))
+	tm = send(tm, special(tea.KeyTab))
+	tm = send(tm, special(tea.KeyTab))
+	tm = send(tm, special(tea.KeyTab))
+	// Cycle auto → key → password with space.
+	tm = send(tm, runes(" "))
+	tm = send(tm, runes(" "))
+	tm = send(tm, special(tea.KeyTab)) // → password field
+	tm = typeStr(tm, "s3cr3t")
+	tm, _ = step(tm, special(tea.KeyEnter)) // submit
+
+	h := hostByName(t, tm, "web1")
+	if h.AuthMethod != sshx.AuthPassword {
+		t.Fatalf("auth method should be %q, got %q", sshx.AuthPassword, h.AuthMethod)
+	}
+	if h.Password != "s3cr3t" {
+		t.Fatalf("stored password should be s3cr3t, got %q", h.Password)
+	}
+	if strings.Contains(tm.View(), "s3cr3t") {
+		t.Fatalf("plaintext password must never render:\n%s", tm.View())
+	}
+}
+
+func TestHostEditPasswordMasked(t *testing.T) {
+	tm, _ := openedModel(t)
+
+	// Seed a password-auth host through the add form.
+	tm = send(tm, runes("a"))
+	tm = typeStr(tm, "web1")
+	tm = send(tm, special(tea.KeyTab))
+	tm = send(tm, special(tea.KeyTab))
+	tm = typeStr(tm, "example.com")
+	for i := 0; i < 4; i++ {
+		tm = send(tm, special(tea.KeyTab)) // → auth
+	}
+	tm = send(tm, runes(" "))
+	tm = send(tm, runes(" ")) // → password
+	tm = send(tm, special(tea.KeyTab))
+	tm = typeStr(tm, "s3cr3t")
+	tm, _ = step(tm, special(tea.KeyEnter))
+
+	// Reopen for edit: the password must render as bullets, never plaintext.
+	tm = send(tm, runes("e"))
+	if !strings.Contains(tm.View(), "edit host") {
+		t.Fatalf("e should open the edit form:\n%s", tm.View())
+	}
+	if !strings.Contains(tm.View(), "••••••") {
+		t.Fatalf("edit form should mask the stored password as bullets:\n%s", tm.View())
+	}
+	if strings.Contains(tm.View(), "s3cr3t") {
+		t.Fatalf("edit form must not render the plaintext password:\n%s", tm.View())
+	}
+
+	// Change nothing, submit → values preserved.
+	tm, _ = step(tm, special(tea.KeyEnter))
+	h := hostByName(t, tm, "web1")
+	if h.AuthMethod != sshx.AuthPassword || h.Password != "s3cr3t" {
+		t.Fatalf("edit with no changes should preserve auth=%q pw=%q, got auth=%q pw=%q",
+			sshx.AuthPassword, "s3cr3t", h.AuthMethod, h.Password)
+	}
+}
+
+func TestRememberPasswordPersists(t *testing.T) {
+	tm, fv := openedModel(t)
+
+	// A host must exist so the remembered password has somewhere to land.
+	tm = send(tm, runes("a"))
+	tm = typeStr(tm, "web1")
+	tm = send(tm, special(tea.KeyTab))
+	tm = send(tm, special(tea.KeyTab))
+	tm = typeStr(tm, "example.com")
+	tm, _ = step(tm, special(tea.KeyEnter))
+	id := hostByName(t, tm, "web1").ID
+	saves := fv.saves
+
+	reply := make(chan []byte, 1)
+	tm, _ = step(tm, sshx.SecretPromptMsg{
+		HostID: id,
+		Title:  "password",
+		Detail: "deploy@example.com",
+		Reply:  reply,
+	})
+	tm = typeStr(tm, "hunter2")
+	tm, _ = step(tm, special(tea.KeyCtrlR)) // flip remember on
+	if !strings.Contains(tm.View(), "[x] remember password") {
+		t.Fatalf("ctrl+r should toggle the remember checkbox on:\n%s", tm.View())
+	}
+	tm, _ = step(tm, special(tea.KeyEnter)) // submit secret
+	select {
+	case got := <-reply:
+		if string(got) != "hunter2" {
+			t.Fatalf("secret modal should send typed bytes, got %q", got)
+		}
+	default:
+		t.Fatal("secret modal should send exactly one reply")
+	}
+	if len(reply) != 0 {
+		t.Fatal("secret modal must not send a second reply")
+	}
+
+	// The dial for this host succeeds → the password is written to the vault.
+	tm, _ = step(tm, dialDoneMsg{hostID: id})
+	if h := hostByName(t, tm, "web1"); h.Password != "hunter2" {
+		t.Fatalf("remembered password should be persisted, got %q", h.Password)
+	}
+	if fv.saves <= saves {
+		t.Fatal("persisting the password should Save the vault")
+	}
+	if !strings.Contains(tm.View(), "password saved to vault") {
+		t.Fatalf("a confirming toast should be shown:\n%s", tm.View())
 	}
 }
 

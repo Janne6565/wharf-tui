@@ -177,6 +177,107 @@ func TestUpsertImported(t *testing.T) {
 	}
 }
 
+func TestAuthMethodValidation(t *testing.T) {
+	// "auto" normalizes to the empty (auto) setting on add.
+	s := NewMemory(nil, DefaultSettings())
+	added, err := s.AddHost(Host{Name: "auto-host", Addr: "a.com", AuthMethod: "auto"})
+	if err != nil {
+		t.Fatalf("AddHost auto: %v", err)
+	}
+	if added.AuthMethod != "" {
+		t.Fatalf("AuthMethod %q, want normalized to \"\"", added.AuthMethod)
+	}
+
+	// The explicit modes are accepted verbatim.
+	for _, am := range []string{"", "key", "password"} {
+		s := NewMemory(nil, DefaultSettings())
+		if _, err := s.AddHost(Host{Name: "h", Addr: "a.com", AuthMethod: am}); err != nil {
+			t.Fatalf("AddHost AuthMethod %q: %v", am, err)
+		}
+	}
+
+	// Garbage is rejected on both add and update.
+	s2 := NewMemory(nil, DefaultSettings())
+	if _, err := s2.AddHost(Host{Name: "bad", Addr: "a.com", AuthMethod: "totp"}); err == nil {
+		t.Fatalf("AddHost with garbage AuthMethod should error")
+	}
+	h, err := s2.AddHost(Host{Name: "ok", Addr: "a.com", AuthMethod: "password"})
+	if err != nil {
+		t.Fatalf("AddHost: %v", err)
+	}
+	h.AuthMethod = "nonsense"
+	if err := s2.UpdateHost(h); err == nil {
+		t.Fatalf("UpdateHost with garbage AuthMethod should error")
+	}
+	// "auto" also normalizes on update.
+	h.AuthMethod = "auto"
+	if err := s2.UpdateHost(h); err != nil {
+		t.Fatalf("UpdateHost auto: %v", err)
+	}
+	if got, _ := s2.HostByID(h.ID); got.AuthMethod != "" {
+		t.Fatalf("UpdateHost AuthMethod %q, want normalized to \"\"", got.AuthMethod)
+	}
+}
+
+func TestPasswordRoundtrip(t *testing.T) {
+	be := &fakeBackend{}
+	s, err := Open(be)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := s.AddHost(Host{Name: "pw", Addr: "a.com", AuthMethod: "password", Password: "s3cr3t"}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	s2, err := Open(be)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	hosts := s2.Hosts()
+	if len(hosts) != 1 {
+		t.Fatalf("reopened %d hosts, want 1", len(hosts))
+	}
+	if hosts[0].AuthMethod != "password" || hosts[0].Password != "s3cr3t" {
+		t.Fatalf("password roundtrip = %+v, want authMethod=password password=s3cr3t", hosts[0])
+	}
+}
+
+func TestUpsertImportedPreservesAuth(t *testing.T) {
+	seen := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	s := NewMemory([]Host{
+		// An ssh_config host the user later annotated with password auth.
+		{ID: "4444444444444444", Name: "annotated", Addr: "keep.com", Port: 22,
+			Source: "ssh_config", LastSeen: seen, AuthMethod: "password", Password: "kept"},
+	}, DefaultSettings())
+
+	// A re-import carries no auth fields and changes nothing else.
+	added, updated, skipped := s.UpsertImported([]Host{
+		{Name: "annotated", Addr: "keep.com", Port: 22, Source: "ssh_config"},
+	})
+	if added != 0 || updated != 0 || skipped != 1 {
+		t.Fatalf("counters = added %d, updated %d, skipped %d; want 0,0,1", added, updated, skipped)
+	}
+	got, _ := s.HostByID("4444444444444444")
+	if got.AuthMethod != "password" || got.Password != "kept" {
+		t.Fatalf("re-import wiped auth: %+v", got)
+	}
+
+	// A real change (new addr) updates the host but still preserves the auth.
+	_, updated, _ = s.UpsertImported([]Host{
+		{Name: "annotated", Addr: "moved.com", Port: 22, Source: "ssh_config"},
+	})
+	if updated != 1 {
+		t.Fatalf("changed re-import updated %d, want 1", updated)
+	}
+	got, _ = s.HostByID("4444444444444444")
+	if got.Addr != "moved.com" || got.AuthMethod != "password" || got.Password != "kept" {
+		t.Fatalf("changed re-import lost auth or addr: %+v", got)
+	}
+}
+
 func TestDeleteHost(t *testing.T) {
 	s := NewMemory(nil, DefaultSettings())
 	h, err := s.AddHost(Host{Name: "gone", Addr: "g.com"})
