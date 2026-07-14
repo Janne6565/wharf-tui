@@ -8,13 +8,13 @@
 // password, keyboard-interactive) surface as messages through the Notify
 // callback and block on their Reply channel — the UI renders a modal and
 // answers.
+//
+// The exported surface (Manager, Session, and the message types below) is a
+// frozen contract consumed by the UI package. The Manager and Session types
+// and their methods are implemented in the sibling files of this package
+// (manager.go, dial.go, session.go, attach.go, …); only the message and spec
+// value types live here.
 package sshx
-
-import (
-	"context"
-
-	tea "github.com/charmbracelet/bubbletea"
-)
 
 // HostKeyPromptMsg asks the user to trust an unknown host key (TOFU).
 // Send true on Reply to accept (the key is appended to known_hosts), false
@@ -56,57 +56,3 @@ type HostSpec struct {
 	Port    int
 	KeyPath string // optional explicit identity file
 }
-
-// Manager owns all live sessions and the known-hosts policy.
-type Manager struct {
-	// implemented in WP3
-}
-
-// NewManager creates a manager verifying against knownHostsPath
-// (typically ~/.ssh/known_hosts). keepalive enables 30s server pings.
-func NewManager(knownHostsPath string, keepalive bool) *Manager {
-	panic("sshx: unimplemented")
-}
-
-// SetNotify wires prompt/lifecycle messages into the UI event loop
-// (tea.Program.Send). Must be set before Dial.
-func (m *Manager) SetNotify(fn func(tea.Msg)) { panic("sshx: unimplemented") }
-
-// Dial connects, authenticates (agent -> key file -> password ->
-// keyboard-interactive), requests a PTY of cols x rows, starts the remote
-// shell and the output pump, and registers the session under hs.ID.
-func (m *Manager) Dial(ctx context.Context, hs HostSpec, cols, rows int) (*Session, error) {
-	panic("sshx: unimplemented")
-}
-
-// Get returns the live session for hostID, or nil.
-func (m *Manager) Get(hostID string) *Session { panic("sshx: unimplemented") }
-
-// List returns all live sessions in dial order.
-func (m *Manager) List() []*Session { panic("sshx: unimplemented") }
-
-// CloseAll terminates every session (used on quit).
-func (m *Manager) CloseAll() { panic("sshx: unimplemented") }
-
-// Session is one live remote shell.
-type Session struct {
-	// implemented in WP3
-}
-
-// Host returns the spec the session was dialed with.
-func (s *Session) Host() HostSpec { panic("sshx: unimplemented") }
-
-// Attach returns the tea.ExecCommand that performs the full-screen terminal
-// takeover: raw mode, replay of the ring buffer, bidirectional copy, WINCH
-// forwarding. Typing ctrl+\ (0x1C) detaches — Run returns with the session
-// still alive.
-func (s *Session) Attach() tea.ExecCommand { panic("sshx: unimplemented") }
-
-// Alive reports whether the remote shell is still running.
-func (s *Session) Alive() bool { panic("sshx: unimplemented") }
-
-// Done is closed when the session ends.
-func (s *Session) Done() <-chan struct{} { panic("sshx: unimplemented") }
-
-// Close terminates the session.
-func (s *Session) Close() error { panic("sshx: unimplemented") }
