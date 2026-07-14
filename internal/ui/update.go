@@ -84,6 +84,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Fast typing and pastes arrive as one KeyMsg carrying several runes; split
+	// them so every text input sees the same per-rune stream the handlers expect.
+	if k.Type == tea.KeyRunes && len(k.Runes) > 1 {
+		var cmds []tea.Cmd
+		var tm tea.Model = m
+		for _, r := range k.Runes {
+			nk := k
+			nk.Runes = []rune{r}
+			var cmd tea.Cmd
+			tm, cmd = tm.(Model).handleKey(nk)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		return tm, tea.Batch(cmds...)
+	}
 	key := k.String()
 	// ctrl+c is no longer a quit; while attached it's a byte to the remote, and
 	// in the TUI it does nothing.

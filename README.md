@@ -12,10 +12,10 @@ mobile companion, sync backend, deployment) live in sibling `wharf-*` repos.
 
 ## Status
 
-Early prototype. The full UI, navigation and flows from the design spec are implemented
-and driven by in-memory sample data. SSH sessions are **simulated** for now — the
-`exec()` seam in `internal/ui/update.go` is where a real `golang.org/x/crypto/ssh`
-channel slots in. See [Roadmap](#roadmap).
+**Usable SSH client.** Real SSH transport, encrypted vault persistence, host management,
+`~/.ssh/config` import, reachability probes and key generation are implemented and
+tested. The account/sync features (device-code sign-in, team projects) are still
+simulated pending `wharf-backend`. See [Roadmap](#roadmap).
 
 ## Run
 
@@ -23,27 +23,49 @@ channel slots in. See [Roadmap](#roadmap).
 go run .
 # or build a single static binary:
 go build -o wharf . && ./wharf
+
+# the original design prototype (sample data, simulated shell, no disk I/O):
+go run . --demo
 ```
 
-Requires Go 1.24+. No root, no daemon.
+Requires Go 1.24+. No root, no daemon. The vault lives at
+`${XDG_DATA_HOME:-~/.local/share}/wharf/vault.enc` (override with `WHARF_VAULT`).
+
+## How it works
+
+- **First run** creates your vault: choose a master password, then write down the
+  **40-character recovery code** — it is shown exactly once and is the *only* way back
+  in if you forget the password. Every later run starts at the unlock screen
+  (`r` switches to recovery-code entry, which forces a password reset and issues a
+  *new* code).
+- **Sessions are full-fidelity.** Connecting hands your real terminal to the remote
+  shell — vim, htop and tmux behave exactly as over plain `ssh`. Press **`ctrl+\`** to
+  detach: the session keeps running while you use the dashboard, and reattaching
+  replays recent output. `alt+1..9` jumps straight back into a live session.
+- **Auth chain:** ssh-agent → configured key file (passphrase prompted in the TUI) →
+  password → keyboard-interactive. Host keys are verified against
+  `~/.ssh/known_hosts`; unknown hosts show a fingerprint confirmation (TOFU), and a
+  **changed** host key is a hard refusal — no override.
+- **Probes are advisory.** The online/degraded/offline dots come from an async TCP
+  check; they never block connecting.
 
 ## The model
 
-| Without an account (local) | Adds when you sign in |
+| Without an account (local) | Adds when you sign in *(planned)* |
 | --- | --- |
-| Hosts, keys/identities, settings | Cross-machine **sync** of your vault |
-| Open / detach / reconnect SSH sessions | **Projects**: shared host workspaces |
-| All three themes, live-switchable | Invite teammates, roles (owner/admin/member) |
+| Hosts, keys/identities, settings — encrypted vault | Cross-machine **sync** of your vault |
+| Real SSH sessions: connect / detach / reattach | **Projects**: shared host workspaces |
+| `~/.ssh/config` import, key generation, probes | Invite teammates, roles (owner/admin/member) |
 
-The login screen is the entry point, but it always offers **`l` — skip & use local**.
-
-### Security model (target)
+### Security model
 
 - Master password → key via **argon2id**, entirely client-side.
-- Vault blobs sealed with **XChaCha20-Poly1305** before they ever leave the device.
-- Sign-in is a **browser device-code** pairing — no password is ever typed into the TUI.
-- The only password recovery path is a **40-character recovery code** shown once at
-  onboarding. No email reset, no support backdoor.
+- Vault sealed with **XChaCha20-Poly1305**; the file is designed to be synced verbatim
+  as an opaque ciphertext blob (zero-knowledge server).
+- Two unlock slots: master password and the one-time **recovery code**. Regenerating
+  the code invalidates the old one. No email reset, no support backdoor.
+- Sign-in (when the backend lands) is a **browser device-code** pairing — no account
+  password is ever typed into the TUI.
 
 ## Keybindings
 
@@ -54,13 +76,15 @@ The login screen is the entry point, but it always offers **`l` — skip & use l
 | `/` | filter hosts (search as you type) |
 | `tab` | cycle list ⇄ detail pane focus |
 | `enter` | connect / open / toggle |
-| `i` | invite member (projects, signed in) |
-| `esc` | back / clear search / **detach** session |
-| `alt`+`1..9` | switch between open session tabs |
-| `q` | lock → login screen (sign in / out) |
-| `l` | *(login screen)* skip · use local |
+| `a` / `e` / `d` | add / edit / delete host |
+| `m` | import `~/.ssh/config` |
+| `R` | re-probe reachability |
+| `g` | generate an ed25519 key *(keys tab)* |
+| `ctrl+\` | **detach** the attached session |
+| `alt`+`1..9` | reattach a live session |
+| `q` | lock the vault |
+| `ctrl+q` | quit (confirms if sessions are live) |
 | `?` | toggle help |
-| `ctrl`+`c` | quit |
 
 ## Layout
 
@@ -68,20 +92,28 @@ The login screen is the entry point, but it always offers **`l` — skip & use l
 main.go                     program entry (Bubble Tea)
 internal/
   theme/    abyss · phosphor · amber palettes
-  data/     in-memory sample vault (hosts / projects / keys)
+  vault/    argon2id + XChaCha20-Poly1305 encrypted vault file
+  store/    hosts & settings document persisted through the vault
+  sshx/     SSH engine: auth chain, known_hosts/TOFU, detachable sessions
+  keys/     ~/.ssh scan + ed25519 generation
+  sshcfg/   ~/.ssh/config import
+  probe/    advisory TCP reachability checks
+  data/     demo-mode fixtures
   ui/       model · update · view (Elm architecture)
 ```
 
 Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) +
-[Lip Gloss](https://github.com/charmbracelet/lipgloss).
+[Lip Gloss](https://github.com/charmbracelet/lipgloss) and
+[`golang.org/x/crypto/ssh`](https://pkg.go.dev/golang.org/x/crypto/ssh).
 
 ## Roadmap
 
-- [ ] Real SSH transport (`x/crypto/ssh`), PTY, agent forwarding, keep-alive, mosh fallback
-- [ ] Local encrypted vault (argon2id + XChaCha20-Poly1305) with on-disk persistence
+- [ ] Port forwarding (`-L`-style local forwards per host)
 - [ ] Sync client against `wharf-backend` (device-code auth, ciphertext push/pull)
+- [ ] Team projects backed by the real backend
 - [ ] Hardware keys (YubiKey resident / `-SK`)
-- [ ] Config import from `~/.ssh/config`
+- [ ] Assign a scanned key to a host from the keys tab
+- [ ] mosh fallback
 
 ## License
 

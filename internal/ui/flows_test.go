@@ -244,3 +244,19 @@ func TestQuitNoSessions(t *testing.T) {
 		t.Fatal("ctrl+q should emit tea.Quit when there is nothing to close")
 	}
 }
+
+func TestMultiRuneKeyMsgFillsInput(t *testing.T) {
+	// Fast typing and bracketed paste deliver several runes in ONE KeyMsg;
+	// the input handlers must not drop them (regression: E2E via expect).
+	m := New(Config{
+		VaultPath:   "/tmp/none",
+		VaultExists: func(string) bool { return true },
+		OpenVault:   func(string, []byte) (vaultHandle, error) { return nil, vault.ErrWrongSecret },
+	})
+	var tm tea.Model = m
+	tm = send(tm, tea.WindowSizeMsg{Width: 100, Height: 32})
+	tm = send(tm, runes("hunter2")) // one msg, seven runes
+	if !strings.Contains(tm.View(), "•••••••") {
+		t.Fatalf("a multi-rune KeyMsg should fill the password field:\n%s", tm.View())
+	}
+}
