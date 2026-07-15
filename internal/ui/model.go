@@ -53,6 +53,7 @@ const (
 	modalQuitConfirm
 	modalError
 	modalSyncConflict
+	modalChangePassword
 )
 
 // syncState is the rendered sync status (header indicator). It is pure
@@ -114,6 +115,7 @@ var settingDefs = []settingDef{
 	{"keepalive", "Keep-alive packets (30s)"},
 	{"telemetry", "Anonymous usage telemetry"},
 	{"account", "Account"},
+	{"password", "Master password"},
 	{"theme", "Theme"},
 }
 
@@ -225,6 +227,12 @@ type Model struct {
 	kgVals  [3]string // name, comment, passphrase
 	kgFocus int
 	kgErr   string
+
+	// change-master-password modal: current, new, confirm.
+	cpVals  [3]string
+	cpFocus int
+	cpErr   string
+	cpBusy  bool // async re-key + upload in flight (blocks input, shows spinner)
 
 	dialHostID string
 	dialCancel context.CancelFunc

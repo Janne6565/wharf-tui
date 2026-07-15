@@ -215,6 +215,26 @@ func (c *Client) PutVault(ctx context.Context, blob []byte, expectedVersion int6
 	return resp.Version, nil
 }
 
+// ChangePassword rotates the account's password auth key and replaces the
+// remote vault blob with one re-encrypted under the new password, returning the
+// new vault version. currentAuthKey / newAuthKey are the base64 keys derived
+// from the old and new passwords (see internal/cred). The recovery code is left
+// untouched, and the session stays valid.
+func (c *Client) ChangePassword(ctx context.Context, currentAuthKey, newAuthKey string, blob []byte) (int64, error) {
+	body := map[string]string{
+		"currentAuthKey": currentAuthKey,
+		"newAuthKey":     newAuthKey,
+		"vault":          base64.StdEncoding.EncodeToString(blob),
+	}
+	var resp struct {
+		Version int64 `json:"version"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/auth/password", body, &resp, true); err != nil {
+		return 0, err
+	}
+	return resp.Version, nil
+}
+
 // refresh exchanges the refresh token for a new pair (DIRECT mode). A 401
 // here means the session is dead.
 func (c *Client) refreshTokens(ctx context.Context) error {

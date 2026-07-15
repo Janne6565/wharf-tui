@@ -86,6 +86,8 @@ func (m Model) modalKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		return m.errorModalKey(key)
 	case modalSyncConflict:
 		return m.syncConflictKey(key)
+	case modalChangePassword:
+		return m.changePasswordKey(key)
 	}
 	return m, nil
 }

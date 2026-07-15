@@ -10,7 +10,12 @@ import (
 	stdsync "sync"
 
 	"github.com/Janne6565/wharf-tui/internal/api"
+	"github.com/Janne6565/wharf-tui/internal/cred"
 )
+
+// ErrSignedOut is returned by operations that require a paired session when
+// none is loaded.
+var ErrSignedOut = errors.New("sync: not signed in")
 
 // API is the slice of the backend client the engine depends on, behind an
 // interface so tests inject a fake. *api.Client satisfies it.
@@ -18,6 +23,7 @@ type API interface {
 	ExchangeDeviceCode(ctx context.Context, code, deviceName string) (api.Session, error)
 	GetVault(ctx context.Context) (api.Vault, error)
 	PutVault(ctx context.Context, blob []byte, expectedVersion int64) (int64, error)
+	ChangePassword(ctx context.Context, currentAuthKey, newAuthKey string, blob []byte) (int64, error)
 	SetTokens(access, refresh string)
 	RefreshToken() string
 }
@@ -180,6 +186,60 @@ func (e *Engine) SignOut() {
 	e.sess = nil
 	e.pending = nil
 	e.cfg.API.SetTokens("", "")
+}
+
+// SetPassword replaces the retained master password, zeroing the old one. The
+// caller changed the master password on an unlocked vault; the engine needs the
+// new one to unlock remote blobs (and, after an offline change, to keep the
+// retained secret consistent for the next sign-in and sync).
+func (e *Engine) SetPassword(newPassword []byte) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	zero(e.cfg.Password)
+	e.cfg.Password = append([]byte(nil), newPassword...)
+}
+
+// ChangePassword rotates the account's server-side auth key and uploads the
+// vault blob re-encrypted under the new password (produced by the caller's
+// local vault.ChangePassword), then records agreement at the returned version
+// so the next sync is a no-op. The auth keys are derived here from the paired
+// account's email. On success the retained master password is updated too.
+//
+// currentPassword and newPassword are the plaintext master passwords; payload
+// is the current (unchanged) vault payload, captured by the caller on the UI
+// goroutine. This performs argon2id twice, so it is slow — run it off the UI
+// goroutine like every other engine call.
+func (e *Engine) ChangePassword(ctx context.Context, currentPassword, newPassword, payload []byte) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.sess == nil || e.closed {
+		return ErrSignedOut
+	}
+	email := e.sess.Email
+	currentAuthKey, err := cred.AuthKey(string(currentPassword), email)
+	if err != nil {
+		return err
+	}
+	newAuthKey, err := cred.AuthKey(string(newPassword), email)
+	if err != nil {
+		return err
+	}
+	blob, err := e.cfg.ReadBlob()
+	if err != nil {
+		return err
+	}
+	version, err := e.cfg.API.ChangePassword(ctx, currentAuthKey, newAuthKey, blob)
+	if err != nil {
+		return err
+	}
+	// The retained password must now be the new one (remote-blob unlocks).
+	zero(e.cfg.Password)
+	e.cfg.Password = append([]byte(nil), newPassword...)
+	// Record agreement at the new version so a follow-up sync doesn't treat the
+	// server-side rewrite as a remote change and try to re-adopt it.
+	_ = e.commit(version, fingerprint(payload))
+	e.persistRotation()
+	return nil
 }
 
 // Sync runs one full sync pass against payload, the current local vault

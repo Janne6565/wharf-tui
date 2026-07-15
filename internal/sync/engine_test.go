@@ -24,6 +24,11 @@ type fakeAPI struct {
 
 	getErr error // forced error on GetVault
 	puts   int
+
+	changePwErr    error  // forced error on ChangePassword
+	changePwCalls  int    // number of ChangePassword calls
+	lastCurrentKey string // last currentAuthKey seen by ChangePassword
+	lastNewKey     string // last newAuthKey seen by ChangePassword
 }
 
 func (f *fakeAPI) ExchangeDeviceCode(_ context.Context, code, _ string) (api.Session, error) {
@@ -51,6 +56,20 @@ func (f *fakeAPI) PutVault(_ context.Context, blob []byte, expectedVersion int64
 	f.puts++
 	if !f.noVault && expectedVersion != f.version {
 		return 0, api.ErrVaultConflict
+	}
+	f.noVault = false
+	f.vault = append([]byte(nil), blob...)
+	f.version++
+	return f.version, nil
+}
+
+func (f *fakeAPI) ChangePassword(_ context.Context, currentAuthKey, newAuthKey string, blob []byte) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.changePwCalls++
+	f.lastCurrentKey, f.lastNewKey = currentAuthKey, newAuthKey
+	if f.changePwErr != nil {
+		return 0, f.changePwErr
 	}
 	f.noVault = false
 	f.vault = append([]byte(nil), blob...)
@@ -487,6 +506,64 @@ func TestVaultInterop(t *testing.T) {
 	}
 	if res := e.Sync(context.Background(), lv.Payload()); res.Pushed || res.Adopt != nil || res.Conflict != nil || res.Err != nil {
 		t.Fatalf("interop should converge, got %+v", res)
+	}
+}
+
+func TestChangePasswordRotatesKeyUpdatesRetainedPwAndConverges(t *testing.T) {
+	f := &fakeAPI{noVault: true}
+	local := payloadN(2, "l")
+	e := testEngine(t, f, &local)
+
+	if err := e.ChangePassword(context.Background(), []byte("pw"), []byte("newpw"), local); err != nil {
+		t.Fatalf("ChangePassword: %v", err)
+	}
+
+	if f.changePwCalls != 1 {
+		t.Fatalf("ChangePassword calls = %d, want 1", f.changePwCalls)
+	}
+	// The two derived keys are real, distinct, base64 auth keys (not the raw
+	// passwords) — the server only ever sees the derived key.
+	if f.lastCurrentKey == "" || f.lastNewKey == "" || f.lastCurrentKey == f.lastNewKey {
+		t.Fatalf("auth keys not derived distinctly: cur=%q new=%q", f.lastCurrentKey, f.lastNewKey)
+	}
+	if f.lastCurrentKey == "pw" || f.lastNewKey == "newpw" {
+		t.Fatal("raw passwords must never be sent as auth keys")
+	}
+	// The retained master password is now the new one (for remote-blob unlocks).
+	if string(e.cfg.Password) != "newpw" {
+		t.Fatalf("retained password = %q, want newpw", e.cfg.Password)
+	}
+	// Bookkeeping was recorded at the new version, so a follow-up sync is a no-op.
+	res := e.Sync(context.Background(), local)
+	if res.Pushed || res.Adopt != nil || res.Conflict != nil || res.Err != nil {
+		t.Fatalf("post-change sync should be a no-op, got %+v", res)
+	}
+}
+
+func TestChangePasswordServerErrorLeavesPasswordUnchanged(t *testing.T) {
+	f := &fakeAPI{noVault: true, changePwErr: &api.Error{Status: 401, Detail: "wrong current key"}}
+	local := payloadN(1, "l")
+	e := testEngine(t, f, &local)
+
+	err := e.ChangePassword(context.Background(), []byte("pw"), []byte("newpw"), local)
+	if err == nil {
+		t.Fatal("expected an error from the backend")
+	}
+	if string(e.cfg.Password) != "pw" {
+		t.Fatalf("retained password must be unchanged on failure, got %q", e.cfg.Password)
+	}
+}
+
+func TestChangePasswordSignedOut(t *testing.T) {
+	f := &fakeAPI{noVault: true}
+	e := New(Config{
+		API: f, SessionPath: filepath.Join(t.TempDir(), "session.enc"),
+		Key: make([]byte, 32), Password: []byte("pw"),
+		ReadBlob: func() ([]byte, error) { return wrap(payloadN(0, "l")), nil },
+		OpenBlob: fakeOpenBlob,
+	})
+	if err := e.ChangePassword(context.Background(), []byte("pw"), []byte("newpw"), nil); err != ErrSignedOut {
+		t.Fatalf("ChangePassword signed out = %v, want ErrSignedOut", err)
 	}
 }
 

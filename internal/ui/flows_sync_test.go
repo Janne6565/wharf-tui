@@ -21,6 +21,11 @@ type fakeBackend struct {
 	version int64
 	noVault bool
 	badCode bool
+
+	changePwErr    error
+	changePwCalls  int
+	lastCurrentKey string
+	lastNewKey     string
 }
 
 func (f *fakeBackend) ExchangeDeviceCode(_ context.Context, code, _ string) (api.Session, error) {
@@ -44,6 +49,20 @@ func (f *fakeBackend) PutVault(_ context.Context, blob []byte, expectedVersion i
 	defer f.mu.Unlock()
 	if !f.noVault && expectedVersion != f.version {
 		return 0, api.ErrVaultConflict
+	}
+	f.noVault = false
+	f.vault = append([]byte(nil), blob...)
+	f.version++
+	return f.version, nil
+}
+
+func (f *fakeBackend) ChangePassword(_ context.Context, currentAuthKey, newAuthKey string, blob []byte) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.changePwCalls++
+	f.lastCurrentKey, f.lastNewKey = currentAuthKey, newAuthKey
+	if f.changePwErr != nil {
+		return 0, f.changePwErr
 	}
 	f.noVault = false
 	f.vault = append([]byte(nil), blob...)
@@ -288,5 +307,130 @@ func TestSessionDeadSignsOutUI(t *testing.T) {
 	}
 	if !strings.Contains(tm.View(), "session expired") {
 		t.Fatalf("the user should be told to re-pair:\n%s", tm.View())
+	}
+}
+
+// openChangePwModal navigates to the settings tab and opens the change-master-
+// password modal from the "password" row. It leaves the cursor on the top field.
+func openChangePwModal(t *testing.T, tm tea.Model) tea.Model {
+	t.Helper()
+	tm = send(tm, runes("4")) // settings tab
+	for i := 0; i < len(settingDefs); i++ {
+		tm = send(tm, runes("k")) // clamp to the top row
+	}
+	// The "password" row sits just after "account".
+	pwIdx := 0
+	for i, d := range settingDefs {
+		if d.key == "password" {
+			pwIdx = i
+		}
+	}
+	for i := 0; i < pwIdx; i++ {
+		tm = send(tm, runes("j"))
+	}
+	tm, _ = step(tm, special(tea.KeyEnter))
+	if tm.(Model).modal != modalChangePassword {
+		t.Fatalf("password row should open the change-password modal, got modal %d\n%s",
+			tm.(Model).modal, tm.View())
+	}
+	return tm
+}
+
+func TestChangePasswordSignedInRotatesLocalAndRemote(t *testing.T) {
+	tm, fv, fb := pairModel(t)
+	tm = openChangePwModal(t, tm)
+
+	// current → new → confirm.
+	tm = typeStr(tm, "pw")
+	tm = send(tm, special(tea.KeyTab))
+	tm = typeStr(tm, "newpw")
+	tm = send(tm, special(tea.KeyTab))
+	tm = typeStr(tm, "newpw")
+
+	tm, cmd := step(tm, special(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("submitting should kick off the async re-key")
+	}
+	if !tm.(Model).cpBusy {
+		t.Fatal("the modal should show a busy state while re-keying")
+	}
+	tm, _ = step(tm, cmd()) // changePasswordDoneMsg
+
+	if fv.changePwCalls != 1 || fv.lastPw != "newpw" {
+		t.Fatalf("local vault should be re-keyed once to the new password, got calls=%d last=%q",
+			fv.changePwCalls, fv.lastPw)
+	}
+	fb.mu.Lock()
+	calls, curKey, newKey := fb.changePwCalls, fb.lastCurrentKey, fb.lastNewKey
+	fb.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("backend change-password should be called once, got %d", calls)
+	}
+	if curKey == "" || newKey == "" || curKey == newKey {
+		t.Fatalf("distinct auth keys should be derived, got cur=%q new=%q", curKey, newKey)
+	}
+	if curKey == "pw" || newKey == "newpw" {
+		t.Fatal("raw passwords must never be sent as auth keys")
+	}
+	if m := tm.(Model); m.modal != modalNone {
+		t.Fatal("a successful change should close the modal")
+	}
+	if !strings.Contains(tm.View(), "master password changed") {
+		t.Fatalf("success should confirm via toast:\n%s", tm.View())
+	}
+}
+
+func TestChangePasswordOfflineSkipsBackend(t *testing.T) {
+	tm, fv, fb := syncedModel(t) // unlocked but not signed in
+	tm = openChangePwModal(t, tm)
+
+	tm = typeStr(tm, "pw")
+	tm = send(tm, special(tea.KeyTab))
+	tm = typeStr(tm, "brandnew")
+	tm = send(tm, special(tea.KeyTab))
+	tm = typeStr(tm, "brandnew")
+	tm, cmd := step(tm, special(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("submitting should kick off the async re-key")
+	}
+	tm, _ = step(tm, cmd())
+
+	if fv.changePwCalls != 1 || fv.lastPw != "brandnew" {
+		t.Fatalf("offline change should still re-key the local vault, got calls=%d last=%q",
+			fv.changePwCalls, fv.lastPw)
+	}
+	fb.mu.Lock()
+	calls := fb.changePwCalls
+	fb.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("a signed-out change must not touch the backend, got %d calls", calls)
+	}
+	if !strings.Contains(tm.View(), "master password changed") {
+		t.Fatalf("offline success should still confirm via toast:\n%s", tm.View())
+	}
+}
+
+func TestChangePasswordMismatchIsRejected(t *testing.T) {
+	tm, fv, _ := syncedModel(t)
+	tm = openChangePwModal(t, tm)
+
+	tm = typeStr(tm, "pw")
+	tm = send(tm, special(tea.KeyTab))
+	tm = typeStr(tm, "newpw")
+	tm = send(tm, special(tea.KeyTab))
+	tm = typeStr(tm, "different")
+	tm, cmd := step(tm, special(tea.KeyEnter))
+	if cmd != nil {
+		t.Fatal("a mismatch must not start the re-key")
+	}
+	m := tm.(Model)
+	if m.modal != modalChangePassword {
+		t.Fatal("the modal should stay open on a validation error")
+	}
+	if fv.changePwCalls != 0 {
+		t.Fatal("no re-key should happen on a validation error")
+	}
+	if !strings.Contains(tm.View(), "do not match") {
+		t.Fatalf("the mismatch error should be shown:\n%s", tm.View())
 	}
 }

@@ -14,9 +14,11 @@ import (
 
 // fakeVault is a fast in-memory vaultHandle so UI tests avoid argon2's cost.
 type fakeVault struct {
-	payload []byte
-	saves   int
-	closed  bool
+	payload       []byte
+	saves         int
+	closed        bool
+	changePwCalls int
+	lastPw        string
 }
 
 func (f *fakeVault) Payload() []byte { return f.payload }
@@ -25,7 +27,11 @@ func (f *fakeVault) Save(p []byte) error {
 	f.saves++
 	return nil
 }
-func (f *fakeVault) ChangePassword([]byte) error         { return nil }
+func (f *fakeVault) ChangePassword(pw []byte) error {
+	f.changePwCalls++
+	f.lastPw = string(pw)
+	return nil
+}
 func (f *fakeVault) RegenerateRecovery() (string, error) { return code40, nil }
 func (f *fakeVault) DeriveKey(string) ([]byte, error)    { return make([]byte, 32), nil }
 func (f *fakeVault) Close() error                        { f.closed = true; return nil }

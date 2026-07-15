@@ -56,6 +56,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSyncDone(msg)
 	case syncPushTimerMsg:
 		return m.handleSyncPushTimer(msg)
+	case changePasswordDoneMsg:
+		return m.handleChangePasswordDone(msg)
 
 	// data-layer results.
 	case probeResultMsg:
@@ -464,6 +466,11 @@ func (m Model) toggleSetting() (tea.Model, tea.Cmd) {
 		m.code = ""
 		m.authErr = ""
 		return m, nil
+	case "password":
+		if m.demo || m.vault == nil {
+			return m.setToast("changing the master password needs a real vault", "err"), nil
+		}
+		return m.openChangePassword(), nil
 	case "agent":
 		m.settings.Agent = !m.settings.Agent
 	case "keepalive":

@@ -751,6 +751,8 @@ func (m Model) settingsTab(t theme.Theme, contentH int) []string {
 			} else {
 				val, vc = "signed out", t.Dim
 			}
+		case "password":
+			val, vc = "change ›", t.Hi
 		default:
 			if m.settingOn(d.key) {
 				val, vc = "[on]", t.Ok

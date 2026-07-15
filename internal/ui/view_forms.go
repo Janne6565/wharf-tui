@@ -31,6 +31,8 @@ func (m Model) modalView(t theme.Theme) []string {
 		return m.errorView(t)
 	case modalSyncConflict:
 		return m.syncConflictView(t)
+	case modalChangePassword:
+		return m.changePasswordView(t)
 	}
 	return m.mainView(t)
 }
@@ -139,6 +141,41 @@ func authDetail(h store.Host) string {
 		return "key " + h.KeyPath
 	}
 	return "key (agent)"
+}
+
+// --- change master password -------------------------------------------------
+
+func (m Model) changePasswordView(t theme.Theme) []string {
+	labels := [cpFields]string{"current", "new", "confirm"}
+	var body []string
+	for i := 0; i < cpFields; i++ {
+		focused := i == m.cpFocus
+		masked := strings.Repeat("•", len([]rune(m.cpVals[i])))
+		line := stl(t.Dim, t.Panel).Render(padTo2(labels[i], 10)) + stl(t.Hi, t.Panel).Render(masked)
+		if focused && !m.cpBusy {
+			line += m.cur(t.Hi, t.Panel)
+		}
+		body = append(body, line)
+	}
+	if m.cpErr != "" {
+		body = append(body, "", stl(t.Err, t.Panel).Render(m.cpErr))
+	}
+	body = append(body, "")
+	if m.signedIn {
+		body = append(body, stl(t.Dim, t.Panel).Render("Re-encrypts the vault and rotates the online key."))
+	} else {
+		body = append(body, stl(t.Dim, t.Panel).Render("Re-encrypts the local vault. Recovery code is unchanged."))
+	}
+	body = append(body, "")
+	if m.cpBusy {
+		body = append(body, stl(t.Warn, t.Panel).Render(m.spinner()+" changing password …"))
+	} else {
+		body = append(body,
+			stl(t.Hi, t.Panel).Render("tab/↑↓")+stl(t.Dim, t.Panel).Render(" move · ")+
+				stl(t.Hi, t.Panel).Render("enter")+stl(t.Dim, t.Panel).Render(" change · ")+
+				stl(t.Hi, t.Panel).Render("esc")+stl(t.Dim, t.Panel).Render(" cancel"))
+	}
+	return m.modalBox(t, "change master password", "hi", body)
 }
 
 // --- delete confirm ---------------------------------------------------------
