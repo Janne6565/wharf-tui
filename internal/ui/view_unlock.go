@@ -9,7 +9,7 @@ import (
 // unlockView renders the real-mode vault gate, styled like the auth screen
 // (centered panel, ⚓ wharf branding).
 func (m Model) unlockView(t theme.Theme) []string {
-	logo := bold(t.Hi, t.Bg).Render("⚓ wharf") + m.cur(t.Hi, t.Bg)
+	logo := bold(t.Hi, t.Bg).Render("⚓ wharf")
 	subtitle := stl(t.Dim, t.Bg).Render("local encrypted vault")
 
 	pw := 66

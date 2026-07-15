@@ -156,7 +156,7 @@ func topInArea(block []string, w, areaH int, bg lipgloss.Color) []string {
 // --- auth / login (simulated account) ---------------------------------------
 
 func (m Model) authView(t theme.Theme) []string {
-	logo := bold(t.Hi, t.Bg).Render("⚓ wharf") + m.cur(t.Hi, t.Bg)
+	logo := bold(t.Hi, t.Bg).Render("⚓ wharf")
 	subtitle := stl(t.Dim, t.Bg).Render("your fleet, one terminal · v1.0.0")
 
 	pw := 72
