@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"os"
 	"strings"
+	"time"
 
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
@@ -342,20 +344,64 @@ func (m Model) syncConflictView(t theme.Theme) []string {
 	if c == nil {
 		return m.mainView(t)
 	}
+	localMeta := "this machine"
+	if ts := humanizeAgo(m.localVaultModTime()); ts != "" {
+		localMeta += " · " + ts
+	}
+	remoteMeta := "account · v" + itoa(int(c.RemoteVersion))
+	if ts := humanizeAgo(c.RemoteUpdatedAt); ts != "" {
+		remoteMeta += " · " + ts
+	}
 	body := []string{
 		stl(t.Warn, t.Panel).Render("This vault and the account vault both changed."),
 		stl(t.Dim, t.Panel).Render("Pick which one to keep — the other side is overwritten."),
 		"",
 		stl(t.Fg, t.Panel).Render("local   ") + stl(t.Hi, t.Panel).Render(itoa(c.LocalHosts)+" host(s)") +
-			stl(t.Dim, t.Panel).Render("  this machine"),
+			stl(t.Dim, t.Panel).Render("  "+localMeta),
 		stl(t.Fg, t.Panel).Render("remote  ") + stl(t.Hi, t.Panel).Render(itoa(c.RemoteHosts)+" host(s)") +
-			stl(t.Dim, t.Panel).Render("  account · v"+itoa(int(c.RemoteVersion))),
+			stl(t.Dim, t.Panel).Render("  "+remoteMeta),
 		"",
 		stl(t.Hi, t.Panel).Render("l") + stl(t.Dim, t.Panel).Render("  keep local — overwrite the account vault"),
 		stl(t.Hi, t.Panel).Render("r") + stl(t.Dim, t.Panel).Render("  take remote — discard this machine's changes"),
 		stl(t.Hi, t.Panel).Render("esc") + stl(t.Dim, t.Panel).Render("  decide later (sync pauses)"),
 	}
 	return m.modalBox(t, "sync conflict", "warn", body)
+}
+
+// localVaultModTime is the vault file's last-modified time — a stand-in for
+// "when this machine last changed the vault". Zero if it can't be stat'd (e.g.
+// a fake vault in tests).
+func (m Model) localVaultModTime() time.Time {
+	fi, err := os.Stat(m.vaultPath)
+	if err != nil {
+		return time.Time{}
+	}
+	return fi.ModTime()
+}
+
+// humanizeAgo renders a coarse "time ago" label, or "" for the zero time (which
+// means the timestamp is unknown, so it's simply omitted).
+func humanizeAgo(ts time.Time) string {
+	if ts.IsZero() {
+		return ""
+	}
+	d := time.Since(ts)
+	switch {
+	case d < 45*time.Second:
+		return "just now"
+	case d < 90*time.Second:
+		return "1 min ago"
+	case d < time.Hour:
+		return itoa(int(d/time.Minute)) + " min ago"
+	case d < 2*time.Hour:
+		return "1 hour ago"
+	case d < 24*time.Hour:
+		return itoa(int(d/time.Hour)) + " hours ago"
+	case d < 48*time.Hour:
+		return "yesterday"
+	default:
+		return itoa(int(d/(24*time.Hour))) + " days ago"
+	}
 }
 
 // --- prominent error --------------------------------------------------------

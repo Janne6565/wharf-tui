@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	stdsync "sync"
+	"time"
 
 	"github.com/Janne6565/wharf-tui/internal/api"
 	"github.com/Janne6565/wharf-tui/internal/cred"
@@ -54,6 +55,10 @@ type Conflict struct {
 	LocalHosts    int
 	RemoteHosts   int
 	RemoteVersion int64
+	// RemoteUpdatedAt is when the server last wrote the remote vault (zero if
+	// the backend did not report it). The local side's "last changed" is the
+	// vault file mtime, read by the UI where it has the path.
+	RemoteUpdatedAt time.Time
 }
 
 // Result is the outcome of one Sync/Resolve pass. The UI turns it into
@@ -322,7 +327,12 @@ func (e *Engine) syncLocked(ctx context.Context, payload []byte, retryOn409 bool
 		return e.pushLocked(ctx, payload, fp, remote.Version, retryOn409)
 	}
 	e.pending = &pendingRemote{payload: remotePayload, version: remote.Version}
-	return Result{Conflict: &Conflict{LocalHosts: lh, RemoteHosts: rh, RemoteVersion: remote.Version}}
+	return Result{Conflict: &Conflict{
+		LocalHosts:      lh,
+		RemoteHosts:     rh,
+		RemoteVersion:   remote.Version,
+		RemoteUpdatedAt: remote.UpdatedAt,
+	}}
 }
 
 // pushLocked uploads the local vault blob with optimistic versioning.
