@@ -17,9 +17,9 @@ var testParams = Params{Time: 1, MemoryKiB: 8 * 1024, Parallelism: 1}
 func newVault(t *testing.T) (path string, code string, v *Vault) {
 	t.Helper()
 	path = filepath.Join(t.TempDir(), "vault.enc")
-	v, code, err := createWithParams(path, []byte("hunter2"), testParams)
+	v, code, err := CreateWithParams(path, []byte("hunter2"), testParams)
 	if err != nil {
-		t.Fatalf("createWithParams: %v", err)
+		t.Fatalf("CreateWithParams: %v", err)
 	}
 	return path, code, v
 }

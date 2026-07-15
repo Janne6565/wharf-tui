@@ -26,9 +26,13 @@ package vault
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/crypto/hkdf"
 )
 
 // Params are the argon2id cost parameters recorded in the vault header.
@@ -79,12 +83,13 @@ func Exists(path string) bool {
 // (40 chars Crockford base32, formatted XXXXX-XXXXX-... in the UI). The code
 // is never stored anywhere.
 func Create(path string, password []byte) (v *Vault, recoveryCode string, err error) {
-	return createWithParams(path, password, DefaultParams)
+	return CreateWithParams(path, password, DefaultParams)
 }
 
-// createWithParams is the Create implementation with explicit cost parameters.
-// Tests use it with tiny params; the exported Create pins DefaultParams.
-func createWithParams(path string, password []byte, params Params) (*Vault, string, error) {
+// CreateWithParams is Create with explicit cost parameters. Production code
+// uses Create (pinned DefaultParams); tests and fixture tooling that need
+// cheap argon2 (e.g. constructing sync blobs) pass tiny params here.
+func CreateWithParams(path string, password []byte, params Params) (*Vault, string, error) {
 	if !validParams(params) {
 		return nil, "", errors.New("vault: invalid argon2 parameters")
 	}
@@ -168,6 +173,30 @@ func OpenWithRecovery(path, code string) (*Vault, error) {
 	})
 }
 
+// OpenPayload decrypts a WHARFV blob held in memory (e.g. fetched by the sync
+// layer from the server) with the master password and returns its payload. It
+// takes no file lock and keeps nothing: the DEK is derived, used and zeroed.
+// A remote blob has its own random slot salts and its own DEK, so only the
+// master password — never a local vault's DEK — can open it.
+func OpenPayload(blob, password []byte) ([]byte, error) {
+	h, body, err := parseHeader(blob)
+	if err != nil {
+		return nil, err
+	}
+	kek := deriveKEK(password, h.pwSalt[:], h.params)
+	dek, err := unwrapDEK(kek, h.pwNonce[:], h.pwWrap[:])
+	zero(kek)
+	if err != nil {
+		return nil, ErrWrongSecret
+	}
+	payload, err := openBody(dek, h.bodyNonce[:], body, blob[:headerLen])
+	zero(dek)
+	if err != nil {
+		return nil, ErrCorrupt
+	}
+	return payload, nil
+}
+
 // openVault is the shared unlock path: it enforces existence, takes the lock,
 // reads and validates the header, then delegates DEK recovery to unwrap.
 func openVault(path string, unwrap func(header) ([]byte, error)) (*Vault, error) {
@@ -219,6 +248,23 @@ type Vault struct {
 // Payload returns the current decrypted payload (JSON document owned by
 // internal/store).
 func (v *Vault) Payload() []byte { return v.payload }
+
+// DeriveKey returns a 32-byte subkey of the DEK bound to info via
+// HKDF-SHA256. Device-local secrets that must not live inside the synced
+// payload (e.g. the sync session file) are encrypted under such a subkey: the
+// raw DEK never leaves the vault, and each purpose gets an independent key.
+// The subkey shares the DEK's lifetime — a re-created vault (new DEK) makes
+// previously derived keys useless, which callers must treat as "start over".
+func (v *Vault) DeriveKey(info string) ([]byte, error) {
+	if v.dek == nil {
+		return nil, errors.New("vault: closed")
+	}
+	key := make([]byte, dekLen)
+	if _, err := io.ReadFull(hkdf.New(sha256.New, v.dek, nil, []byte(info)), key); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
 
 // Save re-seals the payload with a fresh body nonce and atomically rewrites
 // the file (tmp + fsync + rename + fsync dir).
