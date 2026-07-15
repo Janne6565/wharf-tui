@@ -248,21 +248,37 @@ func stripScheme(u string) string {
 // apiBaseDisplay is the backend host shown on the sign-in footer.
 func apiBaseDisplay() string { return api.BaseURL() }
 
-// codeLine renders the device code as "TYPED▌rest" in XXXX-XXXX form.
+// codeLine renders the device code as "TYPED▌rest" in XXXX-XXXX form. All
+// slicing is by rune, not byte: the "·" placeholder is multi-byte, so byte
+// slicing would cut it mid-rune and emit replacement characters.
 func (m Model) codeLine(t theme.Theme) string {
-	pad := m.code
-	for len(pad) < 8 {
-		pad += "·"
+	const slots = 8
+	typed := []rune(m.code)
+	if len(typed) > slots {
+		typed = typed[:slots]
 	}
-	pad = pad[:8]
-	disp := pad[:4] + "-" + pad[4:]
-	cut := len(m.code)
-	if len(m.code) > 4 {
+	// Fill the 8 slots: typed characters, then middle-dot placeholders.
+	disp := make([]rune, 0, slots+1)
+	for i := 0; i < slots; i++ {
+		if i == 4 {
+			disp = append(disp, '-')
+		}
+		if i < len(typed) {
+			disp = append(disp, typed[i])
+		} else {
+			disp = append(disp, '·')
+		}
+	}
+	// The cursor sits after the typed characters, hopping over the dash once
+	// past the fourth slot.
+	cut := len(typed)
+	if cut > 4 {
 		cut++
 	}
-	typed := disp[:cut]
-	rest := disp[cut:]
-	return stl(t.Hi, t.Panel).Render(typed) + m.cur(t.Hi, t.Panel) + stl(t.Dim, t.Panel).Render(rest)
+	if cut > len(disp) {
+		cut = len(disp)
+	}
+	return stl(t.Hi, t.Panel).Render(string(disp[:cut])) + m.cur(t.Hi, t.Panel) + stl(t.Dim, t.Panel).Render(string(disp[cut:]))
 }
 
 // --- dashboard --------------------------------------------------------------
