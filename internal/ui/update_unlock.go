@@ -164,6 +164,7 @@ func (m Model) handleVaultMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.unlockErr = err.Error()
 			return m, nil
 		}
+		m = m.initSync(msg.pw)
 		m.recoveryCode = msg.code
 		m.pwInput, m.pwConfirm = "", ""
 		m.unlockStep = ulShowCode
@@ -180,6 +181,7 @@ func (m Model) handleVaultMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pwInput = ""
 			return m, nil
 		}
+		m = m.initSync(msg.pw)
 		m.pwInput = ""
 		m.screen = scMain
 		m.tab = 0
@@ -214,6 +216,7 @@ func (m Model) handleVaultMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.unlockErr = err.Error()
 			return m, nil
 		}
+		m = m.initSync(msg.pw)
 		m.recoveryCode = msg.code
 		m.unlockStep = ulShowCode
 		return m, nil
@@ -256,14 +259,16 @@ func (m *Model) openStoreFromVault() error {
 	return nil
 }
 
-// afterUnlockCmds fans out probes and a key scan once the vault is open. The
-// tick loop keeps running from Init, so it is not restarted here.
+// afterUnlockCmds fans out probes, a key scan, and the sync-session resume
+// once the vault is open. The tick loop keeps running from Init, so it is
+// not restarted here.
 func (m Model) afterUnlockCmds() tea.Cmd {
-	return tea.Batch(m.probeCmds(), m.scanKeysCmd())
+	return tea.Batch(m.probeCmds(), m.scanKeysCmd(), m.resumeSyncCmd())
 }
 
-// lock saves, closes the vault, wipes the in-memory data, and returns to the
-// unlock screen. Best-effort: a save/close failure still locks the UI.
+// lock saves, closes the vault and the sync engine, wipes the in-memory
+// data, and returns to the unlock screen. Best-effort: a save/close failure
+// still locks the UI.
 func (m Model) lock() (tea.Model, tea.Cmd) {
 	if m.st != nil {
 		_ = m.st.Save()
@@ -271,6 +276,7 @@ func (m Model) lock() (tea.Model, tea.Cmd) {
 	if m.vault != nil {
 		_ = m.vault.Close()
 	}
+	m = m.closeSync()
 	m.st = nil
 	m.vault = nil
 	m.probes = map[string]probe.Result{}

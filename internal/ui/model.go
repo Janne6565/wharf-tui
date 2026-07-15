@@ -10,6 +10,7 @@ import (
 	"github.com/Janne6565/wharf-tui/internal/probe"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
+	syncx "github.com/Janne6565/wharf-tui/internal/sync"
 	"github.com/Janne6565/wharf-tui/internal/theme"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -51,6 +52,19 @@ const (
 	modalKeygen
 	modalQuitConfirm
 	modalError
+	modalSyncConflict
+)
+
+// syncState is the rendered sync status (header indicator). It is pure
+// display state: the truth lives in the sync engine and arrives as messages.
+type syncState int
+
+const (
+	ssNone     syncState = iota // signed out / no sync yet
+	ssSyncing                   // a sync pass is in flight
+	ssSynced                    // in agreement with the remote
+	ssOffline                   // last pass failed (network/backend)
+	ssConflict                  // both sides changed; user must resolve
 )
 
 // host-form field indices. fAuth is the two-way selector; fKey and fPassword
@@ -113,6 +127,9 @@ type vaultHandle interface {
 	Save([]byte) error
 	ChangePassword([]byte) error
 	RegenerateRecovery() (string, error)
+	// DeriveKey returns a 32-byte HKDF subkey of the vault DEK bound to info
+	// (used to seal the device-local sync session file).
+	DeriveKey(info string) ([]byte, error)
 	Close() error
 }
 
@@ -125,12 +142,28 @@ type Model struct {
 	screen      screen
 	authStep    int    // 0 intro · 1 enter code · 2 verifying
 	code        string // typed device code (up to 8 chars)
-	postAuthTab int    // tab to return to after a simulated sign-in
+	authErr     string // pairing failure shown on the code screen (real mode)
+	postAuthTab int    // tab to return to after a sign-in
 
-	// Account state (simulated). Wharf is local-first: everything below works
-	// signed out; signing in only adds cross-machine sync and the Projects tab.
+	// Account state. Wharf is local-first: everything below works signed
+	// out; signing in only adds cross-machine sync and the Projects tab.
+	// Real mode pairs against the backend; demo mode stays simulated.
 	signedIn bool
 	email    string
+
+	// --- vault sync (real mode) ---
+	// The engine owns the paired session and bookkeeping; the Model only
+	// renders the state it reports via messages.
+	eng       *syncx.Engine
+	syncSt    syncState
+	conflict  *syncx.Conflict
+	syncGen   int    // debounce generation for post-save pushes
+	deviceURL string // pairing page shown on the sign-in screen
+
+	// sync hooks (injectable for tests; defaults wired in initSync).
+	syncAPI      syncx.API
+	syncReadBlob func() ([]byte, error)
+	syncOpenBlob func(blob, password []byte) ([]byte, error)
 
 	tab   int // active dashboard tab
 	focus int // 0 list pane · 1 detail pane

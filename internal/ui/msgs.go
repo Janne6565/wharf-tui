@@ -13,14 +13,19 @@ import (
 
 // --- vault gate messages ----------------------------------------------------
 
+// The gate messages carry the master password onward: the sync engine
+// retains it in memory to unlock remote vault blobs (which have their own
+// salts and DEK). It never touches disk.
 type vaultCreatedMsg struct {
 	v    vaultHandle
 	code string
+	pw   string
 	err  error
 }
 
 type vaultOpenedMsg struct {
 	v   vaultHandle
+	pw  string
 	err error
 }
 
@@ -31,6 +36,7 @@ type vaultRecoveredMsg struct {
 
 type vaultResetMsg struct {
 	code string
+	pw   string
 	err  error
 }
 
@@ -38,7 +44,7 @@ func (m Model) createCmd(pw string) tea.Cmd {
 	path, fn := m.vaultPath, m.createVault
 	return func() tea.Msg {
 		v, code, err := fn(path, []byte(pw))
-		return vaultCreatedMsg{v: v, code: code, err: err}
+		return vaultCreatedMsg{v: v, code: code, pw: pw, err: err}
 	}
 }
 
@@ -46,7 +52,7 @@ func (m Model) openCmd(pw string) tea.Cmd {
 	path, fn := m.vaultPath, m.openVault
 	return func() tea.Msg {
 		v, err := fn(path, []byte(pw))
-		return vaultOpenedMsg{v: v, err: err}
+		return vaultOpenedMsg{v: v, pw: pw, err: err}
 	}
 }
 
@@ -66,7 +72,7 @@ func resetCmd(v vaultHandle, pw string) tea.Cmd {
 			return vaultResetMsg{err: err}
 		}
 		code, err := v.RegenerateRecovery()
-		return vaultResetMsg{code: code, err: err}
+		return vaultResetMsg{code: code, pw: pw, err: err}
 	}
 }
 

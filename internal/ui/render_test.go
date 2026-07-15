@@ -85,6 +85,49 @@ func TestDumpFrames(t *testing.T) {
 	dump(t, m, "11 help")
 }
 
+// TestDumpFrames (real mode): the device pairing + sync states, driven over
+// fake vault/backend hooks.
+func TestDumpSyncFrames(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+
+	tm, _, fb := pairModelForDump(t)
+	dump(t, tm, "s1 signed in · ● synced header")
+
+	// Conflict: local add + remote change, then manual sync.
+	tm = send(tm, runes("1"))
+	tm = send(tm, runes("a"))
+	tm = typeStr(tm, "local-host")
+	tm = send(tm, special(tea.KeyTab))
+	tm = send(tm, special(tea.KeyTab))
+	tm = typeStr(tm, "l.example.com")
+	tm, _ = step(tm, special(tea.KeyEnter))
+	fb.mu.Lock()
+	fb.noVault = false
+	fb.vault = []byte(`{"schema":1,"hosts":[{"id":"eeeeffff00001111","name":"remote-host","addr":"r.example.com","port":22,"source":"manual"}],"settings":{"theme":"abyss"}}`)
+	fb.version++
+	fb.mu.Unlock()
+	tm = send(tm, runes("4"))
+	tm, cmd := step(tm, runes("s"))
+	tm, _ = step(tm, cmd())
+	dump(t, tm, "s2 sync conflict prompt")
+}
+
+// pairModelForDump mirrors pairModel but dumps the sign-in frames on the way.
+func pairModelForDump(t *testing.T) (tea.Model, *fakeVault, *fakeBackend) {
+	t.Helper()
+	tm, fv, fb := syncedModel(t)
+	tm = send(tm, runes("2"))               // projects gate
+	tm, _ = step(tm, special(tea.KeyEnter)) // → sign-in intro
+	dump(t, tm, "s0a real sign-in (intro)")
+	tm, _ = step(tm, special(tea.KeyEnter)) // → code entry
+	tm = typeStr(tm, "K7PQ-M2XR")
+	dump(t, tm, "s0b device code entry")
+	tm, cmd := step(tm, special(tea.KeyEnter))
+	tm, syncCmd := step(tm, cmd())
+	tm, _ = step(tm, syncCmd())
+	return tm, fv, fb
+}
+
 // assertions on structure.
 func TestLocalFlow(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.Ascii)

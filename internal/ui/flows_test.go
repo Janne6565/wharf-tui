@@ -27,6 +27,7 @@ func (f *fakeVault) Save(p []byte) error {
 }
 func (f *fakeVault) ChangePassword([]byte) error         { return nil }
 func (f *fakeVault) RegenerateRecovery() (string, error) { return code40, nil }
+func (f *fakeVault) DeriveKey(string) ([]byte, error)    { return make([]byte, 32), nil }
 func (f *fakeVault) Close() error                        { f.closed = true; return nil }
 
 const code40 = "ABCDEFGHJKMNPQRSTVWXYZ012345670189ABCDEF"

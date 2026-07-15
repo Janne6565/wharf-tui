@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Janne6565/wharf-tui/internal/api"
 	"github.com/Janne6565/wharf-tui/internal/data"
 	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
@@ -171,39 +172,81 @@ func (m Model) authView(t theme.Theme) []string {
 			intro,
 			stl(t.Dim, t.Panel).Render("Authentication happens in your browser — Google, GitHub or email."),
 			"",
-			stl(t.Hi, t.Panel).Render("enter") + stl(t.Dim, t.Panel).Render("  open browser & get a device code"),
 		}
 		if m.demo {
-			body = append(body, stl(t.Hi, t.Panel).Render("l")+stl(t.Dim, t.Panel).Render("      skip · use Wharf locally on this machine"))
+			body = append(body,
+				stl(t.Hi, t.Panel).Render("enter")+stl(t.Dim, t.Panel).Render("  open browser & get a device code"),
+				stl(t.Hi, t.Panel).Render("l")+stl(t.Dim, t.Panel).Render("      skip · use Wharf locally on this machine"))
 		} else {
-			body = append(body, stl(t.Hi, t.Panel).Render("esc")+stl(t.Dim, t.Panel).Render("    back to your local vault"))
+			body = append(body,
+				stl(t.Dim, t.Panel).Render("Open ")+stl(t.Hi, t.Panel).Render(stripScheme(m.deviceURL))+
+					stl(t.Dim, t.Panel).Render(" in your browser, sign in,"),
+				stl(t.Dim, t.Panel).Render("and it shows an 8-character pairing code."),
+				"",
+				stl(t.Hi, t.Panel).Render("enter")+stl(t.Dim, t.Panel).Render("  type the code"),
+				stl(t.Hi, t.Panel).Render("esc")+stl(t.Dim, t.Panel).Render("    back to your local vault"))
 		}
 	case 1:
-		body = []string{
-			stl(t.Dim, t.Panel).Render("Browser opened at"),
-			stl(t.Hi, t.Panel).Render("https://wharf.sh/device"),
-			"",
-			stl(t.Dim, t.Panel).Render("Finish signing in there, then type the 8-character code:"),
-			m.codeLine(t),
-			stl(t.Dim, t.Panel).Render("type code · ") + stl(t.Hi, t.Panel).Render("enter") +
-				stl(t.Dim, t.Panel).Render(" confirm · ") + stl(t.Hi, t.Panel).Render("esc") +
-				stl(t.Dim, t.Panel).Render(" back"),
+		if m.demo {
+			body = []string{
+				stl(t.Dim, t.Panel).Render("Browser opened at"),
+				stl(t.Hi, t.Panel).Render("https://wharf.sh/device"),
+				"",
+				stl(t.Dim, t.Panel).Render("Finish signing in there, then type the 8-character code:"),
+				m.codeLine(t),
+			}
+		} else {
+			body = []string{
+				stl(t.Dim, t.Panel).Render("In your browser, open"),
+				stl(t.Hi, t.Panel).Render(stripScheme(m.deviceURL)),
+				"",
+				stl(t.Dim, t.Panel).Render("Sign in there, then type the pairing code it shows:"),
+				m.codeLine(t),
+			}
+			if m.authErr != "" {
+				body = append(body, stl(t.Err, t.Panel).Render(m.authErr))
+			}
 		}
+		body = append(body,
+			stl(t.Dim, t.Panel).Render("type code · ")+stl(t.Hi, t.Panel).Render("enter")+
+				stl(t.Dim, t.Panel).Render(" confirm · ")+stl(t.Hi, t.Panel).Render("esc")+
+				stl(t.Dim, t.Panel).Render(" back"))
 	case 2:
-		body = []string{
-			stl(t.Warn, t.Panel).Render(m.spinner() + " verifying device code…"),
-			stl(t.Dim, t.Panel).Render("exchanging for session token · unlocking sync"),
+		if m.demo {
+			body = []string{
+				stl(t.Warn, t.Panel).Render(m.spinner() + " verifying device code…"),
+				stl(t.Dim, t.Panel).Render("exchanging for session token · unlocking sync"),
+			}
+		} else {
+			body = []string{
+				stl(t.Warn, t.Panel).Render(m.spinner() + " exchanging device code…"),
+				stl(t.Dim, t.Panel).Render("pairing this device with your account"),
+			}
 		}
 	}
 
 	box := boxPanelAuto(t, "sign in", t.Hi, pw, body)
-	footer := stl(t.Dim, t.Bg).Render("api.wharf.sh · e2e-encrypted vault · ") + stl(t.Ok, t.Bg).Render("● service up")
+	var footer string
+	if m.demo {
+		footer = stl(t.Dim, t.Bg).Render("api.wharf.sh · e2e-encrypted vault · ") + stl(t.Ok, t.Bg).Render("● service up")
+	} else {
+		footer = stl(t.Dim, t.Bg).Render(stripScheme(apiBaseDisplay()) + " · e2e-encrypted vault · zero-knowledge sync")
+	}
 
 	block := []string{logo, subtitle, ""}
 	block = append(block, box...)
 	block = append(block, "", footer)
 	return centerInArea(block, m.w, m.h, t.Bg)
 }
+
+// stripScheme drops http(s):// for display.
+func stripScheme(u string) string {
+	u = strings.TrimPrefix(u, "https://")
+	return strings.TrimPrefix(u, "http://")
+}
+
+// apiBaseDisplay is the backend host shown on the sign-in footer.
+func apiBaseDisplay() string { return api.BaseURL() }
 
 // codeLine renders the device code as "TYPED▌rest" in XXXX-XXXX form.
 func (m Model) codeLine(t theme.Theme) string {
@@ -261,6 +304,9 @@ func (m Model) header(t theme.Theme, tabs string) []string {
 	left := badge + bgpad(1, t.Bg) + tabs
 	var right string
 	switch {
+	case m.signedIn && !m.demo:
+		right = stl(t.Dim, t.Bg).Render(m.email+" · ") + m.syncIndicator(t) +
+			stl(t.Dim, t.Bg).Render(" · ") + stl(t.Hi, t.Bg).Render("q") + stl(t.Dim, t.Bg).Render(" lock")
 	case m.signedIn:
 		right = stl(t.Dim, t.Bg).Render(m.email+" · ") + stl(t.Ok, t.Bg).Render("● synced")
 	case m.demo:
@@ -269,6 +315,23 @@ func (m Model) header(t theme.Theme, tabs string) []string {
 		right = stl(t.Ok, t.Bg).Render("● vault open · ") + stl(t.Hi, t.Bg).Render("q") + stl(t.Dim, t.Bg).Render(" lock")
 	}
 	return []string{barLine(t, m.w, " "+left, right+" "), rule(t, m.w)}
+}
+
+// syncIndicator renders the account sync state for the header (design: the
+// success-green "● synced" dot in the tab row).
+func (m Model) syncIndicator(t theme.Theme) string {
+	switch m.syncSt {
+	case ssSyncing:
+		return stl(t.Warn, t.Bg).Render(m.spinner() + " syncing")
+	case ssSynced:
+		return stl(t.Ok, t.Bg).Render("● synced")
+	case ssOffline:
+		return stl(t.Err, t.Bg).Render("● offline")
+	case ssConflict:
+		return stl(t.Warn, t.Bg).Render("● conflict")
+	default:
+		return stl(t.Dim, t.Bg).Render("○ not synced")
+	}
 }
 
 func (m Model) dashTabs(t theme.Theme) string {
@@ -829,6 +892,9 @@ func (m Model) hintBar(t theme.Theme) []string {
 		}
 	case 3:
 		hints = append(hints, hk{"enter", "toggle"})
+		if m.signedIn && !m.demo {
+			hints = append(hints, hk{"s", "sync now"})
+		}
 	}
 	if m.demo {
 		signLabel := "sign in"

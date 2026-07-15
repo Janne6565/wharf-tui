@@ -84,6 +84,8 @@ func (m Model) modalKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		return m.secretModalKey(key)
 	case modalError:
 		return m.errorModalKey(key)
+	case modalSyncConflict:
+		return m.syncConflictKey(key)
 	}
 	return m, nil
 }
@@ -199,9 +201,9 @@ func (m Model) submitHostForm() (tea.Model, tea.Cmd) {
 			m.formErr = cleanErr(err)
 			return m, nil
 		}
-		_ = m.st.Save()
 		m.modal = modalNone
-		return m.setToast("added "+stored.Name, "ok"), m.probeCmds()
+		m, syncCmd := m.saveVault()
+		return m.setToast("added "+stored.Name, "ok"), tea.Batch(m.probeCmds(), syncCmd)
 	}
 
 	h.ID = m.formEditID
@@ -214,9 +216,9 @@ func (m Model) submitHostForm() (tea.Model, tea.Cmd) {
 		m.formErr = cleanErr(err)
 		return m, nil
 	}
-	_ = m.st.Save()
 	m.modal = modalNone
-	return m.setToast("updated "+h.Name, "ok"), m.probeCmds()
+	m, syncCmd := m.saveVault()
+	return m.setToast("updated "+h.Name, "ok"), tea.Batch(m.probeCmds(), syncCmd)
 }
 
 // --- delete confirm ---------------------------------------------------------
@@ -240,11 +242,11 @@ func (m Model) deleteConfirmKey(key string) (tea.Model, tea.Cmd) {
 			m.modal = modalNone
 			return m.setToast("delete failed: "+cleanErr(err), "err"), nil
 		}
-		_ = m.st.Save()
 		delete(m.probes, m.delID)
 		m.modal = modalNone
 		m.hostIdx = clampIdx(m.hostIdx, len(m.filteredHosts()))
-		return m.setToast("deleted "+m.delName, "ok"), nil
+		m, syncCmd := m.saveVault()
+		return m.setToast("deleted "+m.delName, "ok"), syncCmd
 	case "n", "N", "esc":
 		m.modal = modalNone
 	}
@@ -321,10 +323,10 @@ func (m Model) importSummaryKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "y", "Y", "enter":
 		added, updated, skipped := m.st.UpsertImported(m.importHosts)
-		_ = m.st.Save()
 		m.modal = modalNone
+		m, syncCmd := m.saveVault()
 		summary := itoa(added) + " added · " + itoa(updated) + " updated · " + itoa(skipped) + " skipped"
-		return m.setToast(summary, "ok"), m.probeCmds()
+		return m.setToast(summary, "ok"), tea.Batch(m.probeCmds(), syncCmd)
 	case "n", "N", "esc":
 		m.modal = modalNone
 	}
@@ -356,6 +358,7 @@ func (m Model) doQuit() (tea.Model, tea.Cmd) {
 	if m.vault != nil {
 		_ = m.vault.Close()
 	}
+	m = m.closeSync()
 	return m, tea.Quit
 }
 

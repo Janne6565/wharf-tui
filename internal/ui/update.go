@@ -32,7 +32,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tickCmd()
 	case authDoneMsg:
-		if m.screen == scAuth && m.authStep == 2 {
+		// Demo-only: the simulated sign-in "verification" timer.
+		if m.demo && m.screen == scAuth && m.authStep == 2 {
 			m.signedIn = true
 			m.email = "deniz@wharf.sh"
 			m.screen = scMain
@@ -45,6 +46,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// vault gate results.
 	case vaultCreatedMsg, vaultOpenedMsg, vaultRecoveredMsg, vaultResetMsg:
 		return m.handleVaultMsg(msg)
+
+	// sync engine results (real mode).
+	case pairedMsg:
+		return m.handlePaired(msg)
+	case sessionResumedMsg:
+		return m.handleSessionResumed(msg)
+	case syncDoneMsg:
+		return m.handleSyncDone(msg)
+	case syncPushTimerMsg:
+		return m.handleSyncPushTimer(msg)
 
 	// data-layer results.
 	case probeResultMsg:
@@ -136,7 +147,10 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// authKey drives the simulated account sign-in (device code).
+// authKey drives the account sign-in (device code). Demo mode simulates the
+// exchange; real mode pairs against the backend via the sync engine. The
+// code input accepts the displayed dash form (XXXX-XXXX): dashes are simply
+// skipped, so pasting works.
 func (m Model) authKey(key string) (tea.Model, tea.Cmd) {
 	switch m.authStep {
 	case 0:
@@ -144,6 +158,7 @@ func (m Model) authKey(key string) (tea.Model, tea.Cmd) {
 		case "enter":
 			m.authStep = 1
 			m.code = ""
+			m.authErr = ""
 		case "l", "L": // demo: skip login — use the local sample vault
 			if m.demo {
 				m.screen = scMain
@@ -162,22 +177,34 @@ func (m Model) authKey(key string) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.authStep = 0
 			m.code = ""
+			m.authErr = ""
 		case "backspace":
 			if len(m.code) > 0 {
 				m.code = m.code[:len(m.code)-1]
 			}
 		case "enter":
-			if len(m.code) == 8 {
+			if len(m.code) != 8 {
+				return m, nil
+			}
+			if m.demo {
 				m.authStep = 2
 				return m, authDoneCmd()
 			}
+			if m.eng == nil {
+				m.authErr = "sync unavailable this session"
+				return m, nil
+			}
+			m.authStep = 2
+			m.authErr = ""
+			return m, m.pairCmd(m.code)
 		default:
 			if isAlnum(key) && len(m.code) < 8 {
 				m.code += strings.ToUpper(key)
+				m.authErr = ""
 			}
 		}
 	case 2:
-		// verifying — input ignored
+		// verifying / exchanging — input ignored
 	}
 	return m, nil
 }
@@ -291,6 +318,16 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		if m.tab == 2 && !m.demo {
 			return m.openKeygenForm(), nil
 		}
+	case "s":
+		// Manual sync from the settings (account) tab. A pending conflict
+		// re-runs the pass, which reopens the resolve prompt.
+		if m.tab == 3 && !m.demo && m.signedIn {
+			if m.conflict != nil && m.modal == modalNone {
+				m.modal = modalSyncConflict
+				return m, nil
+			}
+			return m.startSync()
+		}
 	case "enter", " ":
 		return m.mainEnter()
 	}
@@ -317,6 +354,7 @@ func (m Model) mainEnter() (tea.Model, tea.Cmd) {
 			m.screen = scAuth
 			m.authStep = 0
 			m.code = ""
+			m.authErr = ""
 			return m, nil
 		}
 		p := m.projects[clampIdx(m.projIdx, len(m.projects))]
@@ -410,17 +448,21 @@ func (m Model) toggleSetting() (tea.Model, tea.Cmd) {
 		next := theme.Next(m.themeName)
 		m.themeName = next
 		m.settings.Theme = next
-		return m.persistSettings(), nil
+		return m.persistSettings()
 	case "account":
 		if m.signedIn {
-			m.signedIn = false
-			m.email = ""
-			return m, nil
+			if m.demo {
+				m.signedIn = false
+				m.email = ""
+				return m, nil
+			}
+			return m.signOut(), nil
 		}
 		m.postAuthTab = 3
 		m.screen = scAuth
 		m.authStep = 0
 		m.code = ""
+		m.authErr = ""
 		return m, nil
 	case "agent":
 		m.settings.Agent = !m.settings.Agent
@@ -429,16 +471,16 @@ func (m Model) toggleSetting() (tea.Model, tea.Cmd) {
 	case "telemetry":
 		m.settings.Telemetry = !m.settings.Telemetry
 	}
-	return m.persistSettings(), nil
+	return m.persistSettings()
 }
 
-// persistSettings writes the working settings through the store (best-effort).
-func (m Model) persistSettings() Model {
+// persistSettings writes the working settings through the store and schedules
+// a sync push (settings live in the synced payload too).
+func (m Model) persistSettings() (Model, tea.Cmd) {
 	if m.st != nil {
 		m.st.SetSettings(m.settings)
-		_ = m.st.Save()
 	}
-	return m
+	return m.saveVault()
 }
 
 // setToast raises a transient status line.

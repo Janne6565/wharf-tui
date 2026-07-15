@@ -61,11 +61,12 @@ func (m Model) handleDialDone(msg dialDoneMsg) (tea.Model, tea.Cmd) {
 		return m.handleDialErr(msg.hostID, msg.err)
 	}
 	// Record a successful connection, then hand over the terminal.
+	var syncCmd tea.Cmd
 	if m.st != nil {
 		if h, ok := m.st.HostByID(msg.hostID); ok {
 			h.LastSeen = time.Now()
 			_ = m.st.UpdateHost(h)
-			_ = m.st.Save()
+			m, syncCmd = m.saveVault()
 		}
 	}
 	// Persist a remembered password before attaching, so the takeover is never
@@ -79,9 +80,10 @@ func (m Model) handleDialDone(msg dialDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.sess == nil {
 		// No live session to hand over (degenerate dial / test): stay put so the
 		// toast remains visible instead of driving a nil attach.
-		return m, nil
+		return m, syncCmd
 	}
-	return m.attach(msg.hostID, msg.sess)
+	am, attachCmd := m.attach(msg.hostID, msg.sess)
+	return am, tea.Batch(syncCmd, attachCmd)
 }
 
 // rememberedPassword is a typed password captured from the secret prompt with

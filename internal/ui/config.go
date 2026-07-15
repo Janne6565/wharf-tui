@@ -4,11 +4,13 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/Janne6565/wharf-tui/internal/api"
 	"github.com/Janne6565/wharf-tui/internal/data"
 	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
+	syncx "github.com/Janne6565/wharf-tui/internal/sync"
 	"github.com/Janne6565/wharf-tui/internal/vault"
 )
 
@@ -26,6 +28,13 @@ type Config struct {
 	OpenVault    func(string, []byte) (vaultHandle, error)
 	CreateVault  func(string, []byte) (vaultHandle, string, error)
 	OpenRecovery func(string, string) (vaultHandle, error)
+
+	// Sync hooks (real mode). Nil fields default to the real backend client
+	// (base URL from WHARF_API_BASE or the production default), the vault
+	// file on disk, and vault.OpenPayload; tests inject fakes.
+	SyncAPI      syncx.API
+	SyncReadBlob func() ([]byte, error)
+	SyncOpenBlob func(blob, password []byte) ([]byte, error)
 }
 
 // New builds the initial model. Demo mode opens on the simulated account
@@ -42,6 +51,10 @@ func New(cfg Config) Model {
 		openVault:    cfg.OpenVault,
 		createVault:  cfg.CreateVault,
 		openRecovery: cfg.OpenRecovery,
+		syncAPI:      cfg.SyncAPI,
+		syncReadBlob: cfg.SyncReadBlob,
+		syncOpenBlob: cfg.SyncOpenBlob,
+		deviceURL:    api.DeviceURL(api.BaseURL()),
 	}
 	if m.vaultExists == nil {
 		m.vaultExists = vault.Exists

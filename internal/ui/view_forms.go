@@ -29,6 +29,8 @@ func (m Model) modalView(t theme.Theme) []string {
 		return m.secretView(t)
 	case modalError:
 		return m.errorView(t)
+	case modalSyncConflict:
+		return m.syncConflictView(t)
 	}
 	return m.mainView(t)
 }
@@ -292,6 +294,31 @@ func (m Model) quitConfirmView(t theme.Theme) []string {
 			stl(t.Dim, t.Panel).Render("/") + stl(t.Hi, t.Panel).Render("n") + stl(t.Dim, t.Panel).Render(" cancel"),
 	}
 	return m.modalBox(t, "quit wharf", "err", body)
+}
+
+// --- sync conflict ------------------------------------------------------------
+
+// syncConflictView asks the user to pick a side when the local vault and the
+// remote vault both changed since the last sync. There is no silent merge.
+func (m Model) syncConflictView(t theme.Theme) []string {
+	c := m.conflict
+	if c == nil {
+		return m.mainView(t)
+	}
+	body := []string{
+		stl(t.Warn, t.Panel).Render("This vault and the account vault both changed."),
+		stl(t.Dim, t.Panel).Render("Pick which one to keep — the other side is overwritten."),
+		"",
+		stl(t.Fg, t.Panel).Render("local   ") + stl(t.Hi, t.Panel).Render(itoa(c.LocalHosts)+" host(s)") +
+			stl(t.Dim, t.Panel).Render("  this machine"),
+		stl(t.Fg, t.Panel).Render("remote  ") + stl(t.Hi, t.Panel).Render(itoa(c.RemoteHosts)+" host(s)") +
+			stl(t.Dim, t.Panel).Render("  account · v"+itoa(int(c.RemoteVersion))),
+		"",
+		stl(t.Hi, t.Panel).Render("l") + stl(t.Dim, t.Panel).Render("  keep local — overwrite the account vault"),
+		stl(t.Hi, t.Panel).Render("r") + stl(t.Dim, t.Panel).Render("  take remote — discard this machine's changes"),
+		stl(t.Hi, t.Panel).Render("esc") + stl(t.Dim, t.Panel).Render("  decide later (sync pauses)"),
+	}
+	return m.modalBox(t, "sync conflict", "warn", body)
 }
 
 // --- prominent error --------------------------------------------------------
