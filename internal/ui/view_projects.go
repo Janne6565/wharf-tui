@@ -46,8 +46,9 @@ func (m Model) realProjectsTab(t theme.Theme, contentH int) []string {
 	} else {
 		rBody = []string{stl(t.Dim, t.Panel).Render("no project selected")}
 	}
-	if m.identityNotice != "" {
-		rBody = append(rBody, "", stl(t.Warn, t.Panel).Render(m.identityNotice))
+	if lines := m.identityNoticeLines(t, boxContentW(rightW)); lines != nil {
+		rBody = append(rBody, "")
+		rBody = append(rBody, lines...)
 	}
 	_ = pad
 
@@ -194,8 +195,9 @@ func (m Model) realProjectsEmpty(t theme.Theme, contentH int) []string {
 		"",
 		stl(t.Hi, t.Panel).Render("n") + stl(t.Dim, t.Panel).Render("   create a project"),
 	}
-	if m.identityNotice != "" {
-		body = append(body, "", stl(t.Warn, t.Panel).Render(m.identityNotice))
+	if lines := m.identityNoticeLines(t, pw-6); lines != nil {
+		body = append(body, "")
+		body = append(body, lines...)
 	}
 	box := boxPanelAuto(t, "projects", t.Hi, pw, body)
 	return centerInArea(box, m.w, contentH, t.Bg)
@@ -261,6 +263,25 @@ func (m Model) inviteResponseView(t theme.Theme) []string {
 	return m.modalBox(t, "respond to invite", "hi", body)
 }
 
+func (m Model) resetIdentityView(t theme.Theme) []string {
+	body := []string{
+		stl(t.Warn, t.Panel).Render("Reset your project identity?"),
+		"",
+		stl(t.Dim, t.Panel).Render("Use this only if you have lost the device that created"),
+		stl(t.Dim, t.Panel).Render("your identity. A brand-new key is minted here and your"),
+		stl(t.Dim, t.Panel).Render("published one is replaced."),
+		"",
+		stl(t.Dim, t.Panel).Render("Every project re-enters awaiting-access until an admin"),
+		stl(t.Dim, t.Panel).Render("re-grants your key. A project where you were the only"),
+		stl(t.Dim, t.Panel).Render("member holding a key becomes unrecoverable."),
+		"",
+		stl(t.Hi, t.Panel).Render("y") + stl(t.Dim, t.Panel).Render("/") + stl(t.Hi, t.Panel).Render("enter") +
+			stl(t.Dim, t.Panel).Render(" reset · ") + stl(t.Hi, t.Panel).Render("esc") +
+			stl(t.Dim, t.Panel).Render("/") + stl(t.Hi, t.Panel).Render("n") + stl(t.Dim, t.Panel).Render(" cancel"),
+	}
+	return m.modalBox(t, "reset identity", "warn", body)
+}
+
 func (m Model) projectConflictView(t theme.Theme) []string {
 	c := m.projConflict
 	if c == nil {
@@ -284,4 +305,46 @@ func (m Model) projectConflictView(t theme.Theme) []string {
 // projectTag renders a dim inline project label for a merged host row.
 func projectTag(t theme.Theme, name string, bg lipgloss.Color) string {
 	return stl(t.Mag, bg).Render("⧉ " + name)
+}
+
+// identityNoticeLines renders the cross-device "sync first" notice, word-wrapped
+// to width, plus the reset keybinding when the "I lost my old vault" reset is
+// available (the needs-sync state). Returns nil when there is no notice.
+func (m Model) identityNoticeLines(t theme.Theme, width int) []string {
+	if m.identityNotice == "" {
+		return nil
+	}
+	var out []string
+	for _, ln := range wrapText(m.identityNotice, width) {
+		out = append(out, stl(t.Warn, t.Panel).Render(ln))
+	}
+	if m.identityNeedsSync {
+		out = append(out, stl(t.Hi, t.Panel).Render("R")+
+			stl(t.Dim, t.Panel).Render(" reset identity — lost that device"))
+	}
+	return out
+}
+
+// wrapText breaks s into lines no wider than width runes, on word boundaries.
+func wrapText(s string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
+	var lines []string
+	var cur string
+	for _, word := range strings.Fields(s) {
+		switch {
+		case cur == "":
+			cur = word
+		case len([]rune(cur))+1+len([]rune(word)) <= width:
+			cur += " " + word
+		default:
+			lines = append(lines, cur)
+			cur = word
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
 }

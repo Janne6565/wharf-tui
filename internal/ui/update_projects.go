@@ -112,6 +112,22 @@ func (m Model) publishIdentityCmd(pub []byte) tea.Cmd {
 	}
 }
 
+// publishIdentityRotateCmd rotates the account's published public key. Unlike a
+// plain publish, rotate=true replaces any existing key AND nulls every wrapped
+// project DEK server-side, so all the caller's projects re-enter awaiting-access.
+// Success reuses identityReadyMsg{ready} so the ready handler triggers a resync.
+func (m Model) publishIdentityRotateCmd(pub []byte) tea.Cmd {
+	eng := m.eng
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), projTimeout)
+		defer cancel()
+		if err := eng.PublishIdentity(ctx, pub, true); err != nil {
+			return identityReadyMsg{err: err}
+		}
+		return identityReadyMsg{ready: true}
+	}
+}
+
 // bootstrapIdentityCmd checks the server for an existing public key. If the
 // account already published one we lack locally, it asks the UI to sync the
 // personal vault first; otherwise it signals "generate a fresh keypair".
@@ -139,12 +155,16 @@ func (m Model) handleIdentityReady(msg identityReadyMsg) (tea.Model, tea.Cmd) {
 	case msg.ready:
 		m.identityReady = true
 		m.identityNotice = ""
+		m.identityNeedsSync = false
 		// Kick off the first projects sync now that identity is live.
 		return m, m.syncProjectsCmd()
 	case msg.needSync:
 		// The server has a key we don't hold locally — pull the personal vault on
-		// the device that created the identity, then the user retries.
-		m.identityNotice = "sync your vault on the device that created your identity first"
+		// the device that created the identity, then the user retries. If that
+		// device is gone for good, "R" resets the identity (the view appends the
+		// reset keybinding when identityNeedsSync).
+		m.identityNotice = "sync this vault on the device that created your identity first"
+		m.identityNeedsSync = true
 		mm, cmd := m.startSync()
 		return mm, cmd
 	default:
@@ -164,6 +184,7 @@ func (m Model) handleIdentityReady(msg identityReadyMsg) (tea.Model, tea.Cmd) {
 		m.eng.SetIdentity(pub, priv)
 		m.identityReady = true
 		m.identityNotice = ""
+		m.identityNeedsSync = false
 		// Persisting to the synced payload also schedules a personal push.
 		mm, pushCmd := m.schedulePush()
 		return mm, tea.Batch(pushCmd, mm.publishIdentityCmd(pub))
@@ -576,6 +597,12 @@ func (m Model) projectsKey(key string) (tea.Model, tea.Cmd) {
 		return m.revokeSelectedInvite()
 	case "d":
 		return m.removeSelectedMember()
+	case "r", "R":
+		// "I lost my old vault" — only offered in the needs-sync state.
+		if m.identityNeedsSync {
+			m.modal = modalResetIdentity
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -682,6 +709,46 @@ func (m Model) inviteResponseKey(key string) (tea.Model, tea.Cmd) {
 		m.modal = modalNone
 		return m, m.respondInviteCmd(id, false)
 	case "esc", "n", "N":
+		m.modal = modalNone
+	}
+	return m, nil
+}
+
+// --- identity reset (pubkey rotate) -------------------------------------------
+
+// resetIdentityConfirmKey handles the "I lost my old vault" confirm: mint a fresh
+// keypair, persist it into the personal vault, hand it to the engine, then rotate
+// the published public key. The rotate nulls all our wrapped project DEKs, so the
+// follow-up resync (driven by identityReadyMsg{ready}) marks every project
+// awaiting-access until an admin re-grants.
+func (m Model) resetIdentityConfirmKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "y", "Y", "enter":
+		m.modal = modalNone
+		if m.st == nil || m.eng == nil {
+			return m.setToast("cannot reset identity right now", "err"), nil
+		}
+		pub, priv, err := m.genIdentity()
+		if err != nil || len(pub) != 32 || len(priv) != 32 {
+			return m.setToast("could not generate an identity key", "err"), nil
+		}
+		m.st.SetIdentity(&store.Identity{
+			X25519Pub:  base64.StdEncoding.EncodeToString(pub),
+			X25519Priv: base64.StdEncoding.EncodeToString(priv),
+			CreatedAt:  time.Now().UTC(),
+		})
+		if err := m.st.Save(); err != nil {
+			return m.setToast("could not save identity: "+err.Error(), "err"), nil
+		}
+		m.eng.SetIdentity(pub, priv)
+		m.identityReady = true
+		m.identityNeedsSync = false
+		m.identityNotice = ""
+		m = m.setToast("identity reset — projects await re-grant", "ok")
+		// Persist the new identity to the synced payload, then rotate the pubkey.
+		mm, pushCmd := m.schedulePush()
+		return mm, tea.Batch(pushCmd, mm.publishIdentityRotateCmd(pub))
+	case "n", "N", "esc":
 		m.modal = modalNone
 	}
 	return m, nil

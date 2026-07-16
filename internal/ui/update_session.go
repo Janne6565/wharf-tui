@@ -67,6 +67,9 @@ func (m Model) handleDialDone(msg dialDoneMsg) (tea.Model, tea.Cmd) {
 			h.LastSeen = time.Now()
 			_ = m.st.UpdateHost(h)
 			m, syncCmd = m.saveVault()
+		} else {
+			// Project hosts live in a decrypted project doc, not the personal store.
+			m, syncCmd = m.recordProjectHostSeen(msg.hostID)
 		}
 	}
 	// Persist a remembered password before attaching, so the takeover is never
@@ -84,6 +87,28 @@ func (m Model) handleDialDone(msg dialDoneMsg) (tea.Model, tea.Cmd) {
 	}
 	am, attachCmd := m.attach(msg.hostID, msg.sess)
 	return am, tea.Batch(syncCmd, attachCmd)
+}
+
+// recordProjectHostSeen stamps LastSeen on a successfully-connected project host
+// and arms the existing debounced project push, so a burst of connects coalesces
+// into one upload rather than a push per connect (why LastSeen was personal-only
+// through M3). No-op when the host isn't a keyed project host.
+func (m Model) recordProjectHostSeen(hostID string) (Model, tea.Cmd) {
+	for projID, doc := range m.projectDocs {
+		if doc == nil {
+			continue
+		}
+		h, ok := doc.HostByID(hostID)
+		if !ok {
+			continue
+		}
+		h.LastSeen = time.Now()
+		if err := doc.UpdateHost(h); err != nil {
+			return m, nil
+		}
+		return m.scheduleProjectPush(projID)
+	}
+	return m, nil
 }
 
 // rememberedPassword is a typed password captured from the secret prompt with

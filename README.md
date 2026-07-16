@@ -107,6 +107,18 @@ pulls fail with an explicit error — set them to the same password to sync.
 **Backend:** defaults to `https://wharf.jannekeipert.de`; override with
 `WHARF_API_BASE` (e.g. a local `wharf-backend` on `http://localhost:8080`).
 
+## Upgrading
+
+Projects add a **v2 vault payload** carrying your X25519 project identity. By
+design, a pre-projects (v1) build **hard-errors** on a v2 payload rather than
+silently dropping the identity — so once any device writes v2, **upgrade all of
+your devices** before opening the vault on them. Your master password and
+recovery code are unaffected by the bump; the vault DEK and both unlock slots are
+unchanged. If a device that first created your identity is lost for good, open
+the projects tab and press **`R`** on the "sync first" notice to reset your
+project identity (rotates your published key; every project re-enters
+awaiting-access until an admin re-grants).
+
 ## The model
 
 | Without an account (local) | Adds when you sign in |

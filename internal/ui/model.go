@@ -59,6 +59,7 @@ const (
 	modalRemoveMember    // confirm client-side rotation-with-removal
 	modalInviteResponse  // accept / decline a received invite
 	modalProjectConflict // per-project sync conflict (queued)
+	modalResetIdentity   // confirm "I lost my old vault" identity reset (pubkey rotate)
 )
 
 // syncState is the rendered sync status (header indicator). It is pure
@@ -176,17 +177,18 @@ type Model struct {
 	genIdentity       func() (pub, priv []byte, err error)
 
 	// --- real projects (real signed-in mode; demo keeps m.projects fixtures) ---
-	realProjects    []projectItem                // ordered, from the engine's sync pass
-	projectDocs     map[string]*store.ProjectDoc // decrypted docs keyed by project ID
-	projDetail      *api.ProjectDetail           // members/invites of the selected project
-	receivedInvites []api.ReceivedInvite         // pending invites addressed to the account
-	projConflicts   []syncx.ProjectConflict      // queued per-project conflicts
-	projConflict    *syncx.ProjectConflict       // the one being resolved
-	projFilterID    string                       // hosts-tab filter by project ID ("" = none)
-	projFilterName  string                       // display name for the filter chip
-	identityReady   bool                         // identity loaded into the engine this session
-	identityBooting bool                         // a bootstrap attempt is in flight
-	identityNotice  string                       // cross-device "sync first" notice
+	realProjects      []projectItem                // ordered, from the engine's sync pass
+	projectDocs       map[string]*store.ProjectDoc // decrypted docs keyed by project ID
+	projDetail        *api.ProjectDetail           // members/invites of the selected project
+	receivedInvites   []api.ReceivedInvite         // pending invites addressed to the account
+	projConflicts     []syncx.ProjectConflict      // queued per-project conflicts
+	projConflict      *syncx.ProjectConflict       // the one being resolved
+	projFilterID      string                       // hosts-tab filter by project ID ("" = none)
+	projFilterName    string                       // display name for the filter chip
+	identityReady     bool                         // identity loaded into the engine this session
+	identityBooting   bool                         // a bootstrap attempt is in flight
+	identityNotice    string                       // cross-device "sync first" notice
+	identityNeedsSync bool                         // needs-sync state: offer the "R" identity reset
 
 	// create-project form (name, description).
 	cpjVals  [2]string

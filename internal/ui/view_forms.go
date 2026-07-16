@@ -43,6 +43,8 @@ func (m Model) modalView(t theme.Theme) []string {
 		return m.inviteResponseView(t)
 	case modalProjectConflict:
 		return m.projectConflictView(t)
+	case modalResetIdentity:
+		return m.resetIdentityView(t)
 	}
 	return m.mainView(t)
 }

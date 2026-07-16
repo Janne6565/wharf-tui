@@ -102,6 +102,8 @@ func (m Model) modalKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		return m.inviteResponseKey(key)
 	case modalProjectConflict:
 		return m.projectConflictKey(key)
+	case modalResetIdentity:
+		return m.resetIdentityConfirmKey(key)
 	}
 	return m, nil
 }

@@ -587,6 +587,136 @@ func TestProjectConflictResolve(t *testing.T) {
 	}
 }
 
+// needsSyncModel puts the model in the needs-sync identity state: the server
+// already holds a public key this vault does not carry locally.
+func needsSyncModel(t *testing.T) (tea.Model, *fakeVault, *fakeBackend) {
+	t.Helper()
+	tm, fv, fb := projectModel(t)
+	fb.mu.Lock()
+	fb.publicKey = bytesFill("oldkey", 32)
+	fb.mu.Unlock()
+	tm, cmd := step(tm, runes("2")) // enter projects → bootstrap sees the server key
+	tm = drain(t, tm, cmd)
+	return tm, fv, fb
+}
+
+func TestIdentityResetFlow(t *testing.T) {
+	tm, fv, fb := needsSyncModel(t)
+
+	m := tm.(Model)
+	if !m.identityNeedsSync {
+		t.Fatalf("a server key with no local identity should enter needs-sync:\n%s", tm.View())
+	}
+	if m.identityReady {
+		t.Fatal("identity must not be ready in the needs-sync state")
+	}
+	if !strings.Contains(tm.View(), "R reset identity") {
+		t.Fatalf("the needs-sync notice should advertise the reset keybinding:\n%s", tm.View())
+	}
+
+	// R opens the confirm modal spelling out the consequences.
+	tm = send(tm, runes("R"))
+	if tm.(Model).modal != modalResetIdentity {
+		t.Fatalf("R should open the reset-identity confirm:\n%s", tm.View())
+	}
+	if !strings.Contains(tm.View(), "awaiting-access") || !strings.Contains(tm.View(), "unrecoverable") {
+		t.Fatalf("the confirm should spell out the consequences:\n%s", tm.View())
+	}
+
+	// Confirm → generate + save + rotate the published key + resync.
+	savesBefore := fv.saves
+	tm, cmd := step(tm, runes("y"))
+	tm = drain(t, tm, cmd)
+
+	m = tm.(Model)
+	if !m.identityReady || m.identityNeedsSync {
+		t.Fatalf("reset should leave identity ready and out of needs-sync (ready=%v needsSync=%v)", m.identityReady, m.identityNeedsSync)
+	}
+	fb.mu.Lock()
+	rotated := bytes.Equal(fb.publicKey, bytesFill("u1pubkey", 32))
+	fb.mu.Unlock()
+	if !rotated {
+		t.Fatal("reset should rotate the published public key to the freshly minted one")
+	}
+	if fv.saves == savesBefore {
+		t.Fatal("reset should persist the new identity into the local vault")
+	}
+	if id := m.st.Identity(); id == nil {
+		t.Fatal("the store should carry the new identity after reset")
+	}
+}
+
+func TestIdentityResetCancel(t *testing.T) {
+	tm, _, fb := needsSyncModel(t)
+
+	tm = send(tm, runes("R"))
+	if tm.(Model).modal != modalResetIdentity {
+		t.Fatalf("R should open the reset confirm:\n%s", tm.View())
+	}
+	tm = send(tm, special(tea.KeyEsc))
+	m := tm.(Model)
+	if m.modal != modalNone {
+		t.Fatal("esc should dismiss the reset confirm")
+	}
+	if m.identityReady || !m.identityNeedsSync {
+		t.Fatal("cancelling must not touch identity state")
+	}
+	fb.mu.Lock()
+	untouched := bytes.Equal(fb.publicKey, bytesFill("oldkey", 32))
+	fb.mu.Unlock()
+	if !untouched {
+		t.Fatal("cancelling must not rotate the published key")
+	}
+}
+
+func TestProjectHostLastSeenOnConnect(t *testing.T) {
+	tm, _, fb := projectModel(t)
+	tm, cmd := step(tm, runes("2"))
+	tm = drain(t, tm, cmd)
+	tm = send(tm, runes("n"))
+	tm = typeStr(tm, "atlas")
+	tm, cmd = step(tm, special(tea.KeyEnter))
+	tm = drain(t, tm, cmd)
+
+	var projID string
+	fb.mu.Lock()
+	for id := range fb.projs {
+		projID = id
+	}
+	fb.mu.Unlock()
+
+	// Add a host to the project doc directly.
+	m := tm.(Model)
+	stored, err := m.projectDocs[projID].AddHost(store.Host{Name: "proj-web", User: "deploy", Addr: "p.example.com", Port: 22})
+	if err != nil {
+		t.Fatalf("add project host: %v", err)
+	}
+	tm = m
+
+	// A successful dial of the project host stamps LastSeen + arms the debounced push.
+	before := tm.(Model).syncGen
+	tm, _ = step(tm, dialDoneMsg{hostID: stored.ID})
+	m = tm.(Model)
+	h, ok := m.projectDocs[projID].HostByID(stored.ID)
+	if !ok || h.LastSeen.IsZero() {
+		t.Fatalf("connect should stamp LastSeen on the project host: %+v", h)
+	}
+	if m.syncGen == before {
+		t.Fatal("connect to a project host should arm the debounced project push")
+	}
+
+	// Firing the debounce uploads the doc (now carrying the connect stamp). No
+	// personal-vault push is scheduled for a project host.
+	tm, cmd = step(tm, projPushTimerMsg{id: projID, gen: m.syncGen})
+	tm = drain(t, tm, cmd)
+	fb.mu.Lock()
+	pushed := bytes.Contains(fb.projs[projID].vault, []byte("proj-web"))
+	fb.mu.Unlock()
+	if !pushed {
+		t.Fatal("the debounced push should upload the project doc with the connect stamp")
+	}
+}
+
 func TestProjectHostFilterByID(t *testing.T) {
 	tm, _, fb := projectModel(t)
 	tm, cmd := step(tm, runes("2"))

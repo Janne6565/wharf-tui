@@ -212,6 +212,18 @@ func TestDumpProjectFrames(t *testing.T) {
 	dump(t, tm, "p8 hosts tab with project tag")
 }
 
+// TestDumpIdentityResetFrames (real mode): the needs-sync notice and the
+// "I lost my old vault" identity-reset confirm.
+func TestDumpIdentityResetFrames(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+
+	tm, _, _ := needsSyncModel(t)
+	dump(t, tm, "r1 needs-sync notice (R reset identity)")
+
+	tm = send(tm, runes("R"))
+	dump(t, tm, "r2 reset-identity confirm")
+}
+
 // assertions on structure.
 func TestLocalFlow(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.Ascii)
