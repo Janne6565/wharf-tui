@@ -1,4 +1,4 @@
-<!-- AUTO-SYNCED from agents KB: projects/wharf.md @ 257caad.
+<!-- AUTO-SYNCED from agents KB: projects/wharf.md @ 043bdf9.
      Do NOT edit here — edit the source in ~/projects/agents and re-run scripts/sync-conventions.sh. -->
 
 # Wharf
@@ -84,17 +84,32 @@ invite by email, roles (owner/admin/member); private keys are never shared.
   argon2id + XChaCha20-Poly1305, password + one-time recovery-code slots) with a
   typed store (`internal/store`). Host CRUD forms, `~/.ssh/config` import
   (`internal/sshcfg`), async reachability probes (`internal/probe`), ed25519 keygen +
-  `~/.ssh` scan (`internal/keys`). `--demo` preserves the design prototype. Account
-  sign-in/projects remain **simulated** pending the TUI sync client. Roadmap next: port
-  forwarding, sync client against the now-real backend.
+  `~/.ssh` scan (`internal/keys`). `--demo` preserves the design prototype.
+  **Real cloud sync done** (2026-07-15): `internal/api` (hand-rolled client, DIRECT
+  tokens, refresh-retry-on-401, `WHARF_API_BASE` override) + `internal/sync`
+  (full-blob optimistic-version engine: fast-forward pull/push, 409 → re-pass,
+  both-changed → keep-local/take-remote modal, zero-hosts side auto-loses on first
+  sync). Device pairing via the web `/device` code. Session file `session.enc` next
+  to the vault, XChaCha20 under an HKDF subkey of the vault DEK — sync only while
+  unlocked; unreadable file → signed-out → re-pair. Master password retained in
+  memory while unlocked (needed to adopt remote blobs with foreign salts), zeroed on
+  lock. Opt-in live E2E via `WHARF_E2E_BASE`. Projects tab remains **simulated** (no
+  backend projects API yet). Roadmap next: port forwarding, projects/teams.
 - **wharf-backend:** **v1 auth/vault/pairing API done** (2026-07-14): register/login/
   refresh (COOKIE|DIRECT token modes), recovery verify/reset (rotates code, bumps
   `tokenVersion` to revoke all sessions), device-code issue/exchange (one-time,
   pessimistic-locked), vault GET/PUT with optimistic versioning. Hardened after
   review: pre-decode base64 size cap, bcrypt timing equalization against user
   enumeration, XFF only trusted behind proxy, Caffeine-backed rate buckets,
-  fail-closed prod secret guard. 25 tests green; `openapi.json` committed at repo
-  root (Orval source). Projects/team endpoints + deployment still open.
+  fail-closed prod secret guard. **Google/GitHub OAuth login done** (2026-07-15) per
+  AUTH.md: authorize/callback/providers endpoints, one-time DB state store,
+  `oauth_identities` auto-linked by verified email, nullable `auth_key_hash` (dummy
+  bcrypt keeps timing equal), atomic `POST /auth/setup` (recovery + initial vault +
+  optional password authKey) for OAuth-first accounts, `users/me` exposes
+  `hasPassword/hasRecovery/hasVault`. Providers enabled only when `OAUTH_*` env
+  creds are set (prod: sealed `wharf-oauth-secret`, optional — see
+  wharf-deployment/docs/secrets.md). 61 tests green; `openapi.json` committed at
+  repo root (Orval source). Projects/team endpoints still open.
 - **wharf-web:** **web auth flow + landing done** (2026-07-15): the 5 auth screens
   restyled to `Wharf Web Auth v2.dc.html` (all-mono, square, fieldset label chips,
   bracketed buttons, `❯_` logo; Google/GitHub OAuth buttons rendered but disabled —
@@ -103,8 +118,51 @@ invite by email, roles (owner/admin/member); private keys are never shared.
   `Wharf Landing.dc.html` (server-rendered — the reason for TanStack Start; auth
   routes stay `ssr:false`) + `favicon.svg` (design variant 1a). Client-side WHARFV
   vault create/unlock/re-encrypt with byte-compat proven against the Go vault via
-  committed fixture; E2E suite against the live backend (opt-in `E2E=1`). Design
-  sources copied to `~/projects/wharf/design/`.
+  committed fixture; E2E suite against the live backend (opt-in `E2E=1`). **OAuth
+  flows wired** (2026-07-15): buttons enable from `GET /auth/oauth/providers`,
+  `/oauth/complete` (refresh → route by `hasVault`), `/set-password` (OAuth-first
+  onboarding via atomic `/auth/setup`, shares `buildOnboardingVault` with signup),
+  `/unlock` (returning OAuth user). Design sources copied to
+  `~/projects/wharf/design/`. **`/connections` is the post-auth hub**
+  (2026-07-15): the landing nav shows a `[ profile ]` link (→ `/unlock`) for a
+  signed-in visitor instead of "sign in" (gated on `useAuthInformation`; SSR
+  renders the anonymous branch until the silent refresh resolves, no hydration
+  mismatch); password sign-in, the returning-OAuth `/unlock`, and the
+  `requireAnonymous` redirect all land on `/connections` (was `/device`), which
+  lists hosts and links out to the terminal-pairing screen. `/unlock`
+  short-circuits to `/connections` when the vault is already primed in memory.
+  Fresh-signup onboarding still ends on `/device` (guided "pair your terminal"
+  step 3). Note: the root `beforeLoad` silent refresh is dehydrated from SSR and
+  does **not** re-run on initial client hydration, so `RootDocument` also kicks
+  the (memoized) `ensureSessionBootstrapped()` off in a mount effect — otherwise
+  signed-in state only resolved on the next navigation/link-preload (the nav
+  appeared as "sign in" until you hovered a link). For the same dehydration
+  reason the **route guards** (`requireAuth`/`requireAnonymous`/`requireVault`)
+  each `await ensureSessionBootstrapped()` themselves before reading the token —
+  otherwise a hard reload of an `ssr:false` guarded route (e.g. `/unlock`)
+  checked the token before the refresh ran and bounced an authenticated user to
+  `/signin`. Memoized, so no extra request. **Back-nav + onboarding
+  chrome** (2026-07-15): `AuthShell` already had `backTo`/`step` props; every
+  auth screen now wires a back link to its predecessor (recover→signin,
+  unlock→`/`, connections→`/`, hub-context device→`/connections`), while the
+  forward-only onboarding screens (recovery-code, set-password, oauth-complete)
+  intentionally have none. `/device` takes an `onboarding` **search param**
+  (`validateSearch`): the recovery-code→device step passes `onboarding:true` to
+  show the 3-step indicator; connections' "pair a terminal" links pass
+  `onboarding:false` so a returning user gets no onboarding steps and a back
+  link instead. The page reads it via `getRouteApi("/device").useSearch()`.
+  UI uses **lucide-react** icons (never ASCII/UTF glyphs) per REACT.md — brand
+  marks, the terminal mockup and prose punctuation excepted. The device screen's
+  "install wharf first" opens a reusable `<Modal>` (backdrop/Escape/close,
+  Card-style panel) with the `curl … | sh` one-liner + copy button;
+  `INSTALL_COMMAND` lives in shared `@/lib/install` (landing + device).
+  Blinking cursors are only rendered where the user can actually type: web
+  dropped the decorative hero-headline and device terminal-hint cursors (and the
+  `blink` keyframe); the TUI dropped the cursor next to the `⚓ wharf` logo but
+  keeps the focus-gated cursor in every real input (forms, unlock, `/` search,
+  session prompt, device-code entry, invite email). The web brand chip keeps its
+  `❯_` "prompt" mark (design variant 1a) — the underscore is static plain text,
+  never animated, so it reads as part of the logo, not a live cursor.
 
 ## Notable (stands out vs other projects)
 - **Only Go + Bubble Tea TUI** in the portfolio (alongside Cosy's Go/Rust as non-house
