@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
@@ -46,6 +47,11 @@ func (m Model) fieldVisible(i int) bool {
 		return m.formVals[fAuth] != sshx.AuthPassword
 	case fPassword:
 		return m.formVals[fAuth] == sshx.AuthPassword
+	case fProject:
+		// The project selector only appears when the account can write to at
+		// least one project; hidden (and skipped) in demo/signed-out mode so the
+		// existing host form is unchanged.
+		return m.realMode() && len(m.writableProjects()) > 0
 	default:
 		return true
 	}
@@ -88,6 +94,14 @@ func (m Model) modalKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		return m.syncConflictKey(key)
 	case modalChangePassword:
 		return m.changePasswordKey(key)
+	case modalCreateProject:
+		return m.createProjectKey(key)
+	case modalRemoveMember:
+		return m.removeMemberConfirmKey(key)
+	case modalInviteResponse:
+		return m.inviteResponseKey(key)
+	case modalProjectConflict:
+		return m.projectConflictKey(key)
 	}
 	return m, nil
 }
@@ -98,6 +112,7 @@ func (m Model) modalKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 func (m Model) openHostForm(id string) Model {
 	m.modal = modalHostForm
 	m.formEditID = id
+	m.formEditProjID = ""
 	m.formFocus = 0
 	m.formErr = ""
 	m.formVals = [fCount]string{}
@@ -109,12 +124,14 @@ func (m Model) openHostForm(id string) Model {
 }
 
 func (m Model) editSelectedHost() (tea.Model, tea.Cmd) {
-	fh := m.filteredHosts()
-	if len(fh) == 0 {
+	mh, ok := m.selectedMergedHost()
+	if !ok {
 		return m, nil
 	}
-	h := fh[clampIdx(m.hostIdx, len(fh))]
+	h := mh.Host
 	m = m.openHostForm(h.ID)
+	m.formEditProjID = mh.ProjectID
+	m.formVals[fProject] = mh.ProjectID
 	m.formVals[fName] = h.Name
 	m.formVals[fUser] = h.User
 	m.formVals[fAddr] = h.Addr
@@ -158,6 +175,16 @@ func (m Model) hostFormKey(key string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// The project field is likewise a selector over personal + writable projects.
+	if m.formFocus == fProject {
+		switch key {
+		case "left":
+			m.formVals[fProject] = m.cycleProject(m.formVals[fProject], -1)
+		case "right", " ":
+			m.formVals[fProject] = m.cycleProject(m.formVals[fProject], +1)
+		}
+		return m, nil
+	}
 	switch key {
 	case "backspace":
 		if v := m.formVals[m.formFocus]; len(v) > 0 {
@@ -197,42 +224,132 @@ func (m Model) submitHostForm() (tea.Model, tea.Cmd) {
 		Password:   m.formVals[fPassword],
 	}
 
+	target := m.formVals[fProject] // "" = personal
+	if !m.fieldVisible(fProject) {
+		target = m.formEditProjID // selector hidden → keep the source location
+	}
+
+	// --- add ---
 	if m.formEditID == "" {
-		stored, err := m.st.AddHost(h)
+		if target == "" {
+			stored, err := m.st.AddHost(h)
+			if err != nil {
+				m.formErr = cleanErr(err)
+				return m, nil
+			}
+			m.modal = modalNone
+			m, syncCmd := m.saveVault()
+			return m.setToast("added "+stored.Name, "ok"), tea.Batch(m.probeCmds(), syncCmd)
+		}
+		mm, pushCmd, stored, err := m.addHostToProject(target, h)
 		if err != nil {
+			m.formErr = cleanErr(err)
+			return m, nil
+		}
+		mm.modal = modalNone
+		return mm.setToast("added "+stored.Name+" to "+mm.projectOptionLabel(target), "ok"), tea.Batch(mm.probeCmds(), pushCmd)
+	}
+
+	// --- update ---
+	h.ID = m.formEditID
+	h.Source = "manual"
+	source := m.formEditProjID
+	if source == "" {
+		if ex, ok := m.st.HostByID(m.formEditID); ok {
+			h.Source = ex.Source
+			h.LastSeen = ex.LastSeen
+		}
+	}
+
+	if source == target {
+		return m.updateHostInPlace(target, h)
+	}
+	return m.moveHostBetween(source, target, h)
+}
+
+// updateHostInPlace updates a host within its current doc (personal or project).
+func (m Model) updateHostInPlace(target string, h store.Host) (tea.Model, tea.Cmd) {
+	if target == "" {
+		if err := m.st.UpdateHost(h); err != nil {
 			m.formErr = cleanErr(err)
 			return m, nil
 		}
 		m.modal = modalNone
 		m, syncCmd := m.saveVault()
-		return m.setToast("added "+stored.Name, "ok"), tea.Batch(m.probeCmds(), syncCmd)
+		return m.setToast("updated "+h.Name, "ok"), tea.Batch(m.probeCmds(), syncCmd)
 	}
-
-	h.ID = m.formEditID
-	h.Source = "manual"
-	if ex, ok := m.st.HostByID(m.formEditID); ok {
-		h.Source = ex.Source
-		h.LastSeen = ex.LastSeen
+	doc := m.projectDocs[target]
+	if doc == nil {
+		m.formErr = errNoProjectDoc.Error()
+		return m, nil
 	}
-	if err := m.st.UpdateHost(h); err != nil {
+	if err := doc.UpdateHost(h); err != nil {
 		m.formErr = cleanErr(err)
 		return m, nil
 	}
 	m.modal = modalNone
-	m, syncCmd := m.saveVault()
-	return m.setToast("updated "+h.Name, "ok"), tea.Batch(m.probeCmds(), syncCmd)
+	mm, pushCmd := m.scheduleProjectPush(target)
+	return mm.setToast("updated "+h.Name, "ok"), tea.Batch(mm.probeCmds(), pushCmd)
+}
+
+// moveHostBetween moves a host between docs (personal ↔ project) by removing it
+// from the source and adding it to the target, each side persisted via its own
+// path.
+func (m Model) moveHostBetween(source, target string, h store.Host) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+	// Remove from the source.
+	if source == "" {
+		if err := m.st.DeleteHost(h.ID); err != nil {
+			m.formErr = cleanErr(err)
+			return m, nil
+		}
+		mm, c := m.saveVault()
+		m = mm
+		cmds = append(cmds, c)
+	} else {
+		mm, c, err := m.deleteHostFromProject(source, h.ID)
+		if err != nil {
+			m.formErr = cleanErr(err)
+			return m, nil
+		}
+		m = mm
+		cmds = append(cmds, c)
+	}
+	// Add to the target (drop the ID so the destination assigns a fresh one).
+	h.ID = ""
+	h.LastSeen = time.Time{}
+	if target == "" {
+		if _, err := m.st.AddHost(h); err != nil {
+			m.formErr = cleanErr(err)
+			return m, nil
+		}
+		mm, c := m.saveVault()
+		m = mm
+		cmds = append(cmds, c)
+	} else {
+		mm, c, _, err := m.addHostToProject(target, h)
+		if err != nil {
+			m.formErr = cleanErr(err)
+			return m, nil
+		}
+		m = mm
+		cmds = append(cmds, c)
+	}
+	m.modal = modalNone
+	cmds = append(cmds, m.probeCmds())
+	return m.setToast("moved "+h.Name+" to "+m.projectOptionLabel(target), "ok"), tea.Batch(cmds...)
 }
 
 // --- delete confirm ---------------------------------------------------------
 
 func (m Model) deleteSelectedHost() (tea.Model, tea.Cmd) {
-	fh := m.filteredHosts()
-	if len(fh) == 0 {
+	mh, ok := m.selectedMergedHost()
+	if !ok {
 		return m, nil
 	}
-	h := fh[clampIdx(m.hostIdx, len(fh))]
-	m.delID = h.ID
-	m.delName = h.Name
+	m.delID = mh.Host.ID
+	m.delName = mh.Host.Name
+	m.delProjID = mh.ProjectID
 	m.modal = modalDeleteConfirm
 	return m, nil
 }
@@ -240,13 +357,24 @@ func (m Model) deleteSelectedHost() (tea.Model, tea.Cmd) {
 func (m Model) deleteConfirmKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "y", "Y", "enter":
+		if m.delProjID != "" {
+			mm, pushCmd, err := m.deleteHostFromProject(m.delProjID, m.delID)
+			if err != nil {
+				m.modal = modalNone
+				return m.setToast("delete failed: "+cleanErr(err), "err"), nil
+			}
+			delete(mm.probes, m.delID)
+			mm.modal = modalNone
+			mm.hostIdx = clampIdx(mm.hostIdx, len(mm.filteredMergedHosts()))
+			return mm.setToast("deleted "+m.delName, "ok"), pushCmd
+		}
 		if err := m.st.DeleteHost(m.delID); err != nil {
 			m.modal = modalNone
 			return m.setToast("delete failed: "+cleanErr(err), "err"), nil
 		}
 		delete(m.probes, m.delID)
 		m.modal = modalNone
-		m.hostIdx = clampIdx(m.hostIdx, len(m.filteredHosts()))
+		m.hostIdx = clampIdx(m.hostIdx, len(m.filteredMergedHosts()))
 		m, syncCmd := m.saveVault()
 		return m.setToast("deleted "+m.delName, "ok"), syncCmd
 	case "n", "N", "esc":

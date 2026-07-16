@@ -16,9 +16,10 @@ import (
 	"time"
 )
 
-// schemaVersion is the only document version this build understands. Bumping
-// it is a breaking change and requires an explicit migration path.
-const schemaVersion = 1
+// schemaVersion is the document version this build writes. Open still accepts
+// the previous version 1 (upgraded in-memory and rewritten as 2 on the next
+// Save); any other version is a hard error.
+const schemaVersion = 2
 
 // Backend persists the raw payload. *vault.Vault satisfies this.
 type Backend interface {
@@ -66,12 +67,21 @@ func DefaultSettings() Settings {
 	return Settings{Theme: "abyss", Agent: true, Keepalive: true}
 }
 
+// Identity is the vault's X25519 keypair used to wrap project DEKs. The keys
+// are base64-encoded; CreatedAt records when the identity was generated.
+type Identity struct {
+	X25519Priv string    `json:"x25519Priv"` // base64
+	X25519Pub  string    `json:"x25519Pub"`  // base64
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
 // document is the on-disk shape. Kept unexported so the JSON envelope can
 // evolve independently of the in-memory Store representation.
 type document struct {
-	Schema   int      `json:"schema"`
-	Hosts    []Host   `json:"hosts"`
-	Settings Settings `json:"settings"`
+	Schema   int       `json:"schema"`
+	Hosts    []Host    `json:"hosts"`
+	Settings Settings  `json:"settings"`
+	Identity *Identity `json:"identity,omitempty"`
 }
 
 // Store is the in-memory working copy; every mutation is only durable after
@@ -80,6 +90,7 @@ type Store struct {
 	backend  Backend
 	hosts    []Host
 	settings Settings
+	identity *Identity
 }
 
 // Open loads the document from b. An empty payload yields an empty store
@@ -94,14 +105,16 @@ func Open(b Backend) (*Store, error) {
 	if err := json.Unmarshal(payload, &doc); err != nil {
 		return nil, fmt.Errorf("store: invalid vault payload: %w", err)
 	}
-	if doc.Schema != schemaVersion {
-		return nil, fmt.Errorf("store: unsupported schema version %d (this build understands %d)", doc.Schema, schemaVersion)
+	// Schema 1 is read as-is and rewritten as schema 2 on the next Save.
+	if doc.Schema != 1 && doc.Schema != 2 {
+		return nil, fmt.Errorf("store: unsupported schema version %d (this build understands 1-2)", doc.Schema)
 	}
 
 	return &Store{
 		backend:  b,
 		hosts:    doc.Hosts,
 		settings: doc.Settings,
+		identity: cloneIdentity(doc.Identity),
 	}, nil
 }
 
@@ -126,20 +139,11 @@ func NewMemory(hosts []Host, s Settings) *Store {
 }
 
 // Hosts returns all hosts, stable-sorted by name.
-func (s *Store) Hosts() []Host {
-	out := make([]Host, len(s.hosts))
-	for i, h := range s.hosts {
-		out[i] = cloneHost(h)
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
-	})
-	return out
-}
+func (s *Store) Hosts() []Host { return sortedHostCopy(s.hosts) }
 
 // HostByID looks a host up by ID.
 func (s *Store) HostByID(id string) (Host, bool) {
-	if i := s.indexByID(id); i >= 0 {
+	if i := indexByIDIn(s.hosts, id); i >= 0 {
 		return cloneHost(s.hosts[i]), true
 	}
 	return Host{}, false
@@ -148,53 +152,26 @@ func (s *Store) HostByID(id string) (Host, bool) {
 // AddHost validates h (name+addr required, 1 <= port <= 65535, unique name),
 // assigns an ID and Source "manual" if unset, and returns the stored host.
 func (s *Store) AddHost(h Host) (Host, error) {
-	if h.Port == 0 {
-		h.Port = 22
-	}
-	if h.Source == "" {
-		h.Source = "manual"
-	}
-	am, err := normalizeAuthMethod(h.AuthMethod)
+	hosts, stored, err := addHostTo(s.hosts, h)
 	if err != nil {
 		return Host{}, err
 	}
-	h.AuthMethod = am
-	if err := s.validate(h, ""); err != nil {
-		return Host{}, err
-	}
-	if h.ID == "" {
-		h.ID = newID()
-	}
-	stored := cloneHost(h)
-	s.hosts = append(s.hosts, stored)
+	s.hosts = hosts
 	return cloneHost(stored), nil
 }
 
 // UpdateHost replaces the host with h.ID; same validation as AddHost.
 func (s *Store) UpdateHost(h Host) error {
-	i := s.indexByID(h.ID)
-	if i < 0 {
-		return fmt.Errorf("store: no host with id %q", h.ID)
-	}
-	am, err := normalizeAuthMethod(h.AuthMethod)
-	if err != nil {
-		return err
-	}
-	h.AuthMethod = am
-	if err := s.validate(h, h.ID); err != nil {
-		return err
-	}
-	s.hosts[i] = cloneHost(h)
-	return nil
+	return updateHostIn(s.hosts, h)
 }
 
 // DeleteHost removes the host with the given ID.
 func (s *Store) DeleteHost(id string) error {
-	i := s.indexByID(id)
-	if i < 0 {
-		return fmt.Errorf("store: no host with id %q", id)
+	hosts, err := deleteHostIn(s.hosts, id)
+	if err != nil {
+		return err
 	}
-	s.hosts = append(s.hosts[:i], s.hosts[i+1:]...)
+	s.hosts = hosts
 	return nil
 }
 
@@ -205,7 +182,7 @@ func (s *Store) DeleteHost(id string) error {
 // only a real change counts as updated.
 func (s *Store) UpsertImported(hs []Host) (added, updated, skipped int) {
 	for _, in := range hs {
-		i := s.indexByName(in.Name)
+		i := indexByNameIn(s.hosts, in.Name)
 		if i < 0 {
 			if in.ID == "" {
 				in.ID = newID()
@@ -249,9 +226,16 @@ func (s *Store) Settings() Settings { return s.settings }
 // SetSettings replaces the settings.
 func (s *Store) SetSettings(v Settings) { s.settings = v }
 
+// Identity returns a deep copy of the stored vault identity, or nil if unset,
+// so callers cannot mutate the persisted pointer.
+func (s *Store) Identity() *Identity { return cloneIdentity(s.identity) }
+
+// SetIdentity stores a copy of id (nil clears the identity).
+func (s *Store) SetIdentity(id *Identity) { s.identity = cloneIdentity(id) }
+
 // Save marshals the document and writes it through the backend.
 func (s *Store) Save() error {
-	doc := document{Schema: schemaVersion, Hosts: s.hosts, Settings: s.settings}
+	doc := document{Schema: schemaVersion, Hosts: s.hosts, Settings: s.settings, Identity: s.identity}
 	payload, err := json.Marshal(doc)
 	if err != nil {
 		return fmt.Errorf("store: marshal document: %w", err)
@@ -259,10 +243,75 @@ func (s *Store) Save() error {
 	return s.backend.Save(payload)
 }
 
-// validate enforces the shared AddHost/UpdateHost rules. excludeID is the ID
-// of the host being updated (empty for adds) so a host does not collide with
-// its own name.
-func (s *Store) validate(h Host, excludeID string) error {
+// sortedHostCopy returns a stable, name-sorted deep copy of hosts.
+func sortedHostCopy(hosts []Host) []Host {
+	out := make([]Host, len(hosts))
+	for i, h := range hosts {
+		out[i] = cloneHost(h)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	return out
+}
+
+// addHostTo defaults, normalizes and validates h, assigns an ID if unset, and
+// returns hosts with the stored clone appended alongside that clone. The input
+// slice is not mutated beyond the append semantics callers already rely on.
+func addHostTo(hosts []Host, h Host) ([]Host, Host, error) {
+	if h.Port == 0 {
+		h.Port = 22
+	}
+	if h.Source == "" {
+		h.Source = "manual"
+	}
+	am, err := normalizeAuthMethod(h.AuthMethod)
+	if err != nil {
+		return hosts, Host{}, err
+	}
+	h.AuthMethod = am
+	if err := validateHostIn(hosts, h, ""); err != nil {
+		return hosts, Host{}, err
+	}
+	if h.ID == "" {
+		h.ID = newID()
+	}
+	stored := cloneHost(h)
+	return append(hosts, stored), stored, nil
+}
+
+// updateHostIn replaces the host with h.ID inside hosts, applying the same
+// normalization and validation as addHostTo.
+func updateHostIn(hosts []Host, h Host) error {
+	i := indexByIDIn(hosts, h.ID)
+	if i < 0 {
+		return fmt.Errorf("store: no host with id %q", h.ID)
+	}
+	am, err := normalizeAuthMethod(h.AuthMethod)
+	if err != nil {
+		return err
+	}
+	h.AuthMethod = am
+	if err := validateHostIn(hosts, h, h.ID); err != nil {
+		return err
+	}
+	hosts[i] = cloneHost(h)
+	return nil
+}
+
+// deleteHostIn removes the host with id and returns the shortened slice.
+func deleteHostIn(hosts []Host, id string) ([]Host, error) {
+	i := indexByIDIn(hosts, id)
+	if i < 0 {
+		return hosts, fmt.Errorf("store: no host with id %q", id)
+	}
+	return append(hosts[:i], hosts[i+1:]...), nil
+}
+
+// validateHostIn enforces the shared AddHost/UpdateHost rules against hosts.
+// excludeID is the ID of the host being updated (empty for adds) so a host does
+// not collide with its own name.
+func validateHostIn(hosts []Host, h Host, excludeID string) error {
 	if strings.TrimSpace(h.Name) == "" {
 		return fmt.Errorf("store: host name is required")
 	}
@@ -273,7 +322,7 @@ func (s *Store) validate(h Host, excludeID string) error {
 		return fmt.Errorf("store: port %d out of range (1-65535)", h.Port)
 	}
 	name := strings.ToLower(strings.TrimSpace(h.Name))
-	for _, other := range s.hosts {
+	for _, other := range hosts {
 		if other.ID == excludeID {
 			continue
 		}
@@ -300,22 +349,22 @@ func normalizeAuthMethod(v string) (string, error) {
 	}
 }
 
-// indexByID returns the slice index of the host with id, or -1.
-func (s *Store) indexByID(id string) int {
-	for i := range s.hosts {
-		if s.hosts[i].ID == id {
+// indexByIDIn returns the slice index of the host with id, or -1.
+func indexByIDIn(hosts []Host, id string) int {
+	for i := range hosts {
+		if hosts[i].ID == id {
 			return i
 		}
 	}
 	return -1
 }
 
-// indexByName returns the slice index of the host whose name matches name
+// indexByNameIn returns the slice index of the host whose name matches name
 // case-insensitively, or -1.
-func (s *Store) indexByName(name string) int {
+func indexByNameIn(hosts []Host, name string) int {
 	target := strings.ToLower(strings.TrimSpace(name))
-	for i := range s.hosts {
-		if strings.ToLower(strings.TrimSpace(s.hosts[i].Name)) == target {
+	for i := range hosts {
+		if strings.ToLower(strings.TrimSpace(hosts[i].Name)) == target {
 			return i
 		}
 	}
@@ -331,6 +380,16 @@ func cloneHost(h Host) Host {
 		h.Tags = tags
 	}
 	return h
+}
+
+// cloneIdentity returns a deep copy of id, or nil if id is nil. Identity holds
+// only value fields, so a shallow struct copy behind a fresh pointer suffices.
+func cloneIdentity(id *Identity) *Identity {
+	if id == nil {
+		return nil
+	}
+	cp := *id
+	return &cp
 }
 
 // newID returns 16 lowercase hex characters from crypto/rand. rand.Read never

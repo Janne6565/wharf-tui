@@ -73,14 +73,21 @@ func (m Model) initSync(pw string) Model {
 	}
 	host, _ := os.Hostname()
 	m.eng = syncx.New(syncx.Config{
-		API:         apiClient,
-		SessionPath: syncx.SessionPath(m.vaultPath),
-		Key:         key,
-		Password:    []byte(pw),
-		DeviceName:  host,
-		ReadBlob:    readBlob,
-		OpenBlob:    openBlob,
+		API:           apiClient,
+		SessionPath:   syncx.SessionPath(m.vaultPath),
+		Key:           key,
+		Password:      []byte(pw),
+		DeviceName:    host,
+		ReadBlob:      readBlob,
+		OpenBlob:      openBlob,
+		ProjectCrypto: m.syncProjectCrypto,
 	})
+	// If the personal vault already carries an identity, hand it to the engine
+	// now so a resumed session can read projects immediately.
+	if pub, priv, ok := m.loadIdentity(); ok {
+		m.eng.SetIdentity(pub, priv)
+		m.identityReady = true
+	}
 	return m
 }
 
@@ -290,6 +297,13 @@ func (m Model) adoptRemote(res syncx.Result) (tea.Model, tea.Cmd) {
 	}
 	if m.eng != nil {
 		_ = m.eng.CommitAdopt(res.AdoptVersion, res.Adopt)
+	}
+	// The pulled personal payload may now carry an identity created on another
+	// device: hand it to the engine so projects become readable.
+	if pub, priv, ok := m.loadIdentity(); ok && m.eng != nil {
+		m.eng.SetIdentity(pub, priv)
+		m.identityReady = true
+		m.identityNotice = ""
 	}
 	m.hostIdx = clampIdx(m.hostIdx, len(m.filteredHosts()))
 	m.syncSt = ssSynced

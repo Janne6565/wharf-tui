@@ -448,10 +448,11 @@ func (m Model) hostLive(id string) bool {
 
 // hostsTab renders the hosts list + host detail (or an empty state).
 func (m Model) hostsTab(t theme.Theme, contentH int) []string {
-	if len(m.storeHosts()) == 0 && m.query == "" {
+	total := len(m.mergedHosts())
+	if total == 0 && m.query == "" && m.projFilterID == "" {
 		return m.hostsEmpty(t, contentH)
 	}
-	fh := m.filteredHosts()
+	fh := m.filteredMergedHosts()
 	hIdx := clampIdx(m.hostIdx, len(fh))
 
 	leftW, rightW := m.paneSplit(3, 2)
@@ -459,12 +460,19 @@ func (m Model) hostsTab(t theme.Theme, contentH int) []string {
 	pad := bgpad(padX, t.Panel)
 
 	var lRows []string
+	if m.projFilterID != "" {
+		lRows = append(lRows, pad+stl(t.Mag, t.Panel).Render("⧉ "+m.projFilterName)+stl(t.Dim, t.Panel).Render("  esc clears"))
+	}
 	if m.searchActive || m.query != "" {
 		lRows = append(lRows, pad+stl(t.Warn, t.Panel).Render("/"+m.query)+m.cur(t.Warn, t.Panel))
 	}
 	for i, h := range fh {
-		res, ok := m.probes[h.ID]
-		lRows = append(lRows, hostRow(t, h, res, ok, m.hostLive(h.ID), i == hIdx, innerW))
+		res, ok := m.probes[h.Host.ID]
+		if h.ProjectID == "" {
+			lRows = append(lRows, hostRow(t, h.Host, res, ok, m.hostLive(h.Host.ID), i == hIdx, innerW))
+		} else {
+			lRows = append(lRows, projectHostRow(t, h, res, ok, m.hostLive(h.Host.ID), i == hIdx, innerW))
+		}
 	}
 	if len(fh) == 0 {
 		lRows = append(lRows, pad+stl(t.Dim, t.Panel).Render("no hosts match"))
@@ -473,7 +481,8 @@ func (m Model) hostsTab(t theme.Theme, contentH int) []string {
 	rw := boxContentW(rightW)
 	var rBody []string
 	if len(fh) > 0 {
-		h := fh[hIdx]
+		mh := fh[hIdx]
+		h := mh.Host
 		res, ok := m.probes[h.ID]
 		statusTxt, statusRole := probeStatusText(res, ok)
 		rtt := "—"
@@ -492,6 +501,9 @@ func (m Model) hostsTab(t theme.Theme, contentH int) []string {
 			kv(t, "status", statusTxt, colorFor(t, statusRole), rw),
 			kv(t, "rtt", rtt, t.Dim, rw),
 		}
+		if mh.ProjectID != "" {
+			rBody = append(rBody, kv(t, "project", mh.ProjectName, t.Mag, rw))
+		}
 		if m.hostLive(h.ID) {
 			rBody = append(rBody, "", stl(t.Ok, t.Panel).Render("● live session — enter reattaches"))
 		}
@@ -504,7 +516,7 @@ func (m Model) hostsTab(t theme.Theme, contentH int) []string {
 		rBody = []string{stl(t.Dim, t.Panel).Render("no match")}
 	}
 
-	title := "hosts · " + itoa(len(fh)) + "/" + itoa(len(m.storeHosts()))
+	title := "hosts · " + itoa(len(fh)) + "/" + itoa(total)
 	return m.twoPane(t, contentH, title, m.listBorder(t), lRows, 3, "host", m.detailBorder(t), rBody, 2)
 }
 
@@ -577,6 +589,9 @@ func tagStr(h store.Host) string {
 func (m Model) projectsTab(t theme.Theme, contentH int) []string {
 	if !m.signedIn {
 		return m.projectsGate(t, contentH)
+	}
+	if m.realMode() {
+		return m.realProjectsTab(t, contentH)
 	}
 	pIdx := clampIdx(m.projIdx, len(m.projects))
 	leftW, rightW := m.paneSplit(11, 14)

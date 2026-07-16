@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"crypto/rand"
 	"os"
 	"path/filepath"
 
@@ -13,6 +14,31 @@ import (
 	syncx "github.com/Janne6565/wharf-tui/internal/sync"
 	"github.com/Janne6565/wharf-tui/internal/vault"
 )
+
+// dekBytes is the length of a project DEK.
+const dekBytes = 32
+
+// vaultProjectCrypto is the production syncx.ProjectCrypto, backed by the vault
+// package's WHARFP / sealed-box primitives. Tests inject a fake instead.
+type vaultProjectCrypto struct{}
+
+func (vaultProjectCrypto) NewDEK() ([]byte, error) {
+	dek := make([]byte, dekBytes)
+	_, err := rand.Read(dek)
+	return dek, err
+}
+func (vaultProjectCrypto) Seal(dek, payload []byte) ([]byte, error) {
+	return vault.SealProject(dek, payload)
+}
+func (vaultProjectCrypto) Open(dek, blob []byte) ([]byte, error) {
+	return vault.OpenProject(dek, blob)
+}
+func (vaultProjectCrypto) Wrap(dek, pub []byte) ([]byte, error) {
+	return vault.WrapProjectDEK(dek, pub)
+}
+func (vaultProjectCrypto) Unwrap(wrapped, pub, priv []byte) ([]byte, error) {
+	return vault.UnwrapProjectDEK(wrapped, pub, priv)
+}
 
 // Config parameterizes the root model. Demo mode preserves the prototype
 // behavior (sample data, simulated session, no disk I/O); real mode boots into
@@ -35,26 +61,42 @@ type Config struct {
 	SyncAPI      syncx.API
 	SyncReadBlob func() ([]byte, error)
 	SyncOpenBlob func(blob, password []byte) ([]byte, error)
+	// SyncProjectCrypto seals/opens project blobs and wraps/unwraps project
+	// DEKs (M3). Nil defaults to the vault-backed implementation; tests inject a
+	// fake so the projects flows avoid real crypto.
+	SyncProjectCrypto syncx.ProjectCrypto
+	// GenIdentity generates a fresh X25519 identity keypair (base64 pub, priv).
+	// Nil defaults to vault.GenerateIdentity; tests inject a deterministic fake.
+	GenIdentity func() (pub, priv []byte, err error)
 }
 
 // New builds the initial model. Demo mode opens on the simulated account
 // screen with seeded sample data; real mode opens on the vault gate.
 func New(cfg Config) Model {
 	m := Model{
-		themeName:    "abyss",
-		vaultPath:    cfg.VaultPath,
-		mgr:          cfg.Manager,
-		projects:     data.Projects(),
-		sessions:     map[string]*session{},
-		probes:       map[string]probe.Result{},
-		vaultExists:  cfg.VaultExists,
-		openVault:    cfg.OpenVault,
-		createVault:  cfg.CreateVault,
-		openRecovery: cfg.OpenRecovery,
-		syncAPI:      cfg.SyncAPI,
-		syncReadBlob: cfg.SyncReadBlob,
-		syncOpenBlob: cfg.SyncOpenBlob,
-		deviceURL:    api.DeviceURL(api.BaseURL()),
+		themeName:         "abyss",
+		vaultPath:         cfg.VaultPath,
+		mgr:               cfg.Manager,
+		projects:          data.Projects(),
+		sessions:          map[string]*session{},
+		probes:            map[string]probe.Result{},
+		vaultExists:       cfg.VaultExists,
+		openVault:         cfg.OpenVault,
+		createVault:       cfg.CreateVault,
+		openRecovery:      cfg.OpenRecovery,
+		syncAPI:           cfg.SyncAPI,
+		syncReadBlob:      cfg.SyncReadBlob,
+		syncOpenBlob:      cfg.SyncOpenBlob,
+		syncProjectCrypto: cfg.SyncProjectCrypto,
+		genIdentity:       cfg.GenIdentity,
+		projectDocs:       map[string]*store.ProjectDoc{},
+		deviceURL:         api.DeviceURL(api.BaseURL()),
+	}
+	if m.syncProjectCrypto == nil {
+		m.syncProjectCrypto = vaultProjectCrypto{}
+	}
+	if m.genIdentity == nil {
+		m.genIdentity = vault.GenerateIdentity
 	}
 	if m.vaultExists == nil {
 		m.vaultExists = vault.Exists

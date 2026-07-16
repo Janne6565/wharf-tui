@@ -59,6 +59,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case changePasswordDoneMsg:
 		return m.handleChangePasswordDone(msg)
 
+	// projects (real mode).
+	case identityReadyMsg:
+		return m.handleIdentityReady(msg)
+	case projectsSyncedMsg:
+		return m.handleProjectsSynced(msg)
+	case invitesFetchedMsg:
+		return m.handleInvitesFetched(msg)
+	case projectDetailMsg:
+		return m.handleProjectDetail(msg)
+	case projectCreatedMsg:
+		return m.handleProjectCreated(msg)
+	case projectOpMsg:
+		return m.handleProjectOp(msg)
+	case inviteSentMsg:
+		return m.handleInviteSent(msg)
+	case inviteRevokedMsg:
+		return m.handleInviteRevoked(msg)
+	case inviteRespondedMsg:
+		return m.handleInviteResponded(msg)
+	case finalizeDoneMsg:
+		return m.handleFinalizeDone(msg)
+	case projPushTimerMsg:
+		return m.handleProjPushTimer(msg)
+
 	// data-layer results.
 	case probeResultMsg:
 		if m.probes == nil {
@@ -266,16 +290,43 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		m.hostIdx = 0
 		return m, nil
 	}
+	if key == "esc" && m.tab == 0 && m.projFilterID != "" {
+		m.projFilterID = ""
+		m.projFilterName = ""
+		m.hostIdx = 0
+		return m, nil
+	}
+
+	// The real-mode projects tab has its own key map (member cursor, invites,
+	// per-project actions); tab-switch numbers and help still work.
+	if m.tab == 1 && m.realMode() {
+		switch key {
+		case "1":
+			return m.switchTab(0)
+		case "2":
+			return m.switchTab(1)
+		case "3":
+			return m.switchTab(2)
+		case "4":
+			return m.switchTab(3)
+		case "?":
+			m.helpOpen = true
+			return m, nil
+		case "q":
+			return m.lock()
+		}
+		return m.projectsKey(key)
+	}
 
 	switch key {
 	case "1":
-		m.tab, m.focus = 0, 0
+		return m.switchTab(0)
 	case "2":
-		m.tab, m.focus = 1, 0
+		return m.switchTab(1)
 	case "3":
-		m.tab, m.focus = 2, 0
+		return m.switchTab(2)
 	case "4":
-		m.tab, m.focus = 3, 0
+		return m.switchTab(3)
 	case "tab":
 		if m.focus == 0 {
 			m.focus = 1
@@ -336,19 +387,28 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// switchTab moves to tab i. Switching to the projects tab (1) in real mode
+// bootstraps identity, fetches invites and runs a projects sync.
+func (m Model) switchTab(i int) (tea.Model, tea.Cmd) {
+	if i == 1 {
+		return m.enterProjectsTab()
+	}
+	m.tab, m.focus = i, 0
+	return m, nil
+}
+
 // mainEnter handles the primary action per tab.
 func (m Model) mainEnter() (tea.Model, tea.Cmd) {
 	switch m.tab {
 	case 0: // hosts → connect
-		fh := m.filteredHosts()
-		if len(fh) == 0 {
+		mh, ok := m.selectedMergedHost()
+		if !ok {
 			return m, nil
 		}
-		h := fh[clampIdx(m.hostIdx, len(fh))]
 		if m.demo {
-			return m.connect(h), nil
+			return m.connect(mh.Host), nil
 		}
-		return m.startConnect(h)
+		return m.startConnect(mh.Host)
 	case 1: // projects
 		if !m.signedIn {
 			// Gate: projects are an online feature — enter starts sign-in.
@@ -380,7 +440,20 @@ func (m Model) inviteKey(key string) (tea.Model, tea.Cmd) {
 			m.inviteEmail = m.inviteEmail[:len(m.inviteEmail)-1]
 		}
 	case "enter":
-		if em := strings.TrimSpace(m.inviteEmail); em != "" {
+		em := strings.TrimSpace(m.inviteEmail)
+		if m.realMode() {
+			m.inviteOpen = false
+			m.inviteEmail = ""
+			if em == "" {
+				return m, nil
+			}
+			if p, ok := m.selectedProject(); ok {
+				return m.setToast("sending invite…", "ok"), m.inviteCmd(p.ID, em)
+			}
+			return m, nil
+		}
+		// Demo mode: keep the in-memory append behavior.
+		if em != "" {
 			idx := clampIdx(m.projIdx, len(m.projects))
 			m.projects[idx].Invites = append(m.projects[idx].Invites, em)
 		}
@@ -432,7 +505,7 @@ func (m Model) sessionKey(key string) (tea.Model, tea.Cmd) {
 func (m *Model) move(d int) {
 	switch m.tab {
 	case 0:
-		m.hostIdx = clampIdx(m.hostIdx+d, len(m.filteredHosts()))
+		m.hostIdx = clampIdx(m.hostIdx+d, len(m.filteredMergedHosts()))
 	case 1:
 		m.projIdx = clampIdx(m.projIdx+d, len(m.projects))
 	case 2:

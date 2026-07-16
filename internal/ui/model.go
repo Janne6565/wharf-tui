@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Janne6565/wharf-tui/internal/api"
 	"github.com/Janne6565/wharf-tui/internal/data"
 	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
@@ -54,6 +55,10 @@ const (
 	modalError
 	modalSyncConflict
 	modalChangePassword
+	modalCreateProject   // new-project form (name + description)
+	modalRemoveMember    // confirm client-side rotation-with-removal
+	modalInviteResponse  // accept / decline a received invite
+	modalProjectConflict // per-project sync conflict (queued)
 )
 
 // syncState is the rendered sync status (header indicator). It is pure
@@ -80,6 +85,7 @@ const (
 	fAuth     // auth-method selector (key | password)
 	fKey      // key path — shown in key mode only
 	fPassword // masked password — shown in password mode only
+	fProject  // project selector (personal | writable projects) — real mode only
 	fCount
 )
 
@@ -163,9 +169,42 @@ type Model struct {
 	deviceURL string // pairing page shown on the sign-in screen
 
 	// sync hooks (injectable for tests; defaults wired in initSync).
-	syncAPI      syncx.API
-	syncReadBlob func() ([]byte, error)
-	syncOpenBlob func(blob, password []byte) ([]byte, error)
+	syncAPI           syncx.API
+	syncReadBlob      func() ([]byte, error)
+	syncOpenBlob      func(blob, password []byte) ([]byte, error)
+	syncProjectCrypto syncx.ProjectCrypto
+	genIdentity       func() (pub, priv []byte, err error)
+
+	// --- real projects (real signed-in mode; demo keeps m.projects fixtures) ---
+	realProjects    []projectItem                // ordered, from the engine's sync pass
+	projectDocs     map[string]*store.ProjectDoc // decrypted docs keyed by project ID
+	projDetail      *api.ProjectDetail           // members/invites of the selected project
+	receivedInvites []api.ReceivedInvite         // pending invites addressed to the account
+	projConflicts   []syncx.ProjectConflict      // queued per-project conflicts
+	projConflict    *syncx.ProjectConflict       // the one being resolved
+	projFilterID    string                       // hosts-tab filter by project ID ("" = none)
+	projFilterName  string                       // display name for the filter chip
+	identityReady   bool                         // identity loaded into the engine this session
+	identityBooting bool                         // a bootstrap attempt is in flight
+	identityNotice  string                       // cross-device "sync first" notice
+
+	// create-project form (name, description).
+	cpjVals  [2]string
+	cpjFocus int
+	cpjErr   string
+
+	// remove-member confirm (client-side rotation).
+	rmUserID string
+	rmName   string
+	rmProjID string
+
+	// invite-response modal (accept/decline a received invite).
+	invRespID   string
+	invRespName string
+
+	// member cursor in the projects detail pane (focus == 1): indexes the
+	// combined members-then-invites list for d (remove) / x (revoke).
+	memberIdx int
 
 	tab   int // active dashboard tab
 	focus int // 0 list pane · 1 detail pane
@@ -216,13 +255,15 @@ type Model struct {
 	// --- real-mode modals ---
 	modal modalKind
 
-	formEditID string         // "" = add, else the ID being edited
-	formVals   [fCount]string // Name, User, Addr, Port, Tags, AuthMethod, KeyPath, Password
-	formFocus  int
-	formErr    string
+	formEditID     string         // "" = add, else the ID being edited
+	formEditProjID string         // source project of the host being edited ("" personal)
+	formVals       [fCount]string // Name, User, Addr, Port, Tags, AuthMethod, KeyPath, Password, ProjectID
+	formFocus      int
+	formErr        string
 
-	delID   string
-	delName string
+	delID     string
+	delName   string
+	delProjID string // "" personal, else the project to delete the host from
 
 	kgVals  [3]string // name, comment, passphrase
 	kgFocus int
@@ -322,3 +363,75 @@ func (m Model) filteredHosts() []store.Host {
 
 // th returns the active theme.
 func (m Model) th() theme.Theme { return theme.Get(m.themeName) }
+
+// projectItem is a rendered real-project row: metadata from the engine's sync
+// snapshot plus the live host count derived from the decrypted doc.
+type projectItem struct {
+	ID          string
+	Name        string
+	Description string
+	Role        string
+	AwaitingKey bool
+	Version     int64
+	MemberCount int
+	HostCount   int
+}
+
+// realMode reports whether the UI is on the real (non-demo) signed-in path where
+// projects, invites and the merged hosts tab are live.
+func (m Model) realMode() bool { return !m.demo && m.signedIn }
+
+// projectRowCount is the number of navigable rows on the projects tab: the
+// pinned received-invite rows followed by the project rows.
+func (m Model) projectRowCount() int {
+	return len(m.receivedInvites) + len(m.realProjects)
+}
+
+// selectedInvite returns the received invite under the cursor, if the cursor is
+// on a pinned invite row.
+func (m Model) selectedInvite() (api.ReceivedInvite, bool) {
+	if m.projIdx < len(m.receivedInvites) {
+		return m.receivedInvites[m.projIdx], true
+	}
+	return api.ReceivedInvite{}, false
+}
+
+// selectedProject returns the project under the cursor, if the cursor is on a
+// project row (past the pinned invites).
+func (m Model) selectedProject() (projectItem, bool) {
+	i := m.projIdx - len(m.receivedInvites)
+	if i >= 0 && i < len(m.realProjects) {
+		return m.realProjects[i], true
+	}
+	return projectItem{}, false
+}
+
+// writableProjects returns the real projects the account can push hosts to
+// (keyed member/admin/owner, not awaiting-key).
+func (m Model) writableProjects() []projectItem {
+	var out []projectItem
+	for _, p := range m.realProjects {
+		if !p.AwaitingKey {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// projectHostsPayloads captures the current decrypted payload of every project
+// doc, keyed by project ID, for a sync pass.
+func (m Model) projectHostsPayloads() map[string][]byte {
+	if len(m.projectDocs) == 0 {
+		return nil
+	}
+	out := make(map[string][]byte, len(m.projectDocs))
+	for id, doc := range m.projectDocs {
+		if doc == nil {
+			continue
+		}
+		if b, err := doc.Marshal(); err == nil {
+			out[id] = b
+		}
+	}
+	return out
+}

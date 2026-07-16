@@ -52,6 +52,28 @@ type session struct {
 	// that moment. Together they classify local vs. remote drift.
 	LastSyncedVersion     int64  `json:"lastSyncedVersion"`
 	LastSyncedFingerprint string `json:"lastSyncedFingerprint"`
+	// Projects is the per-project sync bookkeeping, keyed by project ID. It is
+	// JSON-tolerant: a session file written by an older build has no "projects"
+	// key and decodes to a nil map (which loadSession normalizes to empty), so
+	// projects simply resync from scratch — a safe, idempotent outcome. An old
+	// build re-saving the file drops this key, which likewise just forces a
+	// resync on the next new-build run.
+	Projects map[string]ProjectSyncState `json:"projects,omitempty"`
+}
+
+// ProjectSyncState is the per-project analogue of LastSyncedVersion/Fingerprint,
+// plus the caller's current wrapped DEK (base64) so an unlocked but offline
+// client can still open the cached project blob by unwrapping it with the
+// identity private key from the personal vault.
+type ProjectSyncState struct {
+	Name                  string `json:"name"`
+	Role                  string `json:"role"`
+	LastSyncedVersion     int64  `json:"lastSyncedVersion"`
+	LastSyncedFingerprint string `json:"lastSyncedFingerprint"`
+	// WrappedDek is the caller's current 80-byte sealed project DEK, base64. The
+	// server hands it back on every vault pull; persisting it enables offline
+	// opens of the cached blob.
+	WrappedDek string `json:"wrappedDek,omitempty"`
 }
 
 // saveSession seals s under key and writes it atomically with mode 0600.
@@ -112,6 +134,9 @@ func loadSession(path string, key []byte) (*session, error) {
 	var s session
 	if err := json.Unmarshal(plain, &s); err != nil {
 		return nil, err
+	}
+	if s.Projects == nil {
+		s.Projects = map[string]ProjectSyncState{}
 	}
 	return &s, nil
 }

@@ -54,8 +54,24 @@ var (
 	// ErrNoVault is returned by GetVault when the account has no vault yet.
 	ErrNoVault = errors.New("api: no remote vault")
 	// ErrVaultConflict is returned by PutVault on a version conflict (409):
-	// another device wrote first; pull before retrying.
+	// another device wrote first; pull before retrying. Reused by
+	// PutProjectVault, RotateProject and SubmitMemberKey for their 409s.
 	ErrVaultConflict = errors.New("api: vault version conflict")
+	// ErrProjectNotFound is returned by project-scoped calls when the project
+	// does not exist or the caller is not a member (404).
+	ErrProjectNotFound = errors.New("api: project not found")
+	// ErrNoPublicKey is returned by CreateProject when the account has not yet
+	// published a public key (412).
+	ErrNoPublicKey = errors.New("api: account has no published public key")
+	// ErrPublicKeyExists is returned by PublishPublicKey when a key is already
+	// set and rotate was not requested (409).
+	ErrPublicKeyExists = errors.New("api: public key already set")
+	// ErrInviteConflict is returned by CreateInvite when the invitee is already
+	// a member or already invited (409).
+	ErrInviteConflict = errors.New("api: already a member or invited")
+	// ErrInviteExpired is returned by AcceptInvite when the invite has expired
+	// (410).
+	ErrInviteExpired = errors.New("api: invite expired")
 )
 
 // Error is a structured backend error (RFC 7807 problem+json).
@@ -87,6 +103,7 @@ type Profile struct {
 	HasPassword bool   `json:"hasPassword"`
 	HasRecovery bool   `json:"hasRecovery"`
 	HasVault    bool   `json:"hasVault"`
+	PublicKey   string `json:"publicKey"`
 }
 
 // Vault is the remote encrypted blob with its optimistic-concurrency version.

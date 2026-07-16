@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"testing"
 	"time"
 )
@@ -327,11 +328,73 @@ func TestDeleteHost(t *testing.T) {
 }
 
 func TestSchemaGuard(t *testing.T) {
-	if _, err := Open(&fakeBackend{payload: []byte(`{"schema":2,"hosts":[],"settings":{}}`)}); err == nil {
-		t.Fatalf("schema 2 should error")
+	if _, err := Open(&fakeBackend{payload: []byte(`{"schema":2,"hosts":[],"settings":{}}`)}); err != nil {
+		t.Fatalf("schema 2 should open, got %v", err)
+	}
+	if _, err := Open(&fakeBackend{payload: []byte(`{"schema":3,"hosts":[],"settings":{}}`)}); err == nil {
+		t.Fatalf("schema 3 should error")
 	}
 	if _, err := Open(&fakeBackend{payload: []byte(`{not valid json`)}); err == nil {
 		t.Fatalf("garbage JSON should error")
+	}
+}
+
+func TestIdentityRoundtrip(t *testing.T) {
+	be := &fakeBackend{}
+	s, err := Open(be)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if s.Identity() != nil {
+		t.Fatalf("fresh store Identity() = %+v, want nil", s.Identity())
+	}
+
+	created := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	s.SetIdentity(&Identity{X25519Priv: "cHJpdg==", X25519Pub: "cHVi", CreatedAt: created})
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	s2, err := Open(be)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	id := s2.Identity()
+	if id == nil {
+		t.Fatalf("reopened Identity() = nil, want value")
+	}
+	if id.X25519Priv != "cHJpdg==" || id.X25519Pub != "cHVi" || !id.CreatedAt.Equal(created) {
+		t.Fatalf("reopened Identity = %+v, want priv=cHJpdg== pub=cHVi created=%v", id, created)
+	}
+
+	// Identity() returns a copy: mutating it must not affect the store.
+	id.X25519Priv = "hacked"
+	if again := s2.Identity(); again.X25519Priv != "cHJpdg==" {
+		t.Fatalf("mutating returned identity leaked into store: %q", again.X25519Priv)
+	}
+}
+
+func TestSchemaOneUpgrade(t *testing.T) {
+	payload := []byte(`{"schema":1,"hosts":[` +
+		`{"id":"1111111111111111","name":"legacy","addr":"a.com","port":22,"source":"manual"}` +
+		`],"settings":{"theme":"abyss"}}`)
+	be := &fakeBackend{payload: payload}
+	s, err := Open(be)
+	if err != nil {
+		t.Fatalf("open schema 1: %v", err)
+	}
+	if got := s.Hosts(); len(got) != 1 || got[0].Name != "legacy" {
+		t.Fatalf("schema 1 hosts = %+v, want one host named legacy", got)
+	}
+
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if len(be.saves) != 1 {
+		t.Fatalf("expected one recorded Save, got %d", len(be.saves))
+	}
+	if !bytes.Contains(be.saves[0], []byte(`"schema":2`)) {
+		t.Fatalf("upgraded payload does not contain schema 2: %s", be.saves[0])
 	}
 }
 

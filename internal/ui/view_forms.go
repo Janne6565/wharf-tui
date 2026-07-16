@@ -35,6 +35,14 @@ func (m Model) modalView(t theme.Theme) []string {
 		return m.syncConflictView(t)
 	case modalChangePassword:
 		return m.changePasswordView(t)
+	case modalCreateProject:
+		return m.createProjectView(t)
+	case modalRemoveMember:
+		return m.removeMemberView(t)
+	case modalInviteResponse:
+		return m.inviteResponseView(t)
+	case modalProjectConflict:
+		return m.projectConflictView(t)
 	}
 	return m.mainView(t)
 }
@@ -56,19 +64,21 @@ func (m Model) hostFormView(t theme.Theme) []string {
 	if m.formEditID != "" {
 		title = "edit host"
 	}
-	labels := [fCount]string{"name", "user", "address", "port", "tags", "auth", "key path", "password"}
-	hints := [fCount]string{"", "", "host or ip", "default 22", "comma-separated", "", "~/.ssh/id_…", ""}
+	labels := [fCount]string{"name", "user", "address", "port", "tags", "auth", "key path", "password", "project"}
+	hints := [fCount]string{"", "", "host or ip", "default 22", "comma-separated", "", "~/.ssh/id_…", "", ""}
 
 	var body []string
 	for i := 0; i < fCount; i++ {
 		if !m.fieldVisible(i) {
-			continue // hidden conditional field (key path / password)
+			continue // hidden conditional field (key path / password / project)
 		}
 		focused := i == m.formFocus
 		line := stl(t.Dim, t.Panel).Render(padTo2(labels[i], 10))
 		switch i {
 		case fAuth:
 			line += m.authSelector(t, focused)
+		case fProject:
+			line += m.projectSelector(t, focused)
 		case fPassword:
 			line += m.passwordField(t, focused)
 		default:
@@ -108,6 +118,18 @@ func (m Model) authSelector(t theme.Theme, focused bool) string {
 		}
 	}
 	seg := b.String()
+	if focused {
+		seg += m.cur(t.Hi, t.Panel)
+	}
+	return seg
+}
+
+// projectSelector renders the destination selector: personal + writable
+// projects, with the active one lit.
+func (m Model) projectSelector(t theme.Theme, focused bool) string {
+	cur := m.formVals[fProject]
+	label := m.projectOptionLabel(cur)
+	seg := stl(t.Hi, t.Sel).Render(" "+label+" ") + stl(t.Dim, t.Panel).Render("  ‹ › to change")
 	if focused {
 		seg += m.cur(t.Hi, t.Panel)
 	}

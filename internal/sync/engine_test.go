@@ -29,6 +29,24 @@ type fakeAPI struct {
 	changePwCalls  int    // number of ChangePassword calls
 	lastCurrentKey string // last currentAuthKey seen by ChangePassword
 	lastNewKey     string // last newAuthKey seen by ChangePassword
+
+	// projects (M3): a functional in-memory project backend.
+	userID     string
+	publicKey  []byte
+	myInvites  []api.ReceivedInvite
+	fakeProjs  map[string]*fakeProject
+	keySubmits int // number of SubmitMemberKey calls that succeeded
+}
+
+// fakeProject is one in-memory project row.
+type fakeProject struct {
+	id, name, desc, role string
+	vault                []byte
+	version              int64
+	wrapped              map[string][]byte // userID → wrapped DEK (missing = awaiting)
+	members              []api.ProjectMember
+	invites              []api.ProjectInvite
+	pending              []api.PendingKey
 }
 
 func (f *fakeAPI) ExchangeDeviceCode(_ context.Context, code, _ string) (api.Session, error) {

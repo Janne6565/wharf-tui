@@ -27,6 +27,34 @@ type API interface {
 	ChangePassword(ctx context.Context, currentAuthKey, newAuthKey string, blob []byte) (int64, error)
 	SetTokens(access, refresh string)
 	RefreshToken() string
+
+	// Projects (M3). All project-scoped routes 404 for non-members.
+	Me(ctx context.Context) (api.Profile, error)
+	PublishPublicKey(ctx context.Context, pub []byte, rotate bool) error
+	ListProjects(ctx context.Context) ([]api.ProjectSummary, error)
+	GetProject(ctx context.Context, id string) (api.ProjectDetail, error)
+	CreateProject(ctx context.Context, name, description string, blob, wrappedDek []byte) (api.ProjectDetail, error)
+	GetProjectVault(ctx context.Context, id string) (api.ProjectVaultResp, error)
+	PutProjectVault(ctx context.Context, id string, blob []byte, expectedVersion int64) (int64, time.Time, error)
+	RotateProject(ctx context.Context, id string, req api.RotateRequest) (int64, time.Time, error)
+	CreateInvite(ctx context.Context, id, email string) (api.ProjectInvite, error)
+	DeleteInvite(ctx context.Context, projectID, inviteID string) error
+	ListMyInvites(ctx context.Context) ([]api.ReceivedInvite, error)
+	AcceptInvite(ctx context.Context, id string) (api.ProjectSummary, error)
+	DeclineInvite(ctx context.Context, id string) error
+	GetPendingKeys(ctx context.Context, id string) ([]api.PendingKey, error)
+	SubmitMemberKey(ctx context.Context, projectID, userID string, wrappedDek []byte, vaultVersion int64) error
+}
+
+// ProjectCrypto is the project-blob crypto the engine depends on, behind an
+// interface so tests fake it (production wires internal/vault). The engine
+// itself never imports the vault package, mirroring the OpenBlob hook.
+type ProjectCrypto interface {
+	NewDEK() ([]byte, error)
+	Seal(dek, payload []byte) ([]byte, error)
+	Open(dek, blob []byte) ([]byte, error)
+	Wrap(dek, recipientPub []byte) ([]byte, error)
+	Unwrap(wrapped, pub, priv []byte) ([]byte, error)
 }
 
 // Config wires an Engine to its collaborators. All fields are required except
@@ -48,6 +76,9 @@ type Config struct {
 	// OpenBlob decrypts a remote WHARFV blob with the master password and
 	// returns its payload (vault.OpenPayload in production).
 	OpenBlob func(blob, password []byte) ([]byte, error)
+	// ProjectCrypto seals/opens project blobs and wraps/unwraps project DEKs.
+	// Nil disables the projects feature (personal-only tests leave it unset).
+	ProjectCrypto ProjectCrypto
 }
 
 // Conflict describes a both-sides-changed situation the user must resolve.
@@ -96,7 +127,24 @@ type Engine struct {
 	// need not refetch.
 	pending *pendingRemote
 
+	// identity is the caller's X25519 keypair (from the personal vault payload),
+	// set via SetIdentity. Nil until the UI bootstraps identity.
+	identity *identityKeys
+	// projectDEKs caches each keyed project's unwrapped DEK for the unlocked
+	// session so edits can be re-sealed and pending members re-keyed without a
+	// re-unwrap. Session-scoped, never persisted.
+	projectDEKs map[string][]byte
+	// pendingProjects stashes the remote side of an unresolved per-project
+	// conflict, keyed by project ID (resolved one at a time by the UI).
+	pendingProjects map[string]*pendingRemote
+
 	closed bool
+}
+
+// identityKeys holds the caller's raw X25519 keypair for the unlocked session.
+type identityKeys struct {
+	pub  []byte
+	priv []byte
 }
 
 type pendingRemote struct {
@@ -107,7 +155,11 @@ type pendingRemote struct {
 // New builds an engine. It performs no I/O; call Resume to restore a paired
 // session.
 func New(cfg Config) *Engine {
-	return &Engine{cfg: cfg}
+	return &Engine{
+		cfg:             cfg,
+		projectDEKs:     map[string][]byte{},
+		pendingProjects: map[string]*pendingRemote{},
+	}
 }
 
 // Close zeroes the retained secrets. The engine is unusable afterwards.
@@ -116,8 +168,17 @@ func (e *Engine) Close() {
 	defer e.mu.Unlock()
 	zero(e.cfg.Password)
 	zero(e.cfg.Key)
+	if e.identity != nil {
+		zero(e.identity.priv)
+	}
+	for id, dek := range e.projectDEKs {
+		zero(dek)
+		delete(e.projectDEKs, id)
+	}
+	e.identity = nil
 	e.sess = nil
 	e.pending = nil
+	e.pendingProjects = nil
 	e.closed = true
 }
 
@@ -175,6 +236,7 @@ func (e *Engine) Pair(ctx context.Context, code string) (email string, err error
 		RefreshToken: as.RefreshToken,
 		Email:        as.Email,
 		UserID:       as.UserID,
+		Projects:     map[string]ProjectSyncState{},
 	}
 	if err := saveSession(e.cfg.SessionPath, e.cfg.Key, e.sess); err != nil {
 		return as.Email, err
