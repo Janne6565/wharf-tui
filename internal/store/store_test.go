@@ -331,11 +331,150 @@ func TestSchemaGuard(t *testing.T) {
 	if _, err := Open(&fakeBackend{payload: []byte(`{"schema":2,"hosts":[],"settings":{}}`)}); err != nil {
 		t.Fatalf("schema 2 should open, got %v", err)
 	}
-	if _, err := Open(&fakeBackend{payload: []byte(`{"schema":3,"hosts":[],"settings":{}}`)}); err == nil {
-		t.Fatalf("schema 3 should error")
+	if _, err := Open(&fakeBackend{payload: []byte(`{"schema":3,"hosts":[],"settings":{}}`)}); err != nil {
+		t.Fatalf("schema 3 should open, got %v", err)
+	}
+	if _, err := Open(&fakeBackend{payload: []byte(`{"schema":4,"hosts":[],"settings":{}}`)}); err == nil {
+		t.Fatalf("schema 4 should error")
 	}
 	if _, err := Open(&fakeBackend{payload: []byte(`{not valid json`)}); err == nil {
 		t.Fatalf("garbage JSON should error")
+	}
+}
+
+func TestKeysRoundtrip(t *testing.T) {
+	be := &fakeBackend{}
+	s, err := Open(be)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if got := s.Keys(); len(got) != 0 {
+		t.Fatalf("fresh store should have no keys, got %d", len(got))
+	}
+
+	added, err := s.AddKey(VaultKey{Name: "id_ed25519", Type: "ED25519", Material: "cGVtLWJ5dGVz", PublicKey: "ssh-ed25519 AAAA", SourcePath: "~/.ssh/id_ed25519"})
+	if err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+	if added.ID == "" || len(added.ID) != 16 {
+		t.Fatalf("AddKey should assign a 16-char id, got %q", added.ID)
+	}
+	if added.AddedAt.IsZero() {
+		t.Fatalf("AddKey should stamp AddedAt")
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if !bytes.Contains(be.saves[0], []byte(`"schema":3`)) {
+		t.Fatalf("saved payload does not contain schema 3: %s", be.saves[0])
+	}
+
+	s2, err := Open(be)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	keys := s2.Keys()
+	if len(keys) != 1 {
+		t.Fatalf("reopened store has %d keys, want 1", len(keys))
+	}
+	k := keys[0]
+	if k.ID != added.ID || k.Name != "id_ed25519" || k.Type != "ED25519" || k.Material != "cGVtLWJ5dGVz" || k.PublicKey != "ssh-ed25519 AAAA" || k.SourcePath != "~/.ssh/id_ed25519" {
+		t.Fatalf("reopened key = %+v, want the added key", k)
+	}
+
+	got, ok := s2.KeyByID(added.ID)
+	if !ok || got.Name != "id_ed25519" {
+		t.Fatalf("KeyByID(%s) = %+v ok=%v, want the added key", added.ID, got, ok)
+	}
+	if _, ok := s2.KeyByID("nope"); ok {
+		t.Fatalf("KeyByID(unknown) should report not found")
+	}
+}
+
+func TestSchemaTwoUpgradesToThreeOnSave(t *testing.T) {
+	payload := []byte(`{"schema":2,"hosts":[` +
+		`{"id":"1111111111111111","name":"legacy","addr":"a.com","port":22,"source":"manual"}` +
+		`],"settings":{"theme":"abyss"},"identity":{"x25519Priv":"cA==","x25519Pub":"cQ==","createdAt":"2026-03-04T05:06:07Z"}}`)
+	be := &fakeBackend{payload: payload}
+	s, err := Open(be)
+	if err != nil {
+		t.Fatalf("open schema 2: %v", err)
+	}
+	if got := s.Hosts(); len(got) != 1 || got[0].Name != "legacy" {
+		t.Fatalf("schema 2 hosts = %+v, want one host named legacy", got)
+	}
+	if s.Identity() == nil {
+		t.Fatalf("schema 2 identity should survive the read")
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if !bytes.Contains(be.saves[0], []byte(`"schema":3`)) {
+		t.Fatalf("upgraded payload does not contain schema 3: %s", be.saves[0])
+	}
+}
+
+func TestAddKeyValidation(t *testing.T) {
+	s := NewMemory(nil, DefaultSettings())
+
+	if _, err := s.AddKey(VaultKey{Name: "  ", Material: "bWF0"}); err == nil {
+		t.Fatalf("empty name should error")
+	}
+	if _, err := s.AddKey(VaultKey{Name: "k", Material: "  "}); err == nil {
+		t.Fatalf("empty material should error")
+	}
+
+	if _, err := s.AddKey(VaultKey{Name: "Work", Material: "bWF0"}); err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+	if _, err := s.AddKey(VaultKey{Name: "work", Material: "bWF0Mg=="}); err == nil {
+		t.Fatalf("duplicate name (case-insensitive) should error")
+	}
+
+	// A key may share a name with a host — separate namespace.
+	if _, err := s.AddHost(Host{Name: "work", Addr: "a.com"}); err != nil {
+		t.Fatalf("host named like a key should be allowed: %v", err)
+	}
+}
+
+func TestRemoveKey(t *testing.T) {
+	s := NewMemory(nil, DefaultSettings())
+	k, err := s.AddKey(VaultKey{Name: "gone", Material: "bWF0"})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := s.RemoveKey(k.ID); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, ok := s.KeyByID(k.ID); ok {
+		t.Fatalf("key still present after remove")
+	}
+	if err := s.RemoveKey("nope"); err == nil {
+		t.Fatalf("removing unknown id should error")
+	}
+}
+
+func TestKeysSortedAndMutationSafe(t *testing.T) {
+	s := NewMemory(nil, DefaultSettings())
+	for _, name := range []string{"charlie", "Alpha", "bravo"} {
+		if _, err := s.AddKey(VaultKey{Name: name, Material: "bWF0"}); err != nil {
+			t.Fatalf("add %s: %v", name, err)
+		}
+	}
+	keys := s.Keys()
+	wantOrder := []string{"Alpha", "bravo", "charlie"} // case-insensitive sort
+	for i, w := range wantOrder {
+		if keys[i].Name != w {
+			t.Fatalf("Keys()[%d].Name = %q, want %q", i, keys[i].Name, w)
+		}
+	}
+
+	// Mutating the returned slice must not affect the store.
+	keys[0].Name = "ZZZ"
+	keys[0].Material = "hacked"
+	again := s.Keys()
+	if again[0].Name != "Alpha" || again[0].Material != "bWF0" {
+		t.Fatalf("mutating returned key leaked into store: %+v", again[0])
 	}
 }
 
@@ -393,8 +532,8 @@ func TestSchemaOneUpgrade(t *testing.T) {
 	if len(be.saves) != 1 {
 		t.Fatalf("expected one recorded Save, got %d", len(be.saves))
 	}
-	if !bytes.Contains(be.saves[0], []byte(`"schema":2`)) {
-		t.Fatalf("upgraded payload does not contain schema 2: %s", be.saves[0])
+	if !bytes.Contains(be.saves[0], []byte(`"schema":3`)) {
+		t.Fatalf("upgraded payload does not contain schema 3: %s", be.saves[0])
 	}
 }
 

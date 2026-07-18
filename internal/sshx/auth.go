@@ -42,6 +42,12 @@ func (m *Manager) authMethods(ctx context.Context, hs HostSpec) []ssh.AuthMethod
 		if hs.KeyPath != "" {
 			methods = append(methods, ssh.PublicKeysCallback(m.keyFileSigners(ctx, hs)))
 		}
+
+		// Personal synced vault keys, after the local key file and before
+		// keyboard-interactive.
+		if len(hs.VaultKeys) > 0 {
+			methods = append(methods, ssh.PublicKeysCallback(m.vaultKeySigners(ctx, hs)))
+		}
 	}
 
 	methods = append(methods, ssh.KeyboardInteractive(func(name, instruction string, questions []string, echos []bool) ([]string, error) {
@@ -121,5 +127,45 @@ func (m *Manager) keyFileSigners(ctx context.Context, hs HostSpec) func() ([]ssh
 			return nil, err
 		}
 		return []ssh.Signer{signer}, nil
+	}
+}
+
+// vaultKeySigners returns a lazy signer source for the personal synced vault
+// keys, parsed only when the public-key method is actually attempted. Each key
+// is tried in the order given; an encrypted key prompts for its passphrase.
+//
+// Unlike the single keyFileSigners flow, one bad key must not abort the whole
+// chain: with a fleet of synced keys a canceled passphrase, a wrong
+// passphrase, or any parse error SKIPS that key and continues with the rest.
+// The collected signers may be empty, in which case the public-key method
+// simply offers nothing and the chain falls through to keyboard-interactive.
+func (m *Manager) vaultKeySigners(ctx context.Context, hs HostSpec) func() ([]ssh.Signer, error) {
+	return func() ([]ssh.Signer, error) {
+		var signers []ssh.Signer
+		for _, k := range hs.VaultKeys {
+			signer, err := ssh.ParsePrivateKey(k.PEM)
+			if err == nil {
+				signers = append(signers, signer)
+				continue
+			}
+			var missing *ssh.PassphraseMissingError
+			if !errors.As(err, &missing) {
+				// Corrupt / unsupported key material: skip it, keep going.
+				continue
+			}
+			pass, perr := m.promptSecret(ctx, hs.ID, "passphrase for "+k.Name+" (vault)", "", false)
+			if perr != nil {
+				// Canceled prompt (ErrCanceled) or ctx done: skip this key rather
+				// than abort — the user may still authenticate with another key.
+				continue
+			}
+			signer, err = ssh.ParsePrivateKeyWithPassphrase(k.PEM, pass)
+			if err != nil {
+				// Wrong passphrase or other parse failure: skip this key.
+				continue
+			}
+			signers = append(signers, signer)
+		}
+		return signers, nil
 	}
 }

@@ -67,6 +67,16 @@ const (
 	AuthPassword = "password" // password + keyboard-interactive only
 )
 
+// VaultKeySpec is one SSH private key synced through the personal vault, handed
+// to the engine for the key-mode auth chain. PEM is the keyfile bytes verbatim
+// (an encrypted key stays encrypted); the engine prompts for a passphrase at
+// connect. Name labels the passphrase prompt. Kept separate so sshx does not
+// depend on the store.
+type VaultKeySpec struct {
+	Name string
+	PEM  []byte
+}
+
 // HostSpec is the connection recipe the UI hands to Dial (derived from
 // store.Host; kept separate so sshx does not depend on the store).
 type HostSpec struct {
@@ -78,4 +88,7 @@ type HostSpec struct {
 	KeyPath    string // optional explicit identity file
 	AuthMethod string // AuthKey (default) | AuthPassword; "" / unknown = key
 	Password   string // stored password; tried once before prompting
+	// VaultKeys are personal synced keys offered in key mode after the local
+	// key file, before keyboard-interactive. Empty in password mode.
+	VaultKeys []VaultKeySpec
 }

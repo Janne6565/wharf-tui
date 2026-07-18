@@ -16,10 +16,13 @@ import (
 	"time"
 )
 
-// schemaVersion is the document version this build writes. Open still accepts
-// the previous version 1 (upgraded in-memory and rewritten as 2 on the next
-// Save); any other version is a hard error.
-const schemaVersion = 2
+// schemaVersion is the document version this build writes. The document has
+// grown by version: 1 was hosts + settings, 2 added the vault identity, 3
+// added synced SSH keys. Open still accepts the older versions 1 and 2
+// (upgraded in-memory and rewritten as 3 on the next Save); any newer version
+// is a hard error, since an old build cannot round-trip fields it does not
+// know without silently dropping them.
+const schemaVersion = 3
 
 // Backend persists the raw payload. *vault.Vault satisfies this.
 type Backend interface {
@@ -75,13 +78,28 @@ type Identity struct {
 	CreatedAt  time.Time `json:"createdAt"`
 }
 
+// VaultKey is an SSH private key synced through the encrypted vault
+// (schema 3, opt-in per key). Material is the keyfile bytes VERBATIM
+// (base64) — a passphrase-protected file stays protected inside the
+// vault; clients prompt at connect. Never written to a project blob.
+type VaultKey struct {
+	ID         string    `json:"id"`                   // 16 hex, newID()
+	Name       string    `json:"name"`                 // display name, unique (case-insensitive)
+	Type       string    `json:"type"`                 // display type, e.g. "ED25519" (keys.displayType)
+	Material   string    `json:"material"`             // base64 keyfile bytes, verbatim
+	PublicKey  string    `json:"publicKey,omitempty"`  // authorized_keys line; "" when unknown
+	SourcePath string    `json:"sourcePath,omitempty"` // origin path on the syncing machine, display only
+	AddedAt    time.Time `json:"addedAt"`
+}
+
 // document is the on-disk shape. Kept unexported so the JSON envelope can
 // evolve independently of the in-memory Store representation.
 type document struct {
-	Schema   int       `json:"schema"`
-	Hosts    []Host    `json:"hosts"`
-	Settings Settings  `json:"settings"`
-	Identity *Identity `json:"identity,omitempty"`
+	Schema   int        `json:"schema"`
+	Hosts    []Host     `json:"hosts"`
+	Settings Settings   `json:"settings"`
+	Identity *Identity  `json:"identity,omitempty"`
+	Keys     []VaultKey `json:"keys,omitempty"`
 }
 
 // Store is the in-memory working copy; every mutation is only durable after
@@ -91,6 +109,7 @@ type Store struct {
 	hosts    []Host
 	settings Settings
 	identity *Identity
+	keys     []VaultKey
 }
 
 // Open loads the document from b. An empty payload yields an empty store
@@ -105,9 +124,10 @@ func Open(b Backend) (*Store, error) {
 	if err := json.Unmarshal(payload, &doc); err != nil {
 		return nil, fmt.Errorf("store: invalid vault payload: %w", err)
 	}
-	// Schema 1 is read as-is and rewritten as schema 2 on the next Save.
-	if doc.Schema != 1 && doc.Schema != 2 {
-		return nil, fmt.Errorf("store: unsupported schema version %d (this build understands 1-2)", doc.Schema)
+	// Older schemas (1, 2) are read as-is and rewritten as schema 3 on the
+	// next Save.
+	if doc.Schema != 1 && doc.Schema != 2 && doc.Schema != 3 {
+		return nil, fmt.Errorf("store: unsupported schema version %d (this build understands 1-3)", doc.Schema)
 	}
 
 	return &Store{
@@ -115,6 +135,7 @@ func Open(b Backend) (*Store, error) {
 		hosts:    doc.Hosts,
 		settings: doc.Settings,
 		identity: cloneIdentity(doc.Identity),
+		keys:     doc.Keys,
 	}, nil
 }
 
@@ -233,9 +254,43 @@ func (s *Store) Identity() *Identity { return cloneIdentity(s.identity) }
 // SetIdentity stores a copy of id (nil clears the identity).
 func (s *Store) SetIdentity(id *Identity) { s.identity = cloneIdentity(id) }
 
+// Keys returns all synced vault keys, stable-sorted by name.
+func (s *Store) Keys() []VaultKey { return sortedKeyCopy(s.keys) }
+
+// KeyByID looks a synced key up by ID.
+func (s *Store) KeyByID(id string) (VaultKey, bool) {
+	if i := indexKeyByIDIn(s.keys, id); i >= 0 {
+		return s.keys[i], true
+	}
+	return VaultKey{}, false
+}
+
+// AddKey validates k (name+material required, name unique among vault keys
+// case-insensitively), assigns an ID and AddedAt if unset, and returns the
+// stored key. Vault keys are a separate namespace from hosts, so a key may
+// share a name with a host.
+func (s *Store) AddKey(k VaultKey) (VaultKey, error) {
+	keys, stored, err := addKeyTo(s.keys, k)
+	if err != nil {
+		return VaultKey{}, err
+	}
+	s.keys = keys
+	return stored, nil
+}
+
+// RemoveKey deletes the synced key with the given ID.
+func (s *Store) RemoveKey(id string) error {
+	keys, err := removeKeyIn(s.keys, id)
+	if err != nil {
+		return err
+	}
+	s.keys = keys
+	return nil
+}
+
 // Save marshals the document and writes it through the backend.
 func (s *Store) Save() error {
-	doc := document{Schema: schemaVersion, Hosts: s.hosts, Settings: s.settings, Identity: s.identity}
+	doc := document{Schema: schemaVersion, Hosts: s.hosts, Settings: s.settings, Identity: s.identity, Keys: s.keys}
 	payload, err := json.Marshal(doc)
 	if err != nil {
 		return fmt.Errorf("store: marshal document: %w", err)
@@ -253,6 +308,61 @@ func sortedHostCopy(hosts []Host) []Host {
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
 	return out
+}
+
+// sortedKeyCopy returns a stable, name-sorted copy of keys. VaultKey holds
+// only value fields, so copying the slice fully detaches the caller from the
+// store — a returned key cannot leak a mutation back in.
+func sortedKeyCopy(keys []VaultKey) []VaultKey {
+	out := make([]VaultKey, len(keys))
+	copy(out, keys)
+	sort.SliceStable(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	return out
+}
+
+// addKeyTo validates k, assigns an ID and AddedAt if unset, and returns keys
+// with the stored key appended alongside that key.
+func addKeyTo(keys []VaultKey, k VaultKey) ([]VaultKey, VaultKey, error) {
+	if strings.TrimSpace(k.Name) == "" {
+		return keys, VaultKey{}, fmt.Errorf("store: key name is required")
+	}
+	if strings.TrimSpace(k.Material) == "" {
+		return keys, VaultKey{}, fmt.Errorf("store: key material is required")
+	}
+	name := strings.ToLower(strings.TrimSpace(k.Name))
+	for _, other := range keys {
+		if strings.ToLower(strings.TrimSpace(other.Name)) == name {
+			return keys, VaultKey{}, fmt.Errorf("store: a key named %q already exists", strings.TrimSpace(k.Name))
+		}
+	}
+	if k.ID == "" {
+		k.ID = newID()
+	}
+	if k.AddedAt.IsZero() {
+		k.AddedAt = time.Now()
+	}
+	return append(keys, k), k, nil
+}
+
+// removeKeyIn removes the key with id and returns the shortened slice.
+func removeKeyIn(keys []VaultKey, id string) ([]VaultKey, error) {
+	i := indexKeyByIDIn(keys, id)
+	if i < 0 {
+		return keys, fmt.Errorf("store: no key with id %q", id)
+	}
+	return append(keys[:i], keys[i+1:]...), nil
+}
+
+// indexKeyByIDIn returns the slice index of the key with id, or -1.
+func indexKeyByIDIn(keys []VaultKey, id string) int {
+	for i := range keys {
+		if keys[i].ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 // addHostTo defaults, normalizes and validates h, assigns an ID if unset, and

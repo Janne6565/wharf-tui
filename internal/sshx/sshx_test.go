@@ -169,6 +169,74 @@ func writeTestKey(t *testing.T) string {
 	return path
 }
 
+// newVaultKeyPEM generates an ed25519 key and returns its OpenSSH PEM bytes
+// (passphrase-encrypted when passphrase is non-empty) alongside its SSH public
+// key — a real in-memory identity for exercising the vault-key leg of the auth
+// chain without touching disk.
+func newVaultKeyPEM(t *testing.T, passphrase string) ([]byte, gossh.PublicKey) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	var block *pem.Block
+	if passphrase != "" {
+		block, err = gossh.MarshalPrivateKeyWithPassphrase(priv, "", []byte(passphrase))
+	} else {
+		block, err = gossh.MarshalPrivateKey(priv, "")
+	}
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	sshPub, err := gossh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatalf("public key: %v", err)
+	}
+	return pem.EncodeToMemory(block), sshPub
+}
+
+// startServerWithAuthorizedKeys runs an sshd that accepts any of the given
+// public keys (and no password), for exercising public-key auth.
+func startServerWithAuthorizedKeys(t *testing.T, authorized ...gossh.PublicKey) *testServer {
+	t.Helper()
+	signer := newHostSigner(t)
+
+	marshaled := make([][]byte, len(authorized))
+	for i, k := range authorized {
+		marshaled[i] = k.Marshal()
+	}
+
+	srv := &gliderssh.Server{
+		Handler: echoHandler(nil, nil),
+		PublicKeyHandler: func(ctx gliderssh.Context, key gliderssh.PublicKey) bool {
+			for _, want := range marshaled {
+				if bytes.Equal(want, key.Marshal()) {
+					return true
+				}
+			}
+			return false
+		},
+	}
+	srv.AddHostKey(signer)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		_ = ln.Close()
+	})
+
+	tcp := ln.Addr().(*net.TCPAddr)
+	return &testServer{
+		host:    "127.0.0.1",
+		port:    tcp.Port,
+		hostPub: signer.PublicKey(),
+	}
+}
+
 // echoHandler copies stdin back to stdout (and into capture, if non-nil),
 // keeping the session alive until the client closes stdin. It drains the
 // window-change channel (gliderlabs' winch buffer is size 1 and pre-filled,
@@ -664,6 +732,109 @@ func TestAuthPasswordNeverOffersPublicKey(t *testing.T) {
 
 	if n := atomic.LoadInt32(&pubKeyAttempts); n != 0 {
 		t.Fatalf("AuthPassword offered %d public keys, want 0", n)
+	}
+}
+
+func TestDialVaultKeyUnencrypted(t *testing.T) {
+	rec := newRecorder()
+	pemBytes, pub := newVaultKeyPEM(t, "")
+	ts := startServerWithAuthorizedKeys(t, pub)
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	t.Setenv("SSH_AUTH_SOCK", "")
+	m := NewManager(khPath, false)
+	m.SetNotify(rec.notify)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	hs := ts.hostSpec() // key mode, no KeyPath, no agent
+	hs.VaultKeys = []VaultKeySpec{{Name: "id_ed25519", PEM: pemBytes}}
+	sess, err := m.Dial(ctx, hs, 80, 24)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	if !sess.Alive() {
+		t.Fatal("session not alive after dial")
+	}
+	if rec.secretCount() != 0 {
+		t.Fatalf("unencrypted vault key must not prompt, got %d", rec.secretCount())
+	}
+}
+
+func TestDialVaultKeyEncryptedPromptsPassphrase(t *testing.T) {
+	const passphrase = "s3cr3t-pass"
+	rec := newRecorder()
+	rec.secretReply = func(SecretPromptMsg) []byte { return []byte(passphrase) }
+	pemBytes, pub := newVaultKeyPEM(t, passphrase)
+	ts := startServerWithAuthorizedKeys(t, pub)
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	t.Setenv("SSH_AUTH_SOCK", "")
+	m := NewManager(khPath, false)
+	m.SetNotify(rec.notify)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	hs := ts.hostSpec()
+	hs.VaultKeys = []VaultKeySpec{{Name: "work-key", PEM: pemBytes}}
+	sess, err := m.Dial(ctx, hs, 80, 24)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	if !sess.Alive() {
+		t.Fatal("session not alive after dial")
+	}
+	if rec.secretCount() == 0 {
+		t.Fatal("expected a passphrase prompt for the encrypted vault key")
+	}
+	rec.mu.Lock()
+	title := rec.secret[0].Title
+	rec.mu.Unlock()
+	if !strings.Contains(title, "passphrase") || !strings.Contains(title, "work-key") || !strings.Contains(title, "vault") {
+		t.Fatalf("prompt Title = %q, want it to name the passphrase, the key, and vault", title)
+	}
+}
+
+func TestDialVaultKeyCanceledPassphraseFallsThroughToNextKey(t *testing.T) {
+	rec := newRecorder()
+	// Cancel every passphrase prompt: a nil reply cancels. The first (encrypted)
+	// key must be skipped, not abort the whole chain.
+	rec.secretReply = func(SecretPromptMsg) []byte { return nil }
+	encPEM, _ := newVaultKeyPEM(t, "locked")
+	plainPEM, plainPub := newVaultKeyPEM(t, "")
+	// The server accepts only the second (unencrypted) key.
+	ts := startServerWithAuthorizedKeys(t, plainPub)
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	t.Setenv("SSH_AUTH_SOCK", "")
+	m := NewManager(khPath, false)
+	m.SetNotify(rec.notify)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	hs := ts.hostSpec()
+	hs.VaultKeys = []VaultKeySpec{
+		{Name: "encrypted", PEM: encPEM},
+		{Name: "plain", PEM: plainPEM},
+	}
+	sess, err := m.Dial(ctx, hs, 80, 24)
+	if err != nil {
+		t.Fatalf("dial should succeed via the second key: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	if !sess.Alive() {
+		t.Fatal("session not alive after dial")
+	}
+	if rec.secretCount() == 0 {
+		t.Fatal("expected the first key's passphrase prompt to have fired")
 	}
 }
 

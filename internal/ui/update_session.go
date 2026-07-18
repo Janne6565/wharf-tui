@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"time"
 
@@ -22,8 +23,29 @@ func (m Model) startConnect(h store.Host) (tea.Model, tea.Cmd) {
 	m.dialCancel = cancel
 	m.dialHostID = h.ID
 	m.modal = modalConnecting
-	spec := sshx.HostSpec{ID: h.ID, Name: h.Name, User: h.User, Addr: h.Addr, Port: h.Port, KeyPath: h.KeyPath, AuthMethod: h.AuthMethod, Password: h.Password}
+	spec := sshx.HostSpec{ID: h.ID, Name: h.Name, User: h.User, Addr: h.Addr, Port: h.Port, KeyPath: h.KeyPath, AuthMethod: h.AuthMethod, Password: h.Password, VaultKeys: m.vaultKeySpecs(h.AuthMethod)}
 	return m, dialCmd(m.mgr, ctx, spec, m.w, m.h)
+}
+
+// vaultKeySpecs returns the personal synced keys offered to the SSH auth chain.
+// Key mode only — password mode never offers keys (mirrors the engine's own
+// mode split). The store's name-sorted order is preserved; entries whose
+// Material is not valid base64 are skipped. Project hosts connect through the
+// same site with the same personal keys, since a project blob never carries
+// private key material.
+func (m Model) vaultKeySpecs(authMethod string) []sshx.VaultKeySpec {
+	if m.st == nil || authMethod == sshx.AuthPassword {
+		return nil
+	}
+	var specs []sshx.VaultKeySpec
+	for _, k := range m.st.Keys() {
+		pem, err := base64.StdEncoding.DecodeString(k.Material)
+		if err != nil {
+			continue
+		}
+		specs = append(specs, sshx.VaultKeySpec{Name: k.Name, PEM: pem})
+	}
+	return specs
 }
 
 // attach hands the terminal to a session via tea.Exec, suspending the tick loop
