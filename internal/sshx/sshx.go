@@ -1,5 +1,6 @@
 // Package sshx is Wharf's SSH engine: connection manager, auth chain,
-// known-hosts verification, and live sessions with detach/reattach.
+// known-hosts verification, live sessions with detach/reattach, and standalone
+// port forwards (local -L, remote -R, dynamic SOCKS5 -D).
 //
 // Sessions outlive the UI's attach state: a per-session pump goroutine
 // drains remote output into a ring buffer for the session's whole life, and
@@ -44,6 +45,14 @@ type SecretPromptMsg struct {
 type SessionEndedMsg struct {
 	HostID string
 	Err    error
+}
+
+// ForwardEndedMsg is delivered when a forward terminates for any reason
+// (Close, listener failure, SSH connection drop). Err is nil on Close.
+type ForwardEndedMsg struct {
+	ForwardID string
+	HostID    string
+	Err       error
 }
 
 // Auth-method preferences for HostSpec.AuthMethod. There are exactly two

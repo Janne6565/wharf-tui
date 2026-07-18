@@ -13,9 +13,11 @@ type Manager struct {
 	knownHostsPath string
 	keepalive      bool
 
-	mu       sync.Mutex
-	sessions map[string]*Session
-	order    []string // dial order, for List
+	mu           sync.Mutex
+	sessions     map[string]*Session
+	order        []string // dial order, for List
+	forwards     map[string]*Forward
+	forwardOrder []string // start order, for Forwards
 
 	notifyMu sync.Mutex
 	notifyFn func(tea.Msg)
@@ -28,6 +30,7 @@ func NewManager(knownHostsPath string, keepalive bool) *Manager {
 		knownHostsPath: knownHostsPath,
 		keepalive:      keepalive,
 		sessions:       make(map[string]*Session),
+		forwards:       make(map[string]*Forward),
 	}
 }
 
@@ -105,9 +108,58 @@ func (m *Manager) List() []*Session {
 	return out
 }
 
-// CloseAll terminates every session (used on quit).
+// registerForward adds f under its ID in start order.
+func (m *Manager) registerForward(f *Forward) {
+	m.mu.Lock()
+	if _, exists := m.forwards[f.id]; !exists {
+		m.forwardOrder = append(m.forwardOrder, f.id)
+	}
+	m.forwards[f.id] = f
+	m.mu.Unlock()
+}
+
+// removeForward drops the forward for id (idempotent). It only removes the
+// mapping if it still points at the ended forward, mirroring remove's guard.
+func (m *Manager) removeForward(id string, f *Forward) {
+	m.mu.Lock()
+	if m.forwards[id] == f {
+		delete(m.forwards, id)
+		for i, x := range m.forwardOrder {
+			if x == id {
+				m.forwardOrder = append(m.forwardOrder[:i], m.forwardOrder[i+1:]...)
+				break
+			}
+		}
+	}
+	m.mu.Unlock()
+}
+
+// GetForward returns the live forward for id, or nil.
+func (m *Manager) GetForward(id string) *Forward {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.forwards[id]
+}
+
+// Forwards returns all live forwards in start order.
+func (m *Manager) Forwards() []*Forward {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*Forward, 0, len(m.forwardOrder))
+	for _, id := range m.forwardOrder {
+		if f := m.forwards[id]; f != nil {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// CloseAll terminates every session and forward (used on quit).
 func (m *Manager) CloseAll() {
 	for _, s := range m.List() {
 		_ = s.Close()
+	}
+	for _, f := range m.Forwards() {
+		_ = f.Close()
 	}
 }

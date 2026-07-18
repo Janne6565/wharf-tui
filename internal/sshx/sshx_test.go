@@ -199,19 +199,21 @@ func echoHandler(capture *safeBuffer, ready chan<- struct{}) gliderssh.Handler {
 // recorder auto-answers prompts and records lifecycle messages, standing in
 // for the UI's tea.Program.Send.
 type recorder struct {
-	mu           sync.Mutex
-	hostKey      []HostKeyPromptMsg
-	secret       []SecretPromptMsg
-	hostKeyReply bool
-	secretReply  func(SecretPromptMsg) []byte
-	endedCh      chan SessionEndedMsg
+	mu             sync.Mutex
+	hostKey        []HostKeyPromptMsg
+	secret         []SecretPromptMsg
+	hostKeyReply   bool
+	secretReply    func(SecretPromptMsg) []byte
+	endedCh        chan SessionEndedMsg
+	forwardEndedCh chan ForwardEndedMsg
 }
 
 func newRecorder() *recorder {
 	return &recorder{
-		hostKeyReply: true,
-		secretReply:  func(SecretPromptMsg) []byte { return []byte(testPassword) },
-		endedCh:      make(chan SessionEndedMsg, 8),
+		hostKeyReply:   true,
+		secretReply:    func(SecretPromptMsg) []byte { return []byte(testPassword) },
+		endedCh:        make(chan SessionEndedMsg, 8),
+		forwardEndedCh: make(chan ForwardEndedMsg, 8),
 	}
 }
 
@@ -236,6 +238,14 @@ func (r *recorder) notify(msg tea.Msg) {
 	case SessionEndedMsg:
 		r.mu.Lock()
 		ch := r.endedCh
+		r.mu.Unlock()
+		select {
+		case ch <- m:
+		default:
+		}
+	case ForwardEndedMsg:
+		r.mu.Lock()
+		ch := r.forwardEndedCh
 		r.mu.Unlock()
 		select {
 		case ch <- m:

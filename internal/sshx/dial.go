@@ -12,10 +12,12 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Dial connects, authenticates (agent -> key file -> password ->
-// keyboard-interactive), requests a PTY of cols x rows, starts the remote
-// shell and the output pump, and registers the session under hs.ID.
-func (m *Manager) Dial(ctx context.Context, hs HostSpec, cols, rows int) (*Session, error) {
+// connect performs the shared prefix of every outbound connection: default
+// port, known-hosts lookup, auth chain, TOFU host-key verification, TCP dial
+// under ctx, and the SSH handshake. Both interactive shells (Dial) and
+// standalone port forwards (StartForward) build on the *ssh.Client it returns;
+// ctx governs only this connect/handshake phase, never the client's lifetime.
+func (m *Manager) connect(ctx context.Context, hs HostSpec) (*ssh.Client, error) {
 	port := hs.Port
 	if port == 0 {
 		port = 22
@@ -45,7 +47,17 @@ func (m *Manager) Dial(ctx context.Context, hs HostSpec, cols, rows int) (*Sessi
 		_ = conn.Close()
 		return nil, classifyHandshakeErr(err)
 	}
-	client := ssh.NewClient(sshConn, chans, reqs)
+	return ssh.NewClient(sshConn, chans, reqs), nil
+}
+
+// Dial connects, authenticates (agent -> key file -> password ->
+// keyboard-interactive), requests a PTY of cols x rows, starts the remote
+// shell and the output pump, and registers the session under hs.ID.
+func (m *Manager) Dial(ctx context.Context, hs HostSpec, cols, rows int) (*Session, error) {
+	client, err := m.connect(ctx, hs)
+	if err != nil {
+		return nil, err
+	}
 
 	sess, err := client.NewSession()
 	if err != nil {
