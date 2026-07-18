@@ -60,6 +60,8 @@ const (
 	modalInviteResponse  // accept / decline a received invite
 	modalProjectConflict // per-project sync conflict (queued)
 	modalResetIdentity   // confirm "I lost my old vault" identity reset (pubkey rotate)
+	modalForwardForm     // -L/-R/-D port-forward form (real mode; k9s-style, never persisted)
+	modalForwards        // active-forwards overlay (F)
 )
 
 // syncState is the rendered sync status (header indicator). It is pure
@@ -88,6 +90,18 @@ const (
 	fPassword // masked password — shown in password mode only
 	fProject  // project selector (personal | writable projects) — real mode only
 	fCount
+)
+
+// forward-form field indices. ffKind is the kind selector; the two target
+// fields are conditional — shown and navigable only for local/remote (a dynamic
+// SOCKS5 forward resolves its target per-connection, so it has none).
+const (
+	ffKind = iota
+	ffBindAddr
+	ffBindPort
+	ffTargetAddr
+	ffTargetPort
+	ffCount
 )
 
 // line is one rendered terminal row: an optional prompt plus text. Colors are
@@ -280,6 +294,15 @@ type Model struct {
 	dialHostID string
 	dialCancel context.CancelFunc
 	attaching  bool // TTY handed to a session: suspend the tick loop
+
+	// --- port forwards (real mode; k9s-style, nothing persisted) ---
+	fwdVals     [ffCount]string             // forward-form buffers (see ff* indices)
+	fwdFocus    int                         // forward-form focused field
+	fwdErr      string                      // inline forward-form validation/engine error
+	fwdHost     store.Host                  // the host the form/start operates on
+	fwdInFlight bool                        // connecting modal shows "starting forward…"
+	fwdIdx      int                         // cursor in the active-forwards overlay
+	fwdPrefill  map[string]sshx.ForwardSpec // last submitted spec per host ID (ephemeral prefill)
 
 	importHosts   []store.Host
 	importSkipped []string

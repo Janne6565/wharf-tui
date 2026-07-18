@@ -104,6 +104,10 @@ func (m Model) modalKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		return m.projectConflictKey(key)
 	case modalResetIdentity:
 		return m.resetIdentityConfirmKey(key)
+	case modalForwardForm:
+		return m.forwardFormKey(key)
+	case modalForwards:
+		return m.forwardsKey(key)
 	}
 	return m, nil
 }
@@ -468,12 +472,12 @@ func (m Model) importSummaryKey(key string) (tea.Model, tea.Cmd) {
 // --- quit -------------------------------------------------------------------
 
 // requestQuit is triggered by ctrl+q. Demo quits directly; real mode confirms
-// when live sessions would be closed.
+// when live sessions or forwards would be closed.
 func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	if m.demo {
 		return m, tea.Quit
 	}
-	if m.mgr != nil && len(m.mgr.List()) > 0 {
+	if m.mgr != nil && (len(m.mgr.List()) > 0 || len(m.mgr.Forwards()) > 0) {
 		m.modal = modalQuitConfirm
 		return m, nil
 	}

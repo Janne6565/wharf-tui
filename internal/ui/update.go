@@ -105,6 +105,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// session engine results and prompts.
 	case dialDoneMsg:
 		return m.handleDialDone(msg)
+	case forwardDoneMsg:
+		return m.handleForwardDone(msg)
 	case detachedMsg:
 		return m.handleDetached(msg)
 	case sshx.HostKeyPromptMsg:
@@ -113,6 +115,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSecretPrompt(msg)
 	case sshx.SessionEndedMsg:
 		return m.handleSessionEnded(msg)
+	case sshx.ForwardEndedMsg:
+		return m.handleForwardEnded(msg)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -278,6 +282,12 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.lock()
+	case "F":
+		// Active-forwards overlay: works from any tab in real mode; inert with no
+		// engine and in demo.
+		if !m.demo && m.mgr != nil {
+			return m.openForwards(), nil
+		}
 	}
 
 	// alt+1..9 reattaches a live session from anywhere on the dashboard.
@@ -358,6 +368,10 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 	case "d":
 		if m.tab == 0 && !m.demo {
 			return m.deleteSelectedHost()
+		}
+	case "f":
+		if m.tab == 0 && !m.demo {
+			return m.startForwardForm()
 		}
 	case "m":
 		if m.tab == 0 && !m.demo {

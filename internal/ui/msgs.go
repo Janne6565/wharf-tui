@@ -164,3 +164,21 @@ func dialCmd(mgr *sshx.Manager, ctx context.Context, spec sshx.HostSpec, cols, r
 		return dialDoneMsg{hostID: spec.ID, sess: sess, err: err}
 	}
 }
+
+// --- port forward -----------------------------------------------------------
+
+// forwardDoneMsg reports the result of an async StartForward. fwd is nil on
+// error (and on a degenerate start in tests). It mirrors dialDoneMsg so the
+// same dial machinery (esc-cancel, prompt restore) drives the forward handshake.
+type forwardDoneMsg struct {
+	hostID string
+	fwd    *sshx.Forward
+	err    error
+}
+
+func startForwardCmd(mgr *sshx.Manager, ctx context.Context, hs sshx.HostSpec, spec sshx.ForwardSpec) tea.Cmd {
+	return func() tea.Msg {
+		fwd, err := mgr.StartForward(ctx, hs, spec)
+		return forwardDoneMsg{hostID: hs.ID, fwd: fwd, err: err}
+	}
+}

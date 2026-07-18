@@ -321,16 +321,31 @@ func (m Model) header(t theme.Theme, tabs string) []string {
 	var right string
 	switch {
 	case m.signedIn && !m.demo:
-		right = stl(t.Dim, t.Bg).Render(m.email+" · ") + m.syncIndicator(t) +
+		right = stl(t.Dim, t.Bg).Render(m.email+" · ") + m.syncIndicator(t) + m.forwardChip(t) +
 			stl(t.Dim, t.Bg).Render(" · ") + stl(t.Hi, t.Bg).Render("q") + stl(t.Dim, t.Bg).Render(" lock")
 	case m.signedIn:
 		right = stl(t.Dim, t.Bg).Render(m.email+" · ") + stl(t.Ok, t.Bg).Render("● synced")
 	case m.demo:
 		right = stl(t.Dim, t.Bg).Render("○ local vault · ") + stl(t.Hi, t.Bg).Render("q") + stl(t.Dim, t.Bg).Render(" sign in")
 	default:
-		right = stl(t.Ok, t.Bg).Render("● vault open · ") + stl(t.Hi, t.Bg).Render("q") + stl(t.Dim, t.Bg).Render(" lock")
+		right = stl(t.Ok, t.Bg).Render("● vault open") + m.forwardChip(t) +
+			stl(t.Dim, t.Bg).Render(" · ") + stl(t.Hi, t.Bg).Render("q") + stl(t.Dim, t.Bg).Render(" lock")
 	}
 	return []string{barLine(t, m.w, " "+left, right+" "), rule(t, m.w)}
+}
+
+// forwardChip renders a "⇄ n" active-forwards count for the header, adjacent to
+// the sync indicator. Empty in demo, with no engine, or when nothing is
+// forwarded. Uses theme roles so it recolors with a live theme switch.
+func (m Model) forwardChip(t theme.Theme) string {
+	if m.demo || m.mgr == nil {
+		return ""
+	}
+	n := len(m.mgr.Forwards())
+	if n == 0 {
+		return ""
+	}
+	return stl(t.Dim, t.Bg).Render(" · ") + stl(t.Blue, t.Bg).Render("⇄ "+itoa(n))
 }
 
 // syncIndicator renders the account sync state for the header (design: the
@@ -504,6 +519,9 @@ func (m Model) hostsTab(t theme.Theme, contentH int) []string {
 		if mh.ProjectID != "" {
 			rBody = append(rBody, kv(t, "project", mh.ProjectName, t.Mag, rw))
 		}
+		if n := m.hostForwardCount(h.ID); n > 0 {
+			rBody = append(rBody, kv(t, "forwards", itoa(n)+" active", t.Blue, rw))
+		}
 		if m.hostLive(h.ID) {
 			rBody = append(rBody, "", stl(t.Ok, t.Panel).Render("● live session — enter reattaches"))
 		}
@@ -511,7 +529,8 @@ func (m Model) hostsTab(t theme.Theme, contentH int) []string {
 			ruleIn(t, rw),
 			"",
 			stl(t.Hi, t.Panel).Render("enter")+stl(t.Dim, t.Panel).Render(" connect · ")+
-				stl(t.Hi, t.Panel).Render("a/e/d")+stl(t.Dim, t.Panel).Render(" add/edit/del"))
+				stl(t.Hi, t.Panel).Render("a/e/d")+stl(t.Dim, t.Panel).Render(" add/edit/del · ")+
+				stl(t.Hi, t.Panel).Render("f")+stl(t.Dim, t.Panel).Render(" fwd"))
 	} else {
 		rBody = []string{stl(t.Dim, t.Panel).Render("no match")}
 	}
@@ -979,6 +998,8 @@ func (m Model) helpView(t theme.Theme) []string {
 		{"tab", "cycle pane focus"},
 		{"enter", "connect / open / toggle"},
 		{"a / e / d", "add / edit / delete host"},
+		{"f", "start a port forward (hosts)"},
+		{"F", "show active forwards"},
 		{"m", "import ~/.ssh/config"},
 		{"R", "re-probe all hosts"},
 		{"g", "generate a key (keys tab)"},

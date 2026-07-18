@@ -45,6 +45,10 @@ func (m Model) modalView(t theme.Theme) []string {
 		return m.projectConflictView(t)
 	case modalResetIdentity:
 		return m.resetIdentityView(t)
+	case modalForwardForm:
+		return m.forwardFormView(t)
+	case modalForwards:
+		return m.forwardsView(t)
 	}
 	return m.mainView(t)
 }
@@ -223,12 +227,19 @@ func (m Model) deleteConfirmView(t theme.Theme) []string {
 
 func (m Model) connectingView(t theme.Theme) []string {
 	name := m.hostName(m.dialHostID)
+	verb, title := "connecting to ", "connecting"
+	if m.fwdInFlight {
+		// The forward's host may be a project host hostName can't resolve; the
+		// form stashed the full host, so use its name directly.
+		name = m.fwdHost.Name
+		verb, title = "starting forward to ", "starting forward"
+	}
 	body := []string{
-		stl(t.Warn, t.Panel).Render(m.spinner() + " connecting to " + name + " …"),
+		stl(t.Warn, t.Panel).Render(m.spinner() + " " + verb + name + " …"),
 		"",
 		stl(t.Hi, t.Panel).Render("esc") + stl(t.Dim, t.Panel).Render(" cancel"),
 	}
-	return m.modalBox(t, "connecting", "hi", body)
+	return m.modalBox(t, title, "hi", body)
 }
 
 // --- host-key TOFU ----------------------------------------------------------
@@ -345,12 +356,24 @@ func (m Model) keygenView(t theme.Theme) []string {
 // --- quit confirm -----------------------------------------------------------
 
 func (m Model) quitConfirmView(t theme.Theme) []string {
-	n := 0
+	ns, nf := 0, 0
 	if m.mgr != nil {
-		n = len(m.mgr.List())
+		ns = len(m.mgr.List())
+		nf = len(m.mgr.Forwards())
+	}
+	var parts []string
+	if ns > 0 {
+		parts = append(parts, itoa(ns)+" live session(s)")
+	}
+	if nf > 0 {
+		parts = append(parts, itoa(nf)+" active forward(s)")
+	}
+	what := strings.Join(parts, " and ")
+	if what == "" {
+		what = "nothing"
 	}
 	body := []string{
-		stl(t.Warn, t.Panel).Render(itoa(n) + " live session(s) will be closed."),
+		stl(t.Warn, t.Panel).Render(what + " will be closed."),
 		"",
 		stl(t.Hi, t.Panel).Render("y") + stl(t.Dim, t.Panel).Render("/") + stl(t.Hi, t.Panel).Render("enter") +
 			stl(t.Dim, t.Panel).Render(" quit · ") + stl(t.Hi, t.Panel).Render("esc") +
