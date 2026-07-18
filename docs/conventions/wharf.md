@@ -1,4 +1,4 @@
-<!-- AUTO-SYNCED from agents KB: projects/wharf.md @ 043bdf9.
+<!-- AUTO-SYNCED from agents KB: projects/wharf.md @ fab34a5.
      Do NOT edit here — edit the source in ~/projects/agents and re-run scripts/sync-conventions.sh. -->
 
 # Wharf
@@ -14,8 +14,39 @@ only ever holds ciphertext.
   - github.com/Janne6565/wharf-web — landing + web auth flow (React + **TanStack Start**,
     deliberate upgrade from plain Vite SPA for future landing-page SSR). Exists.
   - github.com/Janne6565/wharf-backend — sync + device-code auth (Java 21 + Spring Boot).
-    Exists. Projects/team endpoints still planned.
-  - `wharf-mobile` — companion app (React Native + Expo). Planned.
+    Exists. Projects/team endpoints live (2026-07-16).
+  - github.com/Janne6565/wharf-mobile — companion app (React Native + Expo, public).
+    Exists (2026-07-16): M0–M5 done (scaffold, crypto core w/ local wharf-argon2
+    Expo Module, auth/pairing/biometric-DEK unlock, personal sync engine + host
+    CRUD, member-level projects, invite+finalize). In-app Google/GitHub sign-in
+    (2026-07-16): authorize?client=mobile in the system browser, wharf://oauth
+    deep link returns a one-time device code exchanged in-app — no manual
+    pairing-code typing (/pair kept as fallback). Remaining: M6 polish + EAS
+    TestFlight/Play release, on-hardware crypto self-test (Settings → Developer,
+    dev builds). Mobile v1 boundary: NO rotation/removal/role-change endpoints
+    surfaced. Plan in repo `docs/PLAN.md`.
+    **Native crypto fix (2026-07-17):** react-native-libsodium's JSI only accepts
+    AEAD additional_data as a UTF-8 string — impossible for the binary WHARFV/WHARFP
+    header AAD, so every on-device vault open failed as "wrong master password".
+    Device backend now uses pure-JS @noble XChaCha20-Poly1305 + a faithful NaCl
+    sealed box, byte-parity-tested against libsodium in CI; only real auth failures
+    map to wrong-secret. **M7 SSH terminal built (2026-07-17,** pending on-device
+    verify): gomobile Go engine `sshengine/` ports wharf-tui sshx (TOFU,
+    stored-password replay, ring scrollback; password+keyboard-interactive ONLY —
+    no key mode on mobile, decision 5 in PLAN.md), `modules/wharf-ssh` Expo module
+    (Swift done + app compiles; Kotlin awaits an NDK for the aar), xterm.js in an
+    offline WebView asset, terminal screen per mock 03 with sticky ctrl/alt key row;
+    vault lock closes all sessions; 33 MB iOS xcframework committed so builds need
+    no Go toolchain (`scripts/build-ssh-engine.sh` rebuilds).
+    **Liquid Glass tab bar (2026-07-17,** pending on-device verify — needs a
+    dev-client rebuild): on iOS 26+ (`isLiquidGlassAvailable()`) the `(tabs)` bar
+    floats absolute/transparent over a native `GlassView` (expo-glass-effect
+    ~57.0.1); `ScreenContainer` pads bottom by the bar height via
+    `BottomTabBarHeightContext` from **`expo-router/js-tabs`** — SDK 57 vendors
+    bottom-tabs inside expo-router, so `@react-navigation/bottom-tabs` must NOT
+    be installed separately (a second copy would be a different context object
+    and the padding would silently read 0). Android/older iOS keep the solid
+    `shellRaised` bar unchanged.
   - github.com/Janne6565/wharf-deployment — Kustomize base + single `main` overlay
     (merge-to-main = prod deploy), ArgoCD app wired via cluster-deployment. Exists.
 - **Local:** clone the repo(s) above into `~/projects/wharf/<repo-name>/` (multi-repo, one
@@ -72,6 +103,23 @@ invite by email, roles (owner/admin/member); private keys are never shared.
 - **Mobile (planned):** React Native+Expo. **Deploy (planned):** Kustomize+ArgoCD.
 
 ## Status
+
+- **Projects (team workspaces) shipped 2026-07-16** across backend + TUI + web
+  (mobile follows). Zero-knowledge sharing: per-user X25519 identity keypair stored
+  in the personal vault payload (**store schema 2** — pre-projects builds hard-error
+  on v2 payloads, deliberate), per-project **WHARFP** blob (32B header AAD +
+  XChaCha20 body, no key slots) under a random DEK, DEK distributed as 80-byte
+  `crypto_box_seal` sealed boxes to member pubkeys (server-distributed pubkeys =
+  accepted v1 MITM caveat, documented in wharf-backend README). Invites are
+  accept-then-finalize (invitee joins unkeyed; any admin client seals the DEK on its
+  next pass); member removal is only expressible via the atomic rotate endpoint
+  (fresh DEK, re-wrap remaining). Roles owner/admin/member, server ACL, 404-not-403
+  for non-members. Cross-impl byte-compat proven by committed Go-generated fixtures
+  (`project-fixture.json`) in wharf-web and wharf-mobile. Invite notification
+  emails go through the **mail-service** (`MAIL_SERVICE_API_KEY` sealed secret,
+  send-scoped key on the info@jannekeipert.de connection; Noop client when unset).
+  Project payload note: TUI marshals empty docs as `hosts:null` — clients must
+  treat null as empty for fingerprint parity.
 - **wharf-tui:** **usable SSH client** (v1 milestone done, 2026-07-14). Real SSH via
   `internal/sshx` (agent/keyfile/password/keyboard-interactive auth, skeema/knownhosts
   TOFU, detachable sessions with ring-buffer replay, full-screen takeover via
@@ -93,8 +141,10 @@ invite by email, roles (owner/admin/member); private keys are never shared.
   to the vault, XChaCha20 under an HKDF subkey of the vault DEK — sync only while
   unlocked; unreadable file → signed-out → re-pair. Master password retained in
   memory while unlocked (needed to adopt remote blobs with foreign salts), zeroed on
-  lock. Opt-in live E2E via `WHARF_E2E_BASE`. Projects tab remains **simulated** (no
-  backend projects API yet). Roadmap next: port forwarding, projects/teams.
+  lock. Opt-in live E2E via `WHARF_E2E_BASE`. **Projects tab is real**
+  (2026-07-16): store schema v2 identity, per-project WHARFP sync with offline blob
+  cache, invites/finalize/rotation — see the Projects entry at the top of Status.
+  Roadmap next: port forwarding.
 - **wharf-backend:** **v1 auth/vault/pairing API done** (2026-07-14): register/login/
   refresh (COOKIE|DIRECT token modes), recovery verify/reset (rotates code, bumps
   `tokenVersion` to revoke all sessions), device-code issue/exchange (one-time,
@@ -109,7 +159,13 @@ invite by email, roles (owner/admin/member); private keys are never shared.
   `hasPassword/hasRecovery/hasVault`. Providers enabled only when `OAUTH_*` env
   creds are set (prod: sealed `wharf-oauth-secret`, optional — see
   wharf-deployment/docs/secrets.md). 61 tests green; `openapi.json` committed at
-  repo root (Orval source). Projects/team endpoints still open.
+  repo root (Orval source). Projects/invites/rotation endpoints + mail client live (2026-07-16, 109 tests).
+  **Mobile OAuth deep-link hand-off** (2026-07-16): `authorize?client=mobile`
+  (client recorded on the one-time state row, V5 migration); a mobile callback
+  issues a one-time device code and 302s to `wharf://oauth?code=…` (config
+  `OAUTH_MOBILE_REDIRECT_URI`; no cookie, no refresh token minted), exchanged
+  at the existing `/device-codes/exchange`. Errors deep-link as `?error=<code>`;
+  `invalid_state` (client unknowable) keeps the web target. 122 tests.
 - **wharf-web:** **web auth flow + landing done** (2026-07-15): the 5 auth screens
   restyled to `Wharf Web Auth v2.dc.html` (all-mono, square, fieldset label chips,
   bracketed buttons, `❯_` logo; Google/GitHub OAuth buttons rendered but disabled —
