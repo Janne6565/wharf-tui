@@ -1,4 +1,4 @@
-<!-- AUTO-SYNCED from agents KB: projects/wharf.md @ fab34a5.
+<!-- AUTO-SYNCED from agents KB: projects/wharf.md @ 2754f99.
      Do NOT edit here — edit the source in ~/projects/agents and re-run scripts/sync-conventions.sh. -->
 
 # Wharf
@@ -144,7 +144,17 @@ invite by email, roles (owner/admin/member); private keys are never shared.
   lock. Opt-in live E2E via `WHARF_E2E_BASE`. **Projects tab is real**
   (2026-07-16): store schema v2 identity, per-project WHARFP sync with offline blob
   cache, invites/finalize/rotation — see the Projects entry at the top of Status.
-  Roadmap next: port forwarding.
+  **Port forwarding done (2026-07-18):** k9s-style ephemeral tunnels — `f` on a
+  hovered host (personal or project) opens a small form (kind -L/-R/-D, bind,
+  target; dynamic = built-in CONNECT-only SOCKS5), `F` lists active forwards
+  (`x` closes). Each forward runs standalone on its **own SSH connection**
+  (`internal/sshx/forward.go`, shared `connect()` extracted from Dial), so it
+  survives session detach/close; ends on close/conn-death (`ForwardEndedMsg`).
+  **Nothing is persisted** — deliberate scope decision: no vault schema change,
+  no web/mobile impact; last-used spec per host is prefilled in-memory only.
+  Bind port 0 = auto-pick, resolved port surfaced in the toast/overlay. Header
+  shows a `⇄ n` chip; quit confirm counts tunnels. Roadmap next: (nothing
+  queued).
 - **wharf-backend:** **v1 auth/vault/pairing API done** (2026-07-14): register/login/
   refresh (COOKIE|DIRECT token modes), recovery verify/reset (rotates code, bumps
   `tokenVersion` to revoke all sessions), device-code issue/exchange (one-time,
