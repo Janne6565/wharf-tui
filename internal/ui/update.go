@@ -95,10 +95,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.setToast("key scan failed: "+msg.err.Error(), "err"), nil
 		}
 		m.keyInfos = msg.keys
-		m.keyIdx = clampIdx(m.keyIdx, len(m.keyInfos))
+		m.keyIdx = clampIdx(m.keyIdx, len(m.mergedKeys()))
 		return m, nil
 	case keyGeneratedMsg:
 		return m.handleKeyGenerated(msg)
+	case keySyncedMsg:
+		return m.handleKeySynced(msg)
 	case importDoneMsg:
 		return m.handleImportDone(msg)
 
@@ -386,6 +388,10 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 			return m.openKeygenForm(), nil
 		}
 	case "s":
+		// Keys tab: sync the selected local key to the vault.
+		if m.tab == 2 && !m.demo {
+			return m.syncSelectedKey()
+		}
 		// Manual sync from the settings (account) tab. A pending conflict
 		// re-runs the pass, which reopens the resolve prompt.
 		if m.tab == 3 && !m.demo && m.signedIn {
@@ -394,6 +400,11 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m.startSync()
+		}
+	case "u":
+		// Keys tab: remove the selected synced key from the vault.
+		if m.tab == 2 && !m.demo {
+			return m.unsyncSelectedKey()
 		}
 	case "enter", " ":
 		return m.mainEnter()
@@ -523,7 +534,7 @@ func (m *Model) move(d int) {
 	case 1:
 		m.projIdx = clampIdx(m.projIdx+d, len(m.projects))
 	case 2:
-		m.keyIdx = clampIdx(m.keyIdx+d, len(m.keyInfos))
+		m.keyIdx = clampIdx(m.keyIdx+d, len(m.mergedKeys()))
 	case 3:
 		m.setIdx = clampIdx(m.setIdx+d, len(settingDefs))
 	}

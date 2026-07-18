@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -250,5 +251,72 @@ func TestScanMissingDir(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("got %d keys, want 0", len(got))
+	}
+}
+
+func TestFingerprintOfAuthorized(t *testing.T) {
+	dir := t.TempDir()
+	info, err := Generate(dir, "id_ed25519", "me@host", nil)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	pubData, err := os.ReadFile(filepath.Join(dir, "id_ed25519.pub"))
+	if err != nil {
+		t.Fatalf("read pub: %v", err)
+	}
+
+	fp, typ, ok := FingerprintOfAuthorized(string(pubData))
+	if !ok {
+		t.Fatal("FingerprintOfAuthorized should parse a valid public line")
+	}
+	if fp != info.Fingerprint {
+		t.Errorf("fingerprint = %q, want %q", fp, info.Fingerprint)
+	}
+	if typ != "ED25519" {
+		t.Errorf("type = %q, want ED25519", typ)
+	}
+
+	if _, _, ok := FingerprintOfAuthorized("not a public key"); ok {
+		t.Error("FingerprintOfAuthorized should reject garbage")
+	}
+}
+
+func TestPublicLineFromPEM(t *testing.T) {
+	dir := t.TempDir()
+	info, err := Generate(dir, "id_ed25519", "orig@host", nil)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	privData, err := os.ReadFile(filepath.Join(dir, "id_ed25519"))
+	if err != nil {
+		t.Fatalf("read priv: %v", err)
+	}
+
+	line, err := PublicLineFromPEM(privData, "new@host")
+	if err != nil {
+		t.Fatalf("PublicLineFromPEM: %v", err)
+	}
+	fp, _, ok := FingerprintOfAuthorized(line)
+	if !ok || fp != info.Fingerprint {
+		t.Fatalf("derived line fingerprint = %q ok=%v, want %q", fp, ok, info.Fingerprint)
+	}
+	if !strings.HasSuffix(line, " new@host") {
+		t.Errorf("derived line should carry the comment, got %q", line)
+	}
+
+	// Encrypted material has no accessible public half here.
+	encDir := t.TempDir()
+	if _, err := Generate(encDir, "id_enc", "c", []byte("secret")); err != nil {
+		t.Fatalf("Generate encrypted: %v", err)
+	}
+	encData, err := os.ReadFile(filepath.Join(encDir, "id_enc"))
+	if err != nil {
+		t.Fatalf("read enc: %v", err)
+	}
+	if _, err := PublicLineFromPEM(encData, ""); err == nil {
+		t.Error("PublicLineFromPEM should error on encrypted material")
+	}
+	if _, err := PublicLineFromPEM([]byte("garbage"), ""); err == nil {
+		t.Error("PublicLineFromPEM should error on invalid material")
 	}
 }

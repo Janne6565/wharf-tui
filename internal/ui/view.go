@@ -7,7 +7,6 @@ import (
 
 	"github.com/Janne6565/wharf-tui/internal/api"
 	"github.com/Janne6565/wharf-tui/internal/data"
-	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
 	"github.com/Janne6565/wharf-tui/internal/store"
 	"github.com/Janne6565/wharf-tui/internal/theme"
@@ -688,35 +687,73 @@ func (m Model) projectsGate(t theme.Theme, contentH int) []string {
 	return centerInArea(box, m.w, contentH, t.Bg)
 }
 
-// keysTab renders identities scanned from ~/.ssh + detail.
+// keysTab renders the merged key list (local scan + synced vault keys) + detail.
 func (m Model) keysTab(t theme.Theme, contentH int) []string {
-	if len(m.keyInfos) == 0 {
+	mks := m.mergedKeys()
+	if len(mks) == 0 {
 		return m.keysEmpty(t, contentH)
 	}
-	kIdx := clampIdx(m.keyIdx, len(m.keyInfos))
+	kIdx := clampIdx(m.keyIdx, len(mks))
 	leftW, rightW := m.paneSplit(11, 14)
 	lInner := leftW - 2
 	var lRows []string
-	for i, k := range m.keyInfos {
+	for i, k := range mks {
 		lRows = append(lRows, keyRow(t, k, i == kIdx, lInner))
 	}
-	k := m.keyInfos[kIdx]
 	rw := boxContentW(rightW)
-	enc, encC := "no", t.Ok
-	if k.Encrypted {
-		enc, encC = "yes", t.Warn
-	}
-	rBody := []string{
-		stl(t.Hi, t.Panel).Bold(true).Render(k.Name),
+	rBody := m.keyDetail(t, mks[kIdx], rw)
+	return m.twoPane(t, contentH, "identities · "+itoa(len(mks)), m.listBorder(t), lRows, 11, "identity", m.detailBorder(t), rBody, 14)
+}
+
+// keyDetail renders the right-hand detail pane for the selected merged key. The
+// rows shown depend on its state: local-only keeps path/encrypted, synced adds
+// the vault date, vault-only (synced from another machine) shows its origin.
+func (m Model) keyDetail(t theme.Theme, mk mergedKey, rw int) []string {
+	body := []string{
+		stl(t.Hi, t.Panel).Bold(true).Render(mk.name),
 		"",
-		kv(t, "type", orDash(k.Type), t.Fg, rw),
-		kv(t, "fingerprint", orDash(k.Fingerprint), t.Dim, rw),
-		kv(t, "path", orDash(k.Path), t.Fg, rw),
-		kv(t, "encrypted", enc, encC, rw),
-		"",
-		stl(t.Hi, t.Panel).Render("g") + stl(t.Dim, t.Panel).Render(" generate a new ed25519 key"),
+		kv(t, "type", orDash(mk.typ), t.Fg, rw),
+		kv(t, "fingerprint", orDash(mk.fp), t.Dim, rw),
 	}
-	return m.twoPane(t, contentH, "identities · "+itoa(len(m.keyInfos)), m.listBorder(t), lRows, 11, "identity", m.detailBorder(t), rBody, 14)
+	switch {
+	case mk.isVaultOnly():
+		body = append(body,
+			kv(t, "origin", orDash(mk.vault.SourcePath), t.Fg, rw),
+			kv(t, "vault", "synced "+keyDate(mk.vault.AddedAt), t.Ok, rw))
+	default:
+		enc, encC := "no", t.Ok
+		if mk.encrypted {
+			enc, encC = "yes", t.Warn
+		}
+		body = append(body,
+			kv(t, "path", orDash(mk.local.Path), t.Fg, rw),
+			kv(t, "encrypted", enc, encC, rw))
+		if mk.isSynced() {
+			body = append(body, kv(t, "vault", "synced "+keyDate(mk.vault.AddedAt), t.Ok, rw))
+		}
+	}
+	body = append(body, "", m.keyDetailHint(t, mk))
+	return body
+}
+
+// keyDetailHint is the in-pane action hint for the selected key. Demo mode only
+// generates; real mode offers sync/unsync per state.
+func (m Model) keyDetailHint(t theme.Theme, mk mergedKey) string {
+	if m.demo {
+		return stl(t.Hi, t.Panel).Render("g") + stl(t.Dim, t.Panel).Render(" generate a new ed25519 key")
+	}
+	if mk.vault != nil {
+		return stl(t.Hi, t.Panel).Render("u") + stl(t.Dim, t.Panel).Render(" remove from vault")
+	}
+	return stl(t.Hi, t.Panel).Render("s") + stl(t.Dim, t.Panel).Render(" sync to vault")
+}
+
+// keyDate renders a vault key's AddedAt as YYYY-MM-DD (— when unset).
+func keyDate(ts time.Time) string {
+	if ts.IsZero() {
+		return "—"
+	}
+	return ts.Format("2006-01-02")
 }
 
 func (m Model) keysEmpty(t theme.Theme, contentH int) []string {
@@ -733,7 +770,23 @@ func (m Model) keysEmpty(t theme.Theme, contentH int) []string {
 	return centerInArea(box, m.w, contentH, t.Bg)
 }
 
-func keyRow(t theme.Theme, k keys.KeyInfo, sel bool, innerW int) string {
+// keyBadge is the right-aligned state badge for a key row: synced (Ok) and
+// vault (Hi) take priority over the local encrypted badge (Warn); an encrypted
+// synced key still reports "encrypted yes" in the detail pane.
+func keyBadge(t theme.Theme, mk mergedKey) (string, lipgloss.Color) {
+	switch {
+	case mk.isSynced():
+		return "synced", t.Ok
+	case mk.isVaultOnly():
+		return "vault", t.Hi
+	case mk.encrypted:
+		return "encrypted", t.Warn
+	default:
+		return "", t.Dim
+	}
+}
+
+func keyRow(t theme.Theme, mk mergedKey, sel bool, innerW int) string {
 	bg := t.Panel
 	mark := " "
 	nameFg := t.Fg
@@ -747,20 +800,16 @@ func keyRow(t theme.Theme, k keys.KeyInfo, sel bool, innerW int) string {
 		avail = 8
 	}
 	const nameW = 20
-	badge := ""
-	badgeC := t.Dim
-	if k.Encrypted {
-		badge, badgeC = "encrypted", t.Warn
-	}
+	badge, badgeC := keyBadge(t, mk)
 	badgeW := len([]rune(badge))
 	typeW := avail - (2 + nameW + 1 + 1 + badgeW)
 	if typeW < 4 {
 		typeW = 4
 	}
 	mid := stl(t.Hi, bg).Render(mark+" ") +
-		rowSeg(k.Name, nameW, nameFg, bg, false) +
+		rowSeg(mk.name, nameW, nameFg, bg, false) +
 		bgpad(1, bg) +
-		rowSeg(orDash(k.Type), typeW, t.Dim, bg, false) +
+		rowSeg(orDash(mk.typ), typeW, t.Dim, bg, false) +
 		bgpad(1, bg) +
 		rowSeg(badge, badgeW, badgeC, bg, true)
 	return selRow(innerW, bg, mid)
@@ -941,6 +990,14 @@ func (m Model) hintBar(t theme.Theme) []string {
 	case 2:
 		if !m.demo {
 			hints = append(hints, hk{"g", "generate"})
+			// s/u apply per selected key; both are listed so the row is stable.
+			if mk, ok := m.selectedMergedKey(); ok {
+				if mk.vault != nil {
+					hints = append(hints, hk{"u", "unsync"})
+				} else {
+					hints = append(hints, hk{"s", "sync"})
+				}
+			}
 		}
 	case 3:
 		hints = append(hints, hk{"enter", "toggle"})
@@ -1003,6 +1060,7 @@ func (m Model) helpView(t theme.Theme) []string {
 		{"m", "import ~/.ssh/config"},
 		{"R", "re-probe all hosts"},
 		{"g", "generate a key (keys tab)"},
+		{"s / u", "sync / unsync key (keys tab)"},
 		{"i", "invite member (projects)"},
 		{"esc", "back / clear / detach / cancel"},
 		{"ctrl+\\", "detach from a live session"},

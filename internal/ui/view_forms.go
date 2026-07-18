@@ -49,6 +49,8 @@ func (m Model) modalView(t theme.Theme) []string {
 		return m.forwardFormView(t)
 	case modalForwards:
 		return m.forwardsView(t)
+	case modalKeyUnsync:
+		return m.keyUnsyncView(t)
 	}
 	return m.mainView(t)
 }
@@ -223,6 +225,21 @@ func (m Model) deleteConfirmView(t theme.Theme) []string {
 	return m.modalBox(t, "delete host", "err", body)
 }
 
+// --- unsync key from vault --------------------------------------------------
+
+func (m Model) keyUnsyncView(t theme.Theme) []string {
+	body := []string{
+		stl(t.Fg, t.Panel).Render("Remove key ") + stl(t.Hi, t.Panel).Render(m.unsyncKeyName) + stl(t.Fg, t.Panel).Render(" from the vault?"),
+		"",
+		stl(t.Dim, t.Panel).Render("The local key file is left untouched."),
+		"",
+		stl(t.Hi, t.Panel).Render("y") + stl(t.Dim, t.Panel).Render("/") + stl(t.Hi, t.Panel).Render("enter") +
+			stl(t.Dim, t.Panel).Render(" remove · ") + stl(t.Hi, t.Panel).Render("esc") +
+			stl(t.Dim, t.Panel).Render("/") + stl(t.Hi, t.Panel).Render("n") + stl(t.Dim, t.Panel).Render(" cancel"),
+	}
+	return m.modalBox(t, "remove from vault", "warn", body)
+}
+
 // --- connecting -------------------------------------------------------------
 
 func (m Model) connectingView(t theme.Theme) []string {
@@ -341,6 +358,17 @@ func (m Model) keygenView(t theme.Theme) []string {
 		}
 		body = append(body, line)
 	}
+	// 4th focusable element: the "also sync to vault" toggle.
+	mark := "[ ]"
+	if m.kgSync {
+		mark = "[x]"
+	}
+	labelC := t.Dim
+	if m.kgFocus == kgSyncField {
+		labelC = t.Hi
+	}
+	body = append(body, stl(labelC, t.Panel).Render(padTo2("sync", 12))+
+		stl(t.Hi, t.Panel).Render(mark+" sync to vault"))
 	if m.kgErr != "" {
 		body = append(body, "", stl(t.Err, t.Panel).Render(m.kgErr))
 	}

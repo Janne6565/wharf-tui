@@ -128,6 +128,21 @@ func (m Model) generateKeyCmd(name, comment, passphrase string) tea.Cmd {
 	}
 }
 
+// keySyncedMsg carries a VaultKey built from a scanned key (or a read error).
+// The file read runs off the reducer, mirroring generateKeyCmd; AddKey and the
+// vault save happen back in the handler.
+type keySyncedMsg struct {
+	key store.VaultKey
+	err error
+}
+
+func (m Model) syncKeyCmd(info keys.KeyInfo) tea.Cmd {
+	return func() tea.Msg {
+		vk, err := buildVaultKey(info)
+		return keySyncedMsg{key: vk, err: err}
+	}
+}
+
 // --- ssh_config import ------------------------------------------------------
 
 type importDoneMsg struct {

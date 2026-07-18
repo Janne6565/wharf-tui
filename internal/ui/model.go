@@ -62,6 +62,7 @@ const (
 	modalResetIdentity   // confirm "I lost my old vault" identity reset (pubkey rotate)
 	modalForwardForm     // -L/-R/-D port-forward form (real mode; k9s-style, never persisted)
 	modalForwards        // active-forwards overlay (F)
+	modalKeyUnsync       // confirm removing a synced key from the vault (keys tab)
 )
 
 // syncState is the rendered sync status (header indicator). It is pure
@@ -282,8 +283,13 @@ type Model struct {
 	delProjID string // "" personal, else the project to delete the host from
 
 	kgVals  [3]string // name, comment, passphrase
-	kgFocus int
+	kgFocus int       // 0..2 text fields, kgSyncField the "sync to vault" toggle
 	kgErr   string
+	kgSync  bool // "also sync to vault" toggle (keygen modal)
+
+	// unsync-from-vault confirm (keys tab).
+	unsyncKeyID   string
+	unsyncKeyName string
 
 	// change-master-password modal: current, new, confirm.
 	cpVals  [3]string

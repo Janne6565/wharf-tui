@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
 	"github.com/Janne6565/wharf-tui/internal/vault"
@@ -11,6 +12,26 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 )
+
+// drainCmd runs cmd and every message it produces (recursing into tea.Batch)
+// until the chain settles, threading the model through each step.
+func drainCmd(t *testing.T, tm tea.Model, cmd tea.Cmd) tea.Model {
+	t.Helper()
+	for cmd != nil {
+		msg := cmd()
+		if msg == nil {
+			return tm
+		}
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, c := range batch {
+				tm = drainCmd(t, tm, c)
+			}
+			return tm
+		}
+		tm, cmd = step(tm, msg)
+	}
+	return tm
+}
 
 // fakeVault is a fast in-memory vaultHandle so UI tests avoid argon2's cost.
 type fakeVault struct {
@@ -503,5 +524,104 @@ func TestMultiRuneKeyMsgFillsInput(t *testing.T) {
 	tm = send(tm, runes("hunter2")) // one msg, seven runes
 	if !strings.Contains(tm.View(), "•••••••") {
 		t.Fatalf("a multi-rune KeyMsg should fill the password field:\n%s", tm.View())
+	}
+}
+
+// TestKeysSyncFlow: s on a local-only key reads the file, adds it to the vault,
+// saves, and (signed in) schedules a sync push.
+func TestKeysSyncFlow(t *testing.T) {
+	info, _, _ := genKey(t, "id_ed25519")
+	tm, fv, _ := pairModel(t)
+	m := tm.(Model)
+	m.keyInfos = []keys.KeyInfo{info}
+	m.tab = 2
+	m.keyIdx = 0
+	saves := fv.saves
+	tm = m
+
+	tm, cmd := step(tm, runes("s"))
+	if cmd == nil {
+		t.Fatal("s on a local key should produce the sync command")
+	}
+	tm, pushCmd := step(tm, cmd()) // keySyncedMsg → AddKey + saveVault
+	ks := tm.(Model).st.Keys()
+	if len(ks) != 1 || ks[0].Name != "id_ed25519" {
+		t.Fatalf("vault keys = %+v, want one id_ed25519", ks)
+	}
+	if fv.saves <= saves {
+		t.Fatal("syncing a key should save the vault")
+	}
+	if pushCmd == nil {
+		t.Fatal("a signed-in sync should schedule a push")
+	}
+	if !strings.Contains(tm.View(), "synced id_ed25519 to vault") {
+		t.Fatalf("expected a confirming toast:\n%s", tm.View())
+	}
+}
+
+// TestKeysUnsyncFlow: u confirms, then removes the key from the vault while the
+// local file is left in place.
+func TestKeysUnsyncFlow(t *testing.T) {
+	info, priv, pub := genKey(t, "id_ed25519")
+	tm, fv, _ := pairModel(t)
+	m := tm.(Model)
+	if _, err := m.st.AddKey(store.VaultKey{Name: "id_ed25519", Type: "ED25519", Material: b64(priv), PublicKey: pub}); err != nil {
+		t.Fatalf("seed vault key: %v", err)
+	}
+	m.keyInfos = []keys.KeyInfo{info}
+	m.tab = 2
+	m.keyIdx = 0
+	saves := fv.saves
+	tm = m
+
+	tm = send(tm, runes("u"))
+	if !strings.Contains(tm.View(), "remove from vault") {
+		t.Fatalf("u should open the unsync confirm modal:\n%s", tm.View())
+	}
+	tm, pushCmd := step(tm, runes("y"))
+	if ks := tm.(Model).st.Keys(); len(ks) != 0 {
+		t.Fatalf("unsync should empty the vault keys, got %+v", ks)
+	}
+	if fv.saves <= saves {
+		t.Fatal("unsync should save the vault")
+	}
+	if pushCmd == nil {
+		t.Fatal("a signed-in unsync should schedule a push")
+	}
+	if !strings.Contains(tm.View(), "removed id_ed25519 from vault") {
+		t.Fatalf("expected a confirming toast:\n%s", tm.View())
+	}
+}
+
+// TestKeygenSyncToggleLandsKey: with the keygen "sync to vault" toggle on, a
+// completed generation also lands the fresh key in the vault.
+func TestKeygenSyncToggleLandsKey(t *testing.T) {
+	info, _, _ := genKey(t, "id_ed25519")
+	tm, _ := openedModel(t)
+	m := tm.(Model)
+	m.tab = 2
+	m = m.openKeygenForm()
+	tm = m
+
+	tm = send(tm, special(tea.KeyTab))
+	tm = send(tm, special(tea.KeyTab))
+	tm = send(tm, special(tea.KeyTab)) // → sync toggle (kgSyncField)
+	tm = send(tm, runes(" "))          // enable
+	if !tm.(Model).kgSync {
+		t.Fatal("space on the toggle should enable sync")
+	}
+	if !strings.Contains(tm.View(), "[x] sync to vault") {
+		t.Fatalf("toggle should render checked:\n%s", tm.View())
+	}
+
+	// Simulate generation completing (avoids writing to the real ~/.ssh).
+	tm, cmd := step(tm, keyGeneratedMsg{info: info})
+	if tm.(Model).kgSync {
+		t.Fatal("kgSync should reset after generation")
+	}
+	tm = drainCmd(t, tm, cmd)
+	ks := tm.(Model).st.Keys()
+	if len(ks) != 1 || ks[0].Name != "id_ed25519" {
+		t.Fatalf("keygen with sync on should land the key in the vault, got %+v", ks)
 	}
 }

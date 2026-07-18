@@ -108,6 +108,8 @@ func (m Model) modalKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		return m.forwardFormKey(key)
 	case modalForwards:
 		return m.forwardsKey(key)
+	case modalKeyUnsync:
+		return m.keyUnsyncConfirmKey(key)
 	}
 	return m, nil
 }
@@ -391,10 +393,18 @@ func (m Model) deleteConfirmKey(key string) (tea.Model, tea.Cmd) {
 
 // --- keygen -----------------------------------------------------------------
 
+// kgFieldCount is the number of focusable keygen elements: name, comment,
+// passphrase, and the "sync to vault" toggle (kgSyncField).
+const (
+	kgSyncField  = 3
+	kgFieldCount = 4
+)
+
 func (m Model) openKeygenForm() Model {
 	m.modal = modalKeygen
 	m.kgFocus = 0
 	m.kgErr = ""
+	m.kgSync = false
 	m.kgVals = [3]string{"id_ed25519_wharf", defaultKeyComment(), ""}
 	return m
 }
@@ -405,10 +415,10 @@ func (m Model) keygenKey(key string) (tea.Model, tea.Cmd) {
 		m.modal = modalNone
 		return m, nil
 	case "tab", "down":
-		m.kgFocus = (m.kgFocus + 1) % 3
+		m.kgFocus = (m.kgFocus + 1) % kgFieldCount
 		return m, nil
 	case "shift+tab", "up":
-		m.kgFocus = (m.kgFocus + 2) % 3
+		m.kgFocus = (m.kgFocus + kgFieldCount - 1) % kgFieldCount
 		return m, nil
 	case "enter":
 		if strings.TrimSpace(m.kgVals[0]) == "" {
@@ -417,17 +427,26 @@ func (m Model) keygenKey(key string) (tea.Model, tea.Cmd) {
 		}
 		m.kgErr = ""
 		return m, m.generateKeyCmd(strings.TrimSpace(m.kgVals[0]), m.kgVals[1], m.kgVals[2])
+	}
+	// The sync toggle is a selector, not a text field.
+	if m.kgFocus == kgSyncField {
+		switch key {
+		case "left", "right", " ":
+			m.kgSync = !m.kgSync
+		}
+		return m, nil
+	}
+	switch key {
 	case "backspace":
 		if v := m.kgVals[m.kgFocus]; len(v) > 0 {
 			m.kgVals[m.kgFocus] = v[:len(v)-1]
 		}
-		return m, nil
 	default:
 		if isPrintable(key) {
 			m.kgVals[m.kgFocus] += key
 		}
-		return m, nil
 	}
+	return m, nil
 }
 
 func (m Model) handleKeyGenerated(msg keyGeneratedMsg) (tea.Model, tea.Cmd) {
@@ -437,7 +456,73 @@ func (m Model) handleKeyGenerated(msg keyGeneratedMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.modal = modalNone
-	return m.setToast("generated "+msg.info.Name, "ok"), m.scanKeysCmd()
+	doSync := m.kgSync
+	m.kgSync = false
+	cmds := []tea.Cmd{m.scanKeysCmd()}
+	// "Also sync": the fresh key is unencrypted-or-not exactly as generated, so
+	// the same sync path applies (keySyncedMsg then AddKey + saveVault).
+	if doSync && !m.demo {
+		cmds = append(cmds, m.syncKeyCmd(msg.info))
+	}
+	return m.setToast("generated "+msg.info.Name, "ok"), tea.Batch(cmds...)
+}
+
+// --- key sync / unsync (keys tab) -------------------------------------------
+
+// syncSelectedKey copies the selected local key into the vault. The file read
+// runs off the reducer via syncKeyCmd; AddKey + save happen in handleKeySynced.
+func (m Model) syncSelectedKey() (tea.Model, tea.Cmd) {
+	mk, ok := m.selectedMergedKey()
+	if !ok || mk.local == nil {
+		return m, nil
+	}
+	if mk.vault != nil {
+		return m.setToast(mk.name+" is already in the vault", "ok"), nil
+	}
+	return m, m.syncKeyCmd(*mk.local)
+}
+
+func (m Model) handleKeySynced(msg keySyncedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		return m.setToast("sync failed: "+cleanErr(msg.err), "err"), nil
+	}
+	stored, err := m.st.AddKey(msg.key)
+	if err != nil {
+		return m.setToast("sync failed: "+cleanErr(err), "err"), nil
+	}
+	m, syncCmd := m.saveVault()
+	return m.setToast("synced "+stored.Name+" to vault", "ok"), syncCmd
+}
+
+// unsyncSelectedKey opens the confirm modal for removing the selected synced
+// (or vault-only) key from the vault. The local key file is never touched.
+func (m Model) unsyncSelectedKey() (tea.Model, tea.Cmd) {
+	mk, ok := m.selectedMergedKey()
+	if !ok || mk.vault == nil {
+		return m, nil
+	}
+	m.unsyncKeyID = mk.vault.ID
+	m.unsyncKeyName = mk.vault.Name
+	m.modal = modalKeyUnsync
+	return m, nil
+}
+
+func (m Model) keyUnsyncConfirmKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "y", "Y", "enter":
+		name := m.unsyncKeyName
+		if err := m.st.RemoveKey(m.unsyncKeyID); err != nil {
+			m.modal = modalNone
+			return m.setToast("unsync failed: "+cleanErr(err), "err"), nil
+		}
+		m.modal = modalNone
+		m.keyIdx = clampIdx(m.keyIdx, len(m.mergedKeys()))
+		m, syncCmd := m.saveVault()
+		return m.setToast("removed "+name+" from vault", "ok"), syncCmd
+	case "n", "N", "esc":
+		m.modal = modalNone
+	}
+	return m, nil
 }
 
 // --- ssh_config import ------------------------------------------------------

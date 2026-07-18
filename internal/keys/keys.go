@@ -203,6 +203,34 @@ func Generate(dir, name, comment string, passphrase []byte) (KeyInfo, error) {
 	}, nil
 }
 
+// FingerprintOfAuthorized parses an authorized_keys line and returns its SHA256
+// fingerprint and display type. ok is false when the line is not a public key —
+// callers use it to decide whether a vault key can be matched to a local one.
+func FingerprintOfAuthorized(line string) (fp string, typ string, ok bool) {
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(line))
+	if err != nil {
+		return "", "", false
+	}
+	return ssh.FingerprintSHA256(pk), displayType(pk.Type()), true
+}
+
+// PublicLineFromPEM derives the authorized_keys line from UNENCRYPTED private
+// key material. It errors for encrypted (ssh.PassphraseMissingError) or
+// unparseable material — an encrypted key's public half must come from its
+// sibling .pub instead, never by decrypting it here.
+func PublicLineFromPEM(pemBytes []byte, comment string) (string, error) {
+	raw, err := ssh.ParseRawPrivateKey(pemBytes)
+	if err != nil {
+		return "", err
+	}
+	signer, err := ssh.NewSignerFromKey(raw)
+	if err != nil {
+		return "", err
+	}
+	line := authorizedLine(signer.PublicKey(), comment)
+	return strings.TrimRight(string(line), "\n"), nil
+}
+
 // authorizedLine renders the standard "<type> <base64> <comment>\n" public-key
 // line. ssh.MarshalAuthorizedKey drops the comment, so we splice it back in.
 func authorizedLine(pub ssh.PublicKey, comment string) []byte {
