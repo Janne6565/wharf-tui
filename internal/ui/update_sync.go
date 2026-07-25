@@ -210,6 +210,9 @@ func (m Model) handlePaired(msg pairedMsg) (tea.Model, tea.Cmd) {
 
 // pairErrText renders a pairing failure for the code screen.
 func pairErrText(err error) string {
+	if errors.Is(err, api.ErrEmailNotVerified) {
+		return pairEmailUnverifiedText()
+	}
 	var ae *api.Error
 	if errors.As(err, &ae) {
 		switch ae.Status {
@@ -221,6 +224,21 @@ func pairErrText(err error) string {
 		return ae.Error()
 	}
 	return "could not reach the server: " + err.Error()
+}
+
+// The unverified-account texts. Verification is web-only — the TUI has no
+// registration or code-entry surface by design — so both messages can only
+// point at the browser. The pairing one promises the code still works because
+// the backend rolls that exchange back: an unverified rejection does not
+// consume the one-time code (its 10-minute TTL still applies). It is
+// hand-wrapped because the sign-in panel clips long lines.
+func pairEmailUnverifiedText() string {
+	return "email not verified — verify at " + stripScheme(apiBaseDisplay()) + "\n" +
+		"then enter the same code again (it was not used up)"
+}
+
+func syncEmailUnverifiedText() string {
+	return "email not verified — verify at " + stripScheme(apiBaseDisplay()) + " to resume sync"
 }
 
 func (m Model) handleSessionResumed(msg sessionResumedMsg) (tea.Model, tea.Cmd) {
@@ -250,6 +268,14 @@ func (m Model) handleSyncDone(msg syncDoneMsg) (tea.Model, tea.Cmd) {
 		m.syncSt = ssNone
 		m.conflict = nil
 		return m.setToast("sync session expired — sign in again to re-pair", "err"), nil
+
+	case res.EmailUnverified:
+		// The pairing survives (nothing to re-do here once verified), so stay
+		// signed in and just stall the indicator — but say why, or the user
+		// only ever sees an inexplicable "offline".
+		m.syncSt = ssOffline
+		m.conflict = nil
+		return m.setToast(syncEmailUnverifiedText(), "err"), nil
 
 	case res.Err != nil:
 		m.syncSt = ssOffline

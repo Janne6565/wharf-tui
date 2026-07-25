@@ -17,6 +17,14 @@ func problem(w http.ResponseWriter, status int, detail string) {
 	json.NewEncoder(w).Encode(map[string]any{"status": status, "detail": detail})
 }
 
+// problemCoded is problem() plus the stable machine-readable code the backend
+// attaches to the errors clients must branch on.
+func problemCoded(w http.ResponseWriter, status int, detail, code string) {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{"status": status, "detail": detail, "code": code})
+}
+
 func TestExchangeDeviceCode(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/device-codes/exchange" || r.Method != http.MethodPost {
@@ -60,6 +68,66 @@ func TestExchangeInvalidCode(t *testing.T) {
 	var ae *Error
 	if !errors.As(err, &ae) || ae.Status != 410 || ae.Detail != "Device code expired" {
 		t.Fatalf("want *Error{410, detail}, got %v", err)
+	}
+}
+
+func TestExchangeEmailNotVerified(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		problemCoded(w, 403, "Verify your email address first", CodeEmailNotVerified)
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL).ExchangeDeviceCode(context.Background(), "K7PQM2XR", "")
+	if !errors.Is(err, ErrEmailNotVerified) {
+		t.Fatalf("want ErrEmailNotVerified, got %v", err)
+	}
+	// Status and detail must survive alongside the code — the caller may still
+	// want to render the backend's prose.
+	var ae *Error
+	if !errors.As(err, &ae) || ae.Status != 403 || ae.Code != CodeEmailNotVerified {
+		t.Fatalf("want *Error{403, code}, got %#v", ae)
+	}
+}
+
+// A 403 that carries no code is just a 403: the sentinel must not swallow
+// every forbidden response.
+func TestPlainForbiddenIsNotEmailNotVerified(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		problem(w, 403, "Forbidden")
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL).ExchangeDeviceCode(context.Background(), "K7PQM2XR", "")
+	if errors.Is(err, ErrEmailNotVerified) {
+		t.Fatalf("a codeless 403 must not match the sentinel: %v", err)
+	}
+	var ae *Error
+	if !errors.As(err, &ae) || ae.Status != 403 || ae.Code != "" {
+		t.Fatalf("want *Error{403, no code}, got %#v", ae)
+	}
+}
+
+// An unverified account is not an expired session: the refresh path must keep
+// the distinction so the UI can tell the user what to actually do.
+func TestRefreshEmailNotVerified(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/refresh":
+			problemCoded(w, 403, "Verify your email address first", CodeEmailNotVerified)
+		default:
+			problem(w, 401, "expired token")
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	c.SetTokens("acc", "ref")
+	_, err := c.GetVault(context.Background())
+	if !errors.Is(err, ErrEmailNotVerified) {
+		t.Fatalf("want ErrEmailNotVerified, got %v", err)
+	}
+	if errors.Is(err, ErrSessionExpired) {
+		t.Fatal("an unverified account must not be reported as an expired session")
 	}
 }
 

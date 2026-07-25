@@ -76,6 +76,11 @@ uploaded verbatim); it never sees your master password or plaintext.
 3. Done — the header shows your email plus a live sync indicator:
    `● synced` / `⠋ syncing` / `● offline` / `● conflict`.
 
+**Your email must be verified** before the backend hands out a session. If it
+isn't, pairing is refused with "email not verified" — confirm the address in
+the browser (verification is web-only; the TUI never registers or verifies) and
+type the *same* code again: a rejection on this path does not use it up.
+
 **What syncs:** the whole vault payload — hosts (including saved per-host
 passwords) and settings. SSH key *files* are not synced; they stay in `~/.ssh`.
 

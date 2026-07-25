@@ -100,6 +100,12 @@ type Result struct {
 	// SessionDead: the refresh token was rejected (expired or revoked by a
 	// recovery reset). The session file has been deleted; re-pair.
 	SessionDead bool
+	// EmailUnverified: the backend refuses to refresh because the account's
+	// email is unverified. Unlike SessionDead this is recoverable without
+	// re-pairing — the session file is kept, and syncing resumes once the
+	// address is confirmed in the browser — so the UI must say so instead of
+	// reporting a generic auth failure.
+	EmailUnverified bool
 	// Err is a network/protocol failure (rendered as offline).
 	Err error
 	// Conflict is non-nil when the user must choose a side (Resolve).
@@ -470,9 +476,16 @@ func (e *Engine) commit(version int64, fp string) error {
 	return saveSession(e.cfg.SessionPath, e.cfg.Key, e.sess)
 }
 
-// failure maps an API error: a dead session signs the device out; anything
-// else is a transient (offline) failure.
+// failure maps an API error: a dead session signs the device out; an
+// unverified account keeps the pairing but stalls sync; anything else is a
+// transient (offline) failure.
 func (e *Engine) failure(err error) Result {
+	if errors.Is(err, api.ErrEmailNotVerified) {
+		// The pairing itself is still good — only the account is unconfirmed.
+		// Keep the session file so syncing resumes after verification without
+		// making the user re-pair.
+		return Result{EmailUnverified: true}
+	}
 	if errors.Is(err, api.ErrSessionExpired) {
 		os.Remove(e.cfg.SessionPath)
 		e.sess = nil

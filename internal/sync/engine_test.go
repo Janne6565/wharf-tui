@@ -425,6 +425,28 @@ func TestSessionDeadSignsOut(t *testing.T) {
 	}
 }
 
+func TestEmailUnverifiedKeepsSession(t *testing.T) {
+	f := &fakeAPI{noVault: true}
+	local := payloadN(1, "l")
+	e := testEngine(t, f, &local)
+	f.mu.Lock()
+	f.getErr = api.ErrEmailNotVerified
+	f.mu.Unlock()
+
+	res := e.Sync(context.Background(), local)
+	if !res.EmailUnverified || res.SessionDead {
+		t.Fatalf("an unverified account should report EmailUnverified, got %+v", res)
+	}
+	// Verification happens in the browser; the pairing is untouched, so the
+	// device must stay signed in and keep its session file.
+	if !e.SignedIn() {
+		t.Fatal("an unverified account must not sign the engine out")
+	}
+	if _, err := os.Stat(e.cfg.SessionPath); err != nil {
+		t.Fatalf("session file should survive: %v", err)
+	}
+}
+
 func TestWrongRemotePasswordSurfaces(t *testing.T) {
 	f := &fakeAPI{vault: wrap(payloadN(2, "r")), version: 3}
 	local := payloadN(0, "l")

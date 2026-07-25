@@ -2,7 +2,8 @@
 // (wharf-backend). It covers exactly the five calls the TUI needs — device
 // pairing, token refresh, profile, vault get/put — with Bearer injection and
 // a single transparent refresh-and-retry on 401. Errors from the backend are
-// RFC 7807 problem+json; their detail is surfaced via *Error.
+// RFC 7807 problem+json; their detail and their stable machine-readable code
+// are surfaced via *Error.
 //
 // The client is safe for concurrent use; tokens rotate under an internal
 // mutex. It is DIRECT-token-mode only (the TUI has no cookie jar): the
@@ -72,12 +73,27 @@ var (
 	// ErrInviteExpired is returned by AcceptInvite when the invite has expired
 	// (410).
 	ErrInviteExpired = errors.New("api: invite expired")
+	// ErrEmailNotVerified means the account behind this call has not confirmed
+	// its email address, so the backend refuses to issue (or refresh) a
+	// session. Verification is web-only — the TUI can neither register nor
+	// verify — so the fix is always "verify in the browser, then retry here".
+	// Match it with errors.Is on any error from this package: *Error carries
+	// the backend's code and reports itself as this sentinel.
+	ErrEmailNotVerified = errors.New("api: email address not verified")
 )
+
+// CodeEmailNotVerified is the backend's stable problem-detail code for an
+// unverified account. Codes are the contract; the human-readable detail is
+// free to change, so never branch on that.
+const CodeEmailNotVerified = "email_not_verified"
 
 // Error is a structured backend error (RFC 7807 problem+json).
 type Error struct {
 	Status int
 	Detail string
+	// Code is the problem detail's machine-readable discriminator (empty when
+	// the backend did not send one). Branch on this, not on Detail.
+	Code string
 }
 
 func (e *Error) Error() string {
@@ -85,6 +101,13 @@ func (e *Error) Error() string {
 		return e.Detail
 	}
 	return fmt.Sprintf("backend returned %d", e.Status)
+}
+
+// Is maps problem-detail codes onto the package's sentinels, so callers can
+// write errors.Is(err, ErrEmailNotVerified) without first unwrapping to
+// *Error and comparing strings themselves.
+func (e *Error) Is(target error) bool {
+	return target == ErrEmailNotVerified && e.Code == CodeEmailNotVerified
 }
 
 // Session is the result of a device-code exchange: an account identity plus
@@ -253,7 +276,9 @@ func (c *Client) ChangePassword(ctx context.Context, currentAuthKey, newAuthKey 
 }
 
 // refresh exchanges the refresh token for a new pair (DIRECT mode). A 401
-// here means the session is dead.
+// here means the session is dead — except for the unverified-account 403,
+// which is a recoverable state (verify in the browser and the same session
+// starts refreshing again), so it must not be flattened into "expired".
 func (c *Client) refreshTokens(ctx context.Context) error {
 	c.mu.Lock()
 	rt := c.refresh
@@ -267,6 +292,9 @@ func (c *Client) refreshTokens(ctx context.Context) error {
 		RefreshToken string `json:"refreshToken"`
 	}
 	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/auth/refresh", body, &resp, false); err != nil {
+		if errors.Is(err, ErrEmailNotVerified) {
+			return err
+		}
 		var ae *Error
 		if errors.As(err, &ae) && (ae.Status == http.StatusUnauthorized || ae.Status == http.StatusForbidden) {
 			return ErrSessionExpired
@@ -351,8 +379,10 @@ func decodeError(resp *http.Response) error {
 	var problem struct {
 		Detail string `json:"detail"`
 		Title  string `json:"title"`
+		Code   string `json:"code"`
 	}
 	if json.Unmarshal(b, &problem) == nil {
+		e.Code = problem.Code
 		if problem.Detail != "" {
 			e.Detail = problem.Detail
 		} else if problem.Title != "" {

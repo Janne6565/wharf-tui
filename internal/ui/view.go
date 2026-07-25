@@ -203,7 +203,12 @@ func (m Model) authView(t theme.Theme) []string {
 				m.codeLine(t),
 			}
 			if m.authErr != "" {
-				body = append(body, stl(t.Err, t.Panel).Render(m.authErr))
+				// The panel clips rather than wraps, so a failure that needs
+				// more than one line (the unverified-account hint) pre-wraps
+				// itself with newlines and gets one styled row per line.
+				for _, ln := range strings.Split(m.authErr, "\n") {
+					body = append(body, stl(t.Err, t.Panel).Render(ln))
+				}
 			}
 		}
 		body = append(body,

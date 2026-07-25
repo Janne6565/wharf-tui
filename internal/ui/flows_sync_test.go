@@ -21,6 +21,9 @@ type fakeBackend struct {
 	version int64
 	noVault bool
 	badCode bool
+	// unverified makes the exchange reject the way the backend does for an
+	// account that has not confirmed its email address.
+	unverified bool
 
 	changePwErr    error
 	changePwCalls  int
@@ -47,6 +50,9 @@ type fakeProjRow struct {
 }
 
 func (f *fakeBackend) ExchangeDeviceCode(_ context.Context, code, _ string) (api.Session, error) {
+	if f.unverified {
+		return api.Session{}, &api.Error{Status: 403, Detail: "Verify your email address first", Code: api.CodeEmailNotVerified}
+	}
 	if f.badCode || api.NormalizeCode(code) != "K7PQM2XR" {
 		return api.Session{}, &api.Error{Status: 404, Detail: "unknown code"}
 	}
@@ -177,6 +183,44 @@ func TestRealPairBadCode(t *testing.T) {
 	}
 	if !strings.Contains(tm.View(), "code not found") {
 		t.Fatalf("the backend rejection should be shown:\n%s", tm.View())
+	}
+}
+
+func TestRealPairEmailUnverified(t *testing.T) {
+	tm, _, fb := syncedModel(t)
+	fb.unverified = true
+	tm = send(tm, runes("2"))               // projects gate
+	tm, _ = step(tm, special(tea.KeyEnter)) // → sign-in
+	tm, _ = step(tm, special(tea.KeyEnter)) // → code entry
+	tm = typeStr(tm, "K7PQM2XR")
+	tm, cmd := step(tm, special(tea.KeyEnter))
+	tm, _ = step(tm, cmd()) // pairedMsg{err}
+	if tm.(Model).signedIn {
+		t.Fatal("an unverified account must not sign in")
+	}
+	v := tm.View()
+	// The point of the specific message: where to verify, and that the typed
+	// code is still good (the backend does not consume it on this path).
+	if !strings.Contains(v, "email not verified") {
+		t.Fatalf("the rejection should name the cause:\n%s", v)
+	}
+	if !strings.Contains(v, "wharf.jannekeipert.de") {
+		t.Fatalf("the rejection should point at the web app:\n%s", v)
+	}
+	if !strings.Contains(v, "not used up") {
+		t.Fatalf("the rejection should say the code is still usable:\n%s", v)
+	}
+}
+
+func TestSyncEmailUnverifiedKeepsPairing(t *testing.T) {
+	tm, _, _ := pairModel(t)
+	tm, _ = step(tm, syncDoneMsg{res: syncx.Result{EmailUnverified: true}})
+	m := tm.(Model)
+	if !m.signedIn {
+		t.Fatal("an unverified account is recoverable — the pairing must survive")
+	}
+	if !strings.Contains(tm.View(), "email not verified") {
+		t.Fatalf("the stalled sync should explain itself:\n%s", tm.View())
 	}
 }
 
