@@ -33,6 +33,7 @@ type fakeBackend struct {
 	// projects (M3): a functional in-memory project backend.
 	userID     string
 	publicKey  []byte
+	meErr      error // makes GET /users/me fail (unreachable server)
 	myInvites  []api.ReceivedInvite
 	projs      map[string]*fakeProjRow
 	keySubmits int

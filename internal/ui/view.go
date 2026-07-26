@@ -1067,6 +1067,7 @@ func (m Model) helpView(t theme.Theme) []string {
 		{"g", "generate a key (keys tab)"},
 		{"s / u", "sync / unsync key (keys tab)"},
 		{"i", "invite member (projects)"},
+		{"p", "republish key on mismatch (projects)"},
 		{"esc", "back / clear / detach / cancel"},
 		{"ctrl+\\", "detach from a live session"},
 		{"alt+1..9", "reattach a live session"},

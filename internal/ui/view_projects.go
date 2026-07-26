@@ -50,6 +50,12 @@ func (m Model) realProjectsTab(t theme.Theme, contentH int) []string {
 		rBody = append(rBody, "")
 		rBody = append(rBody, lines...)
 	}
+	// The mismatch warning goes first: it outranks anything else on this tab, and
+	// the detail pane clips from the bottom, so the top is the one spot that
+	// cannot be pushed off screen.
+	if lines := m.identityMismatchLines(t, boxContentW(rightW)); lines != nil {
+		rBody = append(append(lines, ""), rBody...)
+	}
 	_ = pad
 
 	title := "projects · " + itoa(len(m.realProjects))
@@ -199,6 +205,9 @@ func (m Model) realProjectsEmpty(t theme.Theme, contentH int) []string {
 		body = append(body, "")
 		body = append(body, lines...)
 	}
+	if lines := m.identityMismatchLines(t, pw-6); lines != nil {
+		body = append(append(lines, ""), body...)
+	}
 	box := boxPanelAuto(t, "projects", t.Hi, pw, body)
 	return centerInArea(box, m.w, contentH, t.Bg)
 }
@@ -323,6 +332,61 @@ func (m Model) identityNoticeLines(t theme.Theme, width int) []string {
 			stl(t.Dim, t.Panel).Render(" reset identity — lost that device"))
 	}
 	return out
+}
+
+// identityMismatchLines renders the published-key mismatch warning: what is
+// wrong, what it costs, and both fingerprints so the user can compare them
+// against their other devices. Returns nil when no mismatch stands.
+//
+// Colors go through the theme's danger role (t.Err) rather than a literal, so a
+// live theme switch recolors it like everything else.
+func (m Model) identityMismatchLines(t theme.Theme, width int) []string {
+	if !m.identityMismatch {
+		return nil
+	}
+	const body = "The public key the server publishes for this account does not " +
+		"match the one in this vault. Project keys shared with this account may be " +
+		"going to someone else. Do not accept invites until this is resolved."
+
+	out := []string{bold(t.Err, t.Panel).Render("⚠ public key mismatch")}
+	for _, ln := range wrapText(body, width) {
+		out = append(out, stl(t.Err, t.Panel).Render(ln))
+	}
+	out = append(out, "",
+		fingerprintLine(t, "in this vault", m.identityLocalFP),
+		fingerprintLine(t, "published by the server", m.identityServerFP),
+		"",
+		stl(t.Hi, t.Panel).Render("p")+
+			stl(t.Dim, t.Panel).Render(" republish this vault's key to the server"))
+	return out
+}
+
+// fingerprintLine renders one labelled fingerprint of the mismatch warning.
+func fingerprintLine(t theme.Theme, label, fp string) string {
+	return stl(t.Dim, t.Panel).Render(padTo2(label, 24)) + stl(t.Err, t.Panel).Render(fp)
+}
+
+// republishKeyView is the mismatch remediation confirm. It spells out the cost
+// of the rotate, which is the whole reason this is not done automatically.
+func (m Model) republishKeyView(t theme.Theme) []string {
+	body := []string{
+		stl(t.Err, t.Panel).Render("Republish this vault's public key?"),
+		"",
+		stl(t.Dim, t.Panel).Render("Your local key is kept — no new keypair is generated."),
+		stl(t.Dim, t.Panel).Render("Only the server's copy is overwritten."),
+		"",
+		fingerprintLine(t, "in this vault", m.identityLocalFP),
+		fingerprintLine(t, "published by the server", m.identityServerFP),
+		"",
+		stl(t.Dim, t.Panel).Render("Replacing a published key nulls every wrapped project"),
+		stl(t.Dim, t.Panel).Render("DEK server-side: all your projects re-enter awaiting-"),
+		stl(t.Dim, t.Panel).Render("access until an admin re-grants your access."),
+		"",
+		stl(t.Hi, t.Panel).Render("y") + stl(t.Dim, t.Panel).Render("/") + stl(t.Hi, t.Panel).Render("enter") +
+			stl(t.Dim, t.Panel).Render(" republish · ") + stl(t.Hi, t.Panel).Render("esc") +
+			stl(t.Dim, t.Panel).Render("/") + stl(t.Hi, t.Panel).Render("n") + stl(t.Dim, t.Panel).Render(" cancel"),
+	}
+	return m.modalBox(t, "republish public key", "err", body)
 }
 
 // wrapText breaks s into lines no wider than width runes, on word boundaries.

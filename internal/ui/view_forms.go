@@ -45,6 +45,8 @@ func (m Model) modalView(t theme.Theme) []string {
 		return m.projectConflictView(t)
 	case modalResetIdentity:
 		return m.resetIdentityView(t)
+	case modalRepublishKey:
+		return m.republishKeyView(t)
 	case modalForwardForm:
 		return m.forwardFormView(t)
 	case modalForwards:

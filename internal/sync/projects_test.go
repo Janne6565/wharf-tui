@@ -401,6 +401,42 @@ func TestFinalizeGrantsPendingKey(t *testing.T) {
 	}
 }
 
+// TestFinalizeHaltedOnIdentityMismatch is the security gate: while the server
+// is known to publish a foreign public key for this account, the unattended
+// finalize pass must hand out no DEKs at all — every recipient key in that pass
+// comes from the same server that was just caught lying about ours.
+func TestFinalizeHaltedOnIdentityMismatch(t *testing.T) {
+	f := &fakeAPI{noVault: true}
+	e := projectEngine(t, f)
+	view, _ := e.CreateProject(context.Background(), "atlas", "")
+
+	f.mu.Lock()
+	p := f.fakeProjs[view.ID]
+	p.pending = []api.PendingKey{{UserID: "u2", Email: "b@example.com", PublicKey: fakePub("u2")}}
+	f.mu.Unlock()
+
+	e.SetIdentityMismatch(true)
+	if !e.IdentityMismatch() {
+		t.Fatal("the mismatch flag should be readable back")
+	}
+	if n := e.FinalizeProjects(context.Background()); n != 0 {
+		t.Fatalf("finalize must grant nothing while mismatched, granted %d", n)
+	}
+	f.mu.Lock()
+	_, keyed := p.wrapped["u2"]
+	f.mu.Unlock()
+	if keyed {
+		t.Fatal("no DEK may be sealed to a server-supplied key while mismatched")
+	}
+
+	// Clearing the mismatch re-enables the pass, so the gate is the only reason
+	// nothing was granted above.
+	e.SetIdentityMismatch(false)
+	if n := e.FinalizeProjects(context.Background()); n != 1 {
+		t.Fatalf("finalize should resume once the mismatch is resolved, granted %d", n)
+	}
+}
+
 func TestRemoveMemberRotates(t *testing.T) {
 	f := &fakeAPI{noVault: true}
 	e := projectEngine(t, f)

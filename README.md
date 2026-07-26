@@ -142,6 +142,17 @@ awaiting-access until an admin re-grants).
 - Sign-in is a **browser device-code** pairing — no account password is ever typed
   into the TUI. The device session lives in an encrypted `session.enc` next to the
   vault (see [Account sync](#account-sync)).
+- **The server distributes project public keys, so its copy of yours is checked.**
+  Project keys are sealed to each member's published X25519 key; a server that
+  swapped in its own key for your account would receive every project key shared
+  with you, and the only symptom would be projects stuck in awaiting-access. On
+  every visit to the projects tab wharf compares the key the server publishes for
+  your account against the one in this vault. On a difference it shows a warning
+  with **both fingerprints** (SHA-256 of the key, base64, first 16 characters in
+  blocks of four — identical across the web and mobile clients, so you can compare
+  them by eye), refuses to hand project keys to anyone until it is resolved, and
+  offers **`p`** to republish your local key over the server's copy. A server that
+  cannot be reached is *unknown*, not a mismatch.
 
 ## Keybindings
 
@@ -173,6 +184,7 @@ internal/
   vault/    argon2id + XChaCha20-Poly1305 encrypted vault file
   store/    hosts & settings document persisted through the vault
   api/      HTTP client for wharf-backend (pairing, refresh, vault get/put)
+  identity/ cross-client fingerprint of the X25519 project identity key
   sync/     sync engine: session file, optimistic versioning, conflicts
   sshx/     SSH engine: auth chain, known_hosts/TOFU, detachable sessions
   keys/     ~/.ssh scan + ed25519 generation

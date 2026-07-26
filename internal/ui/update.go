@@ -62,6 +62,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// projects (real mode).
 	case identityReadyMsg:
 		return m.handleIdentityReady(msg)
+	case identityCheckedMsg:
+		return m.handleIdentityChecked(msg)
+	case identityRepublishedMsg:
+		return m.handleIdentityRepublished(msg)
 	case projectsSyncedMsg:
 		return m.handleProjectsSynced(msg)
 	case invitesFetchedMsg:

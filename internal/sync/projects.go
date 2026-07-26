@@ -92,6 +92,24 @@ func (e *Engine) HasIdentity() bool {
 	return e.identity != nil
 }
 
+// SetIdentityMismatch records the outcome of the UI's published-key check: true
+// once the server has been caught publishing a public key for this account that
+// is not the one in this vault. It gates every operation that would hand a
+// project DEK to a server-supplied key (see FinalizeProjects).
+func (e *Engine) SetIdentityMismatch(mismatch bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.identityMismatch = mismatch
+}
+
+// IdentityMismatch reports whether the server is known to publish a foreign
+// public key for this account.
+func (e *Engine) IdentityMismatch() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.identityMismatch
+}
+
 // ServerProfile fetches GET /users/me so the UI can check whether the account
 // already published a public key during identity bootstrap.
 func (e *Engine) ServerProfile(ctx context.Context) (api.Profile, error) {
@@ -557,10 +575,20 @@ func (e *Engine) wrapForRecipients(dek []byte, recipients []api.PendingKey) ([]a
 // administers, seal the DEK to each pending member that has published a public
 // key. A stale-version 409 is skipped silently (it resolves on the next pass).
 // Returns the number of keys granted.
+//
+// The pass is unattended and it trusts the server for every recipient's public
+// key, so it is hard-gated on identityMismatch: a server caught publishing a
+// foreign key for *our own* account — the one key we can verify — has no claim
+// to being honest about anyone else's. Handing it another DEK while in that
+// state is exactly the attack, so the pass grants nothing until the user has
+// resolved the mismatch.
 func (e *Engine) FinalizeProjects(ctx context.Context) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.sess == nil || e.closed || e.cfg.ProjectCrypto == nil || e.identity == nil {
+		return 0
+	}
+	if e.identityMismatch {
 		return 0
 	}
 	granted := 0

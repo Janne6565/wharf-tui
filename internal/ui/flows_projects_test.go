@@ -3,12 +3,14 @@ package ui
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Janne6565/wharf-tui/internal/api"
+	"github.com/Janne6565/wharf-tui/internal/identity"
 	"github.com/Janne6565/wharf-tui/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -63,9 +65,14 @@ func (f *fakeBackend) uid() string {
 func (f *fakeBackend) Me(context.Context) (api.Profile, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.meErr != nil {
+		return api.Profile{}, f.meErr
+	}
 	p := api.Profile{ID: f.uid(), Email: "deniz@example.com"}
 	if len(f.publicKey) > 0 {
-		p.PublicKey = string(f.publicKey)
+		// Base64 like the real backend: the published-key check compares against
+		// exactly this encoding.
+		p.PublicKey = base64.StdEncoding.EncodeToString(f.publicKey)
 	}
 	return p, nil
 }
@@ -666,6 +673,170 @@ func TestIdentityResetCancel(t *testing.T) {
 	fb.mu.Unlock()
 	if !untouched {
 		t.Fatal("cancelling must not rotate the published key")
+	}
+}
+
+// --- published-key mismatch ------------------------------------------------------
+
+// identityModel returns a signed-in model whose vault already carries the local
+// identity, i.e. the path where ensureIdentity has a key to compare.
+func identityModel(t *testing.T) (tea.Model, *fakeBackend) {
+	t.Helper()
+	tm, _, fb := projectModel(t)
+	m := tm.(Model)
+	pub, priv, _ := fakeIdentity()
+	m.st.SetIdentity(&store.Identity{
+		X25519Pub:  base64.StdEncoding.EncodeToString(pub),
+		X25519Priv: base64.StdEncoding.EncodeToString(priv),
+		CreatedAt:  time.Now().UTC(),
+	})
+	return m, fb
+}
+
+// enterProjects switches to the projects tab and settles the resulting commands.
+func enterProjects(t *testing.T, tm tea.Model) tea.Model {
+	t.Helper()
+	tm, cmd := step(tm, runes("2"))
+	return drain(t, tm, cmd)
+}
+
+func TestIdentityMismatchDetected(t *testing.T) {
+	tm, fb := identityModel(t)
+	attacker := bytesFill("attacker", 32)
+	fb.mu.Lock()
+	fb.publicKey = attacker
+	fb.mu.Unlock()
+
+	tm = enterProjects(t, tm)
+	m := tm.(Model)
+	if !m.identityMismatch {
+		t.Fatalf("a differing published key must enter the mismatch state:\n%s", tm.View())
+	}
+	localPub, _, _ := fakeIdentity()
+	if want := identity.Fingerprint(localPub); m.identityLocalFP != want {
+		t.Fatalf("local fingerprint = %q, want %q", m.identityLocalFP, want)
+	}
+	if want := identity.Fingerprint(attacker); m.identityServerFP != want {
+		t.Fatalf("server fingerprint = %q, want %q", m.identityServerFP, want)
+	}
+	// The engine's key-distribution gate must be armed, not just the UI state.
+	if !m.eng.IdentityMismatch() {
+		t.Fatal("the mismatch must reach the engine so finalize halts")
+	}
+
+	view := tm.View()
+	if !strings.Contains(view, "public key mismatch") || !strings.Contains(view, "does not match") {
+		t.Fatalf("the projects tab should warn about the mismatch:\n%s", view)
+	}
+	if !strings.Contains(view, "in this vault") || !strings.Contains(view, "published by the server") {
+		t.Fatalf("both fingerprints should be labelled:\n%s", view)
+	}
+	if !strings.Contains(view, m.identityLocalFP) || !strings.Contains(view, m.identityServerFP) {
+		t.Fatalf("both fingerprints should render:\n%s", view)
+	}
+	if !strings.Contains(view, "Do not accept invites") {
+		t.Fatalf("the warning should tell the user not to accept invites:\n%s", view)
+	}
+}
+
+func TestIdentityMatchIsNoMismatch(t *testing.T) {
+	tm, fb := identityModel(t)
+	pub, _, _ := fakeIdentity()
+	fb.mu.Lock()
+	fb.publicKey = pub // the server publishes exactly our key
+	fb.mu.Unlock()
+
+	tm = enterProjects(t, tm)
+	m := tm.(Model)
+	if m.identityMismatch {
+		t.Fatalf("an identical published key must not raise a mismatch:\n%s", tm.View())
+	}
+	if m.eng.IdentityMismatch() {
+		t.Fatal("the engine gate must stay open when the keys agree")
+	}
+	if strings.Contains(tm.View(), "public key mismatch") {
+		t.Fatalf("no warning should render:\n%s", tm.View())
+	}
+}
+
+func TestIdentityUnreachableServerIsNotMismatch(t *testing.T) {
+	tm, fb := identityModel(t)
+	fb.mu.Lock()
+	fb.meErr = errors.New("dial tcp: connection refused")
+	fb.publicKey = bytesFill("attacker", 32)
+	fb.mu.Unlock()
+
+	tm = enterProjects(t, tm)
+	m := tm.(Model)
+	if m.identityMismatch {
+		t.Fatalf("an unreachable server is unknown, never a mismatch:\n%s", tm.View())
+	}
+	if m.eng.IdentityMismatch() {
+		t.Fatal("a failed check must not arm the engine gate")
+	}
+}
+
+func TestIdentityMismatchRepublish(t *testing.T) {
+	tm, fb := identityModel(t)
+	fb.mu.Lock()
+	fb.publicKey = bytesFill("attacker", 32)
+	fb.mu.Unlock()
+	tm = enterProjects(t, tm)
+
+	// p opens a confirm that spells out the cost of the rotate.
+	tm = send(tm, runes("p"))
+	if tm.(Model).modal != modalRepublishKey {
+		t.Fatalf("p should open the republish confirm:\n%s", tm.View())
+	}
+	view := tm.View()
+	if !strings.Contains(view, "awaiting-") || !strings.Contains(view, "wrapped project") {
+		t.Fatalf("the confirm should state that rotate nulls the wrapped DEKs:\n%s", view)
+	}
+	if !strings.Contains(view, "no new keypair") {
+		t.Fatalf("the confirm should make clear the local key is kept:\n%s", view)
+	}
+
+	tm, cmd := step(tm, runes("y"))
+	tm = drain(t, tm, cmd)
+
+	localPub, _, _ := fakeIdentity()
+	fb.mu.Lock()
+	published := append([]byte(nil), fb.publicKey...)
+	fb.mu.Unlock()
+	if !bytes.Equal(published, localPub) {
+		t.Fatal("republish should put this vault's own key on the server")
+	}
+	m := tm.(Model)
+	if id := m.st.Identity(); id == nil || id.X25519Pub != base64.StdEncoding.EncodeToString(localPub) {
+		t.Fatal("republish must not mint a new local keypair")
+	}
+	if m.identityMismatch || m.eng.IdentityMismatch() {
+		t.Fatalf("the re-check after republish should clear the mismatch:\n%s", tm.View())
+	}
+}
+
+func TestIdentityMismatchRepublishCancel(t *testing.T) {
+	tm, fb := identityModel(t)
+	attacker := bytesFill("attacker", 32)
+	fb.mu.Lock()
+	fb.publicKey = attacker
+	fb.mu.Unlock()
+	tm = enterProjects(t, tm)
+
+	tm = send(tm, runes("p"))
+	tm = send(tm, special(tea.KeyEsc))
+	m := tm.(Model)
+	if m.modal != modalNone {
+		t.Fatal("esc should dismiss the republish confirm")
+	}
+	if !m.identityMismatch {
+		t.Fatal("cancelling must leave the mismatch standing")
+	}
+	fb.mu.Lock()
+	untouched := bytes.Equal(fb.publicKey, attacker)
+	fb.mu.Unlock()
+	if !untouched {
+		t.Fatal("cancelling must not touch the published key")
 	}
 }
 

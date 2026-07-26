@@ -60,6 +60,7 @@ const (
 	modalInviteResponse  // accept / decline a received invite
 	modalProjectConflict // per-project sync conflict (queued)
 	modalResetIdentity   // confirm "I lost my old vault" identity reset (pubkey rotate)
+	modalRepublishKey    // confirm re-publishing the local pubkey over a mismatched server key
 	modalForwardForm     // -L/-R/-D port-forward form (real mode; k9s-style, never persisted)
 	modalForwards        // active-forwards overlay (F)
 	modalKeyUnsync       // confirm removing a synced key from the vault (keys tab)
@@ -204,6 +205,14 @@ type Model struct {
 	identityBooting   bool                         // a bootstrap attempt is in flight
 	identityNotice    string                       // cross-device "sync first" notice
 	identityNeedsSync bool                         // needs-sync state: offer the "R" identity reset
+
+	// Published-key mismatch: the server hands out a public key for this very
+	// account that is not the one in this vault, i.e. the key directory cannot be
+	// trusted. Both fingerprints are kept so the user can compare them against
+	// their other devices.
+	identityMismatch bool
+	identityLocalFP  string // fingerprint of the key in this vault
+	identityServerFP string // fingerprint of the key the server publishes
 
 	// create-project form (name, description).
 	cpjVals  [2]string

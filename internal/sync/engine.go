@@ -143,6 +143,11 @@ type Engine struct {
 	// pendingProjects stashes the remote side of an unresolved per-project
 	// conflict, keyed by project ID (resolved one at a time by the UI).
 	pendingProjects map[string]*pendingRemote
+	// identityMismatch is set by the UI when the public key the server publishes
+	// for this very account differs from the local one. It is the engine's
+	// "the key directory is lying" flag and it disables key distribution
+	// (see FinalizeProjects).
+	identityMismatch bool
 
 	closed bool
 }

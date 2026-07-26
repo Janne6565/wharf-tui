@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Janne6565/wharf-tui/internal/api"
+	"github.com/Janne6565/wharf-tui/internal/identity"
 	"github.com/Janne6565/wharf-tui/internal/store"
 	syncx "github.com/Janne6565/wharf-tui/internal/sync"
 	tea "github.com/charmbracelet/bubbletea"
@@ -54,6 +55,21 @@ type identityReadyMsg struct {
 	err      error
 }
 
+// identityCheckedMsg reports the outcome of comparing the public key the server
+// publishes for this account against the local one. checked is false when the
+// profile could not be fetched at all: an unreachable server is *unknown*, never
+// a mismatch, so that state leaves the current verdict untouched.
+type identityCheckedMsg struct {
+	checked  bool
+	mismatch bool
+	localFP  string
+	serverFP string
+}
+
+// identityRepublishedMsg reports the outcome of the mismatch remediation: a
+// rotate-publish of the local (correct) public key over the server's copy.
+type identityRepublishedMsg struct{ err error }
+
 // projPushTimerMsg fires after the per-project push debounce.
 type projPushTimerMsg struct {
 	id  string
@@ -71,9 +87,12 @@ func (m Model) ensureIdentity() (Model, tea.Cmd) {
 	}
 	if pub, priv, ok := m.loadIdentity(); ok {
 		// Have a local identity: hand it to the engine and idempotently publish.
+		// The publish is a no-op against an already-set key, which is precisely why
+		// it can never notice a *substituted* one — so the check runs alongside it
+		// and reads back what the server actually hands out for this account.
 		m.eng.SetIdentity(pub, priv)
 		m.identityReady = true
-		return m, m.publishIdentityCmd(pub)
+		return m, tea.Batch(m.publishIdentityCmd(pub), m.identityCheckCmd())
 	}
 	// No local identity — a network check decides whether to generate one.
 	m.identityBooting = true
@@ -126,6 +145,99 @@ func (m Model) publishIdentityRotateCmd(pub []byte) tea.Cmd {
 		}
 		return identityReadyMsg{ready: true}
 	}
+}
+
+// identityCheckCmd compares the public key the server publishes for this
+// account against the one in this vault, off the UI goroutine.
+//
+// This is the only place a substituted key can be caught: project DEKs are
+// sealed to whatever public key the server hands out per member, so a server
+// that quietly replaces *our* key receives every DEK anyone seals "to us". The
+// symptom alone (projects stuck awaiting-access) is indistinguishable from the
+// benign case, so we verify the one key we can: our own.
+//
+// Failure to reach the server is deliberately not a verdict — only a key that
+// actually differs counts as a mismatch.
+func (m Model) identityCheckCmd() tea.Cmd {
+	if m.eng == nil || !m.realMode() {
+		return nil
+	}
+	pub, _, ok := m.loadIdentity()
+	if !ok {
+		return nil
+	}
+	eng := m.eng
+	localB64 := base64.StdEncoding.EncodeToString(pub)
+	localFP := identity.Fingerprint(pub)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), projTimeout)
+		defer cancel()
+		p, err := eng.ServerProfile(ctx)
+		if err != nil {
+			return identityCheckedMsg{} // unreachable → unknown, not a mismatch
+		}
+		if p.PublicKey == "" || p.PublicKey == localB64 {
+			// No key published yet, or the expected one. Base64 of a 32-byte key is
+			// canonical, so equal strings mean equal keys.
+			return identityCheckedMsg{checked: true, localFP: localFP}
+		}
+		return identityCheckedMsg{
+			checked: true, mismatch: true,
+			localFP: localFP, serverFP: serverFingerprint(p.PublicKey),
+		}
+	}
+}
+
+// serverFingerprint renders the fingerprint of a base64 public key as published
+// by the server. Anything that is not a well-formed 32-byte key is reported as
+// such rather than fingerprinted: it is still not our key, and pretending to
+// fingerprint garbage would give the user something meaningless to compare.
+func serverFingerprint(b64 string) string {
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(raw) != 32 {
+		return "(malformed key)"
+	}
+	return identity.Fingerprint(raw)
+}
+
+// republishIdentityCmd re-publishes the *local* public key over the server's
+// copy with rotate=true. No new keypair is minted: the local key is the correct
+// one, only the server's copy is wrong.
+func (m Model) republishIdentityCmd(pub []byte) tea.Cmd {
+	eng := m.eng
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), projTimeout)
+		defer cancel()
+		return identityRepublishedMsg{err: eng.PublishIdentity(ctx, pub, true)}
+	}
+}
+
+// handleIdentityChecked records the verdict of the published-key comparison and
+// keeps the engine's key-distribution gate in step with it.
+func (m Model) handleIdentityChecked(msg identityCheckedMsg) (tea.Model, tea.Cmd) {
+	if !msg.checked {
+		return m, nil // unknown — leave the previous verdict alone
+	}
+	m.identityMismatch = msg.mismatch
+	m.identityLocalFP = msg.localFP
+	m.identityServerFP = msg.serverFP
+	if m.eng != nil {
+		m.eng.SetIdentityMismatch(msg.mismatch)
+	}
+	if msg.mismatch {
+		return m.setToast("published key mismatch — see the projects tab", "err"), nil
+	}
+	return m, nil
+}
+
+// handleIdentityRepublished completes the remediation: on success the server's
+// copy is ours again, so re-verify (rather than assume) and resync.
+func (m Model) handleIdentityRepublished(msg identityRepublishedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		return m.setToast("could not republish your key: "+cleanErr(msg.err), "err"), nil
+	}
+	m = m.setToast("key republished — projects await re-grant", "ok")
+	return m, tea.Batch(m.identityCheckCmd(), m.syncProjectsCmd())
 }
 
 // bootstrapIdentityCmd checks the server for an existing public key. If the
@@ -563,7 +675,9 @@ func (m Model) enterProjectsTab() (Model, tea.Cmd) {
 		mm, cmd := m.ensureIdentity()
 		return mm, tea.Batch(cmd, mm.fetchInvitesCmd())
 	}
-	return m, tea.Batch(m.syncProjectsCmd(), m.fetchInvitesCmd())
+	// Re-verify the published key on every entry: the substitution can happen at
+	// any time, not just on the session's first visit.
+	return m, tea.Batch(m.syncProjectsCmd(), m.fetchInvitesCmd(), m.identityCheckCmd())
 }
 
 // --- projects tab key handling (real mode) ------------------------------------
@@ -601,6 +715,12 @@ func (m Model) projectsKey(key string) (tea.Model, tea.Cmd) {
 		// "I lost my old vault" — only offered in the needs-sync state.
 		if m.identityNeedsSync {
 			m.modal = modalResetIdentity
+		}
+		return m, nil
+	case "p", "P":
+		// Remediation for a published-key mismatch — only offered while one stands.
+		if m.identityMismatch {
+			m.modal = modalRepublishKey
 		}
 		return m, nil
 	}
@@ -748,6 +868,30 @@ func (m Model) resetIdentityConfirmKey(key string) (tea.Model, tea.Cmd) {
 		// Persist the new identity to the synced payload, then rotate the pubkey.
 		mm, pushCmd := m.schedulePush()
 		return mm, tea.Batch(pushCmd, mm.publishIdentityRotateCmd(pub))
+	case "n", "N", "esc":
+		m.modal = modalNone
+	}
+	return m, nil
+}
+
+// --- republish key (mismatch remediation) -------------------------------------
+
+// republishKeyConfirmKey handles the "the server has the wrong key for me"
+// confirm. It deliberately does *not* mint a new keypair: the local key is the
+// correct one and stays put; only the server's copy is overwritten, with
+// rotate=true because that is the only way to replace an already-set key.
+func (m Model) republishKeyConfirmKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "y", "Y", "enter":
+		m.modal = modalNone
+		if m.eng == nil {
+			return m.setToast("cannot republish right now", "err"), nil
+		}
+		pub, _, ok := m.loadIdentity()
+		if !ok {
+			return m.setToast("no local identity to republish", "err"), nil
+		}
+		return m.setToast("republishing your key…", "ok"), m.republishIdentityCmd(pub)
 	case "n", "N", "esc":
 		m.modal = modalNone
 	}
