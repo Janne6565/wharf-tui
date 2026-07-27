@@ -133,12 +133,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Fast typing and pastes arrive as one KeyMsg carrying several runes; split
 	// them so every text input sees the same per-rune stream the handlers expect.
-	if k.Type == tea.KeyRunes && len(k.Runes) > 1 {
+	// Bracketed pastes must be split even when they carry a single rune: their
+	// String() is wrapped in "[...]" so no handler would ever match it — the
+	// per-rune copies drop the Paste flag to get a plain rune key back.
+	if k.Type == tea.KeyRunes && (len(k.Runes) > 1 || k.Paste) {
 		var cmds []tea.Cmd
 		var tm tea.Model = m
 		for _, r := range k.Runes {
 			nk := k
 			nk.Runes = []rune{r}
+			nk.Paste = false
 			var cmd tea.Cmd
 			tm, cmd = tm.(Model).handleKey(nk)
 			if cmd != nil {

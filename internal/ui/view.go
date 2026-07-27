@@ -273,16 +273,22 @@ func (m Model) codeLine(t theme.Theme) string {
 			disp = append(disp, '·')
 		}
 	}
-	// The cursor sits after the typed characters, hopping over the dash once
-	// past the fourth slot.
+	// The cursor sits *on* the next empty slot — replacing that slot's
+	// placeholder rather than being inserted before it — so the line keeps a
+	// constant width and every character lands on the exact column its
+	// placeholder occupied. The dash is pulled into the typed prefix as soon as
+	// the fourth slot is filled, so the cursor never covers it.
 	cut := len(typed)
-	if cut > 4 {
+	if cut >= 4 {
 		cut++
 	}
-	if cut > len(disp) {
-		cut = len(disp)
+	if cut >= len(disp) {
+		// All slots filled: no empty slot left to sit on, and a trailing cursor
+		// would widen the line and re-center it.
+		return stl(t.Hi, t.Panel).Render(string(disp))
 	}
-	return stl(t.Hi, t.Panel).Render(string(disp[:cut])) + m.cur(t.Hi, t.Panel) + stl(t.Dim, t.Panel).Render(string(disp[cut:]))
+	return stl(t.Hi, t.Panel).Render(string(disp[:cut])) + m.cur(t.Hi, t.Panel) +
+		stl(t.Dim, t.Panel).Render(string(disp[cut+1:]))
 }
 
 // --- dashboard --------------------------------------------------------------
