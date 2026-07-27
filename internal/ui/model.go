@@ -9,6 +9,7 @@ import (
 	"github.com/Janne6565/wharf-tui/internal/data"
 	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
+	"github.com/Janne6565/wharf-tui/internal/sessd"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
 	syncx "github.com/Janne6565/wharf-tui/internal/sync"
@@ -65,6 +66,8 @@ const (
 	modalForwards        // active-forwards overlay (F)
 	modalKeyUnsync       // confirm removing a synced key from the vault (keys tab)
 	modalSignOut         // confirm unpairing this device (settings tab)
+	modalSessionHint     // first-connect primer on detach / reattach keys
+	modalSessionPicker   // choose among a host's open sessions, or start another
 )
 
 // syncState is the rendered sync status (header indicator). It is pure
@@ -296,12 +299,19 @@ type Model struct {
 
 	// --- real data layer (nil/empty in demo before seeding) ---
 	vaultPath string
-	mgr       *sshx.Manager
-	vault     vaultHandle
-	st        *store.Store
-	settings  store.Settings
-	probes    map[string]probe.Result // ephemeral reachability, keyed by host ID
-	keyInfos  []keys.KeyInfo          // live ~/.ssh scan
+	// connectTo is the host named on the command line, consumed once the vault
+	// opens (see handleVaultMsg) and then cleared.
+	connectTo string
+	// mgr owns port forwards, which are documented as ephemeral and die with
+	// the process. Interactive sessions live in pool instead, one child process
+	// each, so they survive a quit.
+	mgr      *sshx.Manager
+	pool     *sessd.Pool
+	vault    vaultHandle
+	st       *store.Store
+	settings store.Settings
+	probes   map[string]probe.Result // ephemeral reachability, keyed by host ID
+	keyInfos []keys.KeyInfo          // live ~/.ssh scan
 
 	// vault hooks (injectable for tests; default to the real vault package).
 	vaultExists  func(string) bool
@@ -357,6 +367,22 @@ type Model struct {
 	dialHostID string
 	dialCancel context.CancelFunc
 	attaching  bool // TTY handed to a session: suspend the tick loop
+
+	// Session-hint modal: shown once per run after the first successful dial, so
+	// the detach/reattach keys are learned before the terminal is handed over.
+	// Deliberately not persisted — a UI hint has no business in the synced,
+	// zero-knowledge vault payload, and the settings doc is a cross-implementation
+	// contract (web, mobile) that a preference like this should not widen.
+	sessionHintSeen bool
+	pendingAttachID string // session the hint is gating (session ID, not host)
+
+	// Session picker: shown when connecting to a host that already has one or
+	// more sessions open. pickHost is the host being connected to, pickIdx the
+	// highlighted row (len(sessions) is the "new session" row) and pickKill the
+	// row armed for a kill, so x never terminates a shell on one keypress.
+	pickHost store.Host
+	pickIdx  int
+	pickKill int
 
 	// --- port forwards (real mode; k9s-style, nothing persisted) ---
 	fwdVals     [ffCount]string             // forward-form buffers (see ff* indices)

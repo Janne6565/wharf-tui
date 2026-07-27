@@ -155,7 +155,7 @@ func topInArea(block []string, w, areaH int, bg lipgloss.Color) []string {
 // --- auth / login (simulated account) ---------------------------------------
 
 func (m Model) authView(t theme.Theme) []string {
-	logo := bold(t.Hi, t.Bg).Render("⚓ wharf")
+	logo := bold(t.Hi, t.Bg).Render("wharf")
 	subtitle := stl(t.Dim, t.Bg).Render("your fleet, one terminal · v1.0.0")
 
 	pw := 72
@@ -326,7 +326,7 @@ func (m Model) mainView(t theme.Theme) []string {
 
 // header renders the two-line top bar (badge + tabs + account/vault status).
 func (m Model) header(t theme.Theme, tabs string) []string {
-	badge := bold(t.Ink, t.Hi).Render(" ⚓ wharf ")
+	badge := bold(t.Ink, t.Hi).Render(" wharf ")
 	left := badge + bgpad(1, t.Bg) + tabs
 	var right string
 	switch {
@@ -390,10 +390,10 @@ func (m Model) dashTabs(t theme.Theme) string {
 
 // sessionStrip lists live SSH sessions (real mode only).
 func (m Model) sessionStrip(t theme.Theme) []string {
-	if m.demo || m.mgr == nil {
+	if m.demo || m.pool == nil {
 		return nil
 	}
-	sessions := m.mgr.List()
+	sessions := m.pool.List()
 	if len(sessions) == 0 {
 		return nil
 	}
@@ -402,7 +402,7 @@ func (m Model) sessionStrip(t theme.Theme) []string {
 		if i >= 9 {
 			break
 		}
-		label := " " + itoa(i+1) + ":" + s.Host().Name + " "
+		label := " " + itoa(i+1) + ":" + m.sessionLabel(s) + " "
 		left += stl(t.Hi, t.Sel).Render(label) + bgpad(1, t.Bg)
 	}
 	right := stl(t.Dim, t.Bg).Render("alt+# reattach") + " "
@@ -464,11 +464,7 @@ func (m Model) detailBorder(t theme.Theme) lipgloss.Color {
 
 // hostLive reports whether a live session exists for the host.
 func (m Model) hostLive(id string) bool {
-	if m.mgr == nil {
-		return false
-	}
-	s := m.mgr.Get(id)
-	return s != nil && s.Alive()
+	return m.hostSessionCount(id) > 0
 }
 
 // hostsTab renders the hosts list + host detail (or an empty state).
@@ -532,8 +528,12 @@ func (m Model) hostsTab(t theme.Theme, contentH int) []string {
 		if n := m.hostForwardCount(h.ID); n > 0 {
 			rBody = append(rBody, kv(t, "forwards", itoa(n)+" active", t.Blue, rw))
 		}
-		if m.hostLive(h.ID) {
-			rBody = append(rBody, "", stl(t.Ok, t.Panel).Render("● live session — enter reattaches"))
+		if n := m.hostSessionCount(h.ID); n > 0 {
+			label := "● live session — enter reattaches"
+			if n > 1 {
+				label = "● " + itoa(n) + " live sessions — enter picks one"
+			}
+			rBody = append(rBody, "", stl(t.Ok, t.Panel).Render(label))
 		}
 		rBody = append(rBody, "",
 			ruleIn(t, rw),
@@ -916,7 +916,7 @@ func (m Model) settingOn(key string) bool {
 // --- session (simulated, demo only) -----------------------------------------
 
 func (m Model) sessionView(t theme.Theme) []string {
-	badge := bold(t.Ink, t.Hi).Render(" ⚓ wharf ")
+	badge := bold(t.Ink, t.Hi).Render(" wharf ")
 	var tabs strings.Builder
 	for i, nm := range m.open {
 		label := " " + itoa(i+1) + ":" + nm + " "
@@ -1104,7 +1104,8 @@ func (m Model) helpView(t theme.Theme) []string {
 		{"p", "republish key on mismatch (projects)"},
 		{"esc", "back / clear / detach / cancel"},
 		{"ctrl+\\", "detach from a live session"},
-		{"alt+1..9", "reattach a live session"},
+		{"S", "live sessions: reattach, kill, or open another"},
+		{"alt+1..9", "reattach a live session (needs Option-as-Meta)"},
 		{"q", "lock vault — keeps you signed in (sign in/out in demo)"},
 		{"4", "settings: sign in / sign out this device"},
 		{"← / →", "cycle theme (settings)"},

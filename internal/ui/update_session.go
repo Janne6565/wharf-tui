@@ -6,25 +6,36 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Janne6565/wharf-tui/internal/sessd"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// startConnect reattaches a live session or dials a new one.
+// startConnect opens a host: with sessions already running it offers the
+// picker (reattach to one, kill one, or start another), otherwise it dials.
 func (m Model) startConnect(h store.Host) (tea.Model, tea.Cmd) {
-	if m.mgr == nil {
+	if m.pool == nil {
 		return m.setToast("no ssh engine available", "err"), nil
 	}
-	if s := m.mgr.Get(h.ID); s != nil && s.Alive() {
-		return m.attach(h.ID, s)
+	if m.hostSessionCount(h.ID) > 0 {
+		return m.openSessionPicker(h)
+	}
+	return m.dial(h)
+}
+
+// dial starts a new session for h unconditionally — the picker's "new session"
+// row lands here too, which is how a host ends up with several.
+func (m Model) dial(h store.Host) (tea.Model, tea.Cmd) {
+	if m.pool == nil {
+		return m.setToast("no ssh engine available", "err"), nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.dialCancel = cancel
 	m.dialHostID = h.ID
 	m.modal = modalConnecting
 	spec := sshx.HostSpec{ID: h.ID, Name: h.Name, User: h.User, Addr: h.Addr, Port: h.Port, KeyPath: h.KeyPath, AuthMethod: h.AuthMethod, Password: h.Password, VaultKeys: m.vaultKeySpecs(h.AuthMethod)}
-	return m, dialCmd(m.mgr, ctx, spec, m.w, m.h)
+	return m, dialCmd(m.pool, ctx, spec, m.w, m.h)
 }
 
 // vaultKeySpecs returns the personal synced keys offered to the SSH auth chain.
@@ -50,18 +61,62 @@ func (m Model) vaultKeySpecs(authMethod string) []sshx.VaultKeySpec {
 
 // attach hands the terminal to a session via tea.Exec, suspending the tick loop
 // until the callback delivers detachedMsg.
-func (m Model) attach(hostID string, s *sshx.Session) (tea.Model, tea.Cmd) {
+func (m Model) attach(sessionID string, s *sessd.Remote) (tea.Model, tea.Cmd) {
 	m.attaching = true
 	m.modal = modalNone
-	return m, tea.Exec(s.Attach(), func(error) tea.Msg { return detachedMsg{hostID: hostID} })
+	return m, tea.Exec(s.Attach(), func(error) tea.Msg { return detachedMsg{sessionID: sessionID} })
+}
+
+// sessionHintKey dismisses the first-connect primer: enter/space hands the
+// terminal over, esc leaves the session running in the background so the user
+// stays on the dashboard. Either way the connection is already established.
+func (m Model) sessionHintKey(key string) (tea.Model, tea.Cmd) {
+	sessionID := m.pendingAttachID
+	switch key {
+	case "enter", " ":
+		m.modal = modalNone
+		m.pendingAttachID = ""
+		if m.pool == nil {
+			return m, nil
+		}
+		s := m.pool.Get(sessionID)
+		if s == nil || !s.Alive() {
+			// Died between the dial and the keypress; SessionEndedMsg reports it.
+			return m, nil
+		}
+		return m.attach(sessionID, s)
+	case "esc":
+		m.modal = modalNone
+		m.pendingAttachID = ""
+		return m.setToast("connected — session left in the background", "ok"), nil
+	}
+	return m, nil
+}
+
+// liveSessions counts the interactive sessions running in child processes.
+// They survive a quit, so this is a courtesy figure, not a casualty list.
+func (m Model) liveSessions() int {
+	if m.pool == nil {
+		return 0
+	}
+	return len(m.pool.List())
+}
+
+// liveForwards counts the port forwards, which are process-bound and really do
+// die on quit.
+func (m Model) liveForwards() int {
+	if m.mgr == nil {
+		return 0
+	}
+	return len(m.mgr.Forwards())
 }
 
 // reattachByIndex reattaches the idx-th live session (alt+1..9).
 func (m Model) reattachByIndex(idx int) (tea.Model, tea.Cmd) {
-	if m.mgr == nil {
+	if m.pool == nil {
 		return m, nil
 	}
-	sessions := m.mgr.List()
+	sessions := m.pool.List()
 	if idx < 0 || idx >= len(sessions) {
 		return m, nil
 	}
@@ -69,7 +124,7 @@ func (m Model) reattachByIndex(idx int) (tea.Model, tea.Cmd) {
 	if !s.Alive() {
 		return m, nil
 	}
-	return m.attach(s.Host().ID, s)
+	return m.attach(s.ID(), s)
 }
 
 func (m Model) handleDialDone(msg dialDoneMsg) (tea.Model, tea.Cmd) {
@@ -107,7 +162,16 @@ func (m Model) handleDialDone(msg dialDoneMsg) (tea.Model, tea.Cmd) {
 		// toast remains visible instead of driving a nil attach.
 		return m, syncCmd
 	}
-	am, attachCmd := m.attach(msg.hostID, msg.sess)
+	// First successful dial of the run: teach the detach/reattach keys before
+	// the terminal disappears behind the takeover. The session is already live
+	// and stays that way whichever way the hint is dismissed.
+	if !m.sessionHintSeen {
+		m.sessionHintSeen = true
+		m.pendingAttachID = msg.sess.ID()
+		m.modal = modalSessionHint
+		return m, syncCmd
+	}
+	am, attachCmd := m.attach(msg.sess.ID(), msg.sess)
 	return am, tea.Batch(syncCmd, attachCmd)
 }
 
@@ -201,8 +265,8 @@ func (m Model) handleDialErr(hostID string, err error) (tea.Model, tea.Cmd) {
 
 func (m Model) handleDetached(msg detachedMsg) (tea.Model, tea.Cmd) {
 	m.attaching = false
-	if m.mgr != nil {
-		if s := m.mgr.Get(msg.hostID); s != nil && s.Alive() {
+	if m.pool != nil {
+		if s := m.pool.Get(msg.sessionID); s != nil && s.Alive() {
 			// A real detach (ctrl+\): the session lives on. A dead session is
 			// announced separately by SessionEndedMsg, so stay quiet here.
 			m = m.setToast("detached · session still running", "ok")

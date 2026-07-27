@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/Janne6565/wharf-tui/internal/probe"
@@ -24,11 +25,9 @@ func (m Model) unlockKey(key string) (tea.Model, tea.Cmd) {
 		// The one-time code must be explicitly acknowledged.
 		switch key {
 		case "enter", "y", "Y":
-			m.screen = scMain
-			m.tab = 0
 			m.recoveryCode = ""
 			m.unlockErr = ""
-			return m, m.afterUnlockCmds()
+			return m.enterMain()
 		}
 		return m, nil
 	case ulLocked:
@@ -183,9 +182,7 @@ func (m Model) handleVaultMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m = m.initSync(msg.pw)
 		m.pwInput = ""
-		m.screen = scMain
-		m.tab = 0
-		return m, m.afterUnlockCmds()
+		return m.enterMain()
 
 	case vaultRecoveredMsg:
 		if msg.err != nil {
@@ -277,6 +274,61 @@ func (m Model) applySSHSettings() {
 // not restarted here.
 func (m Model) afterUnlockCmds() tea.Cmd {
 	return tea.Batch(m.probeCmds(), m.scanKeysCmd(), m.resumeSyncCmd())
+}
+
+// enterMain leaves the vault gate for the main screen, and consumes a host name
+// given on the command line (`wharf prod-api-01`) by dialing it right away. A
+// name that resolves to no host, or to several, only raises a toast — the user
+// still lands on the hosts list rather than back at a shell.
+func (m Model) enterMain() (tea.Model, tea.Cmd) {
+	m.screen = scMain
+	m.tab = 0
+	cmds := m.afterUnlockCmds()
+	name := m.connectTo
+	m.connectTo = ""
+	if name == "" {
+		return m, cmds
+	}
+	h, err := m.hostByName(name)
+	if err != nil {
+		return m.setToast(err.Error(), "err"), cmds
+	}
+	next, cmd := m.startConnect(h)
+	return next, tea.Batch(cmds, cmd)
+}
+
+// hostByName resolves a command-line host argument: an exact name first, else a
+// unique name prefix, both case-insensitive. Personal hosts only — project
+// hosts need a projects sync that has not run yet at unlock time.
+func (m Model) hostByName(name string) (store.Host, error) {
+	want := strings.ToLower(strings.TrimSpace(name))
+	if m.st == nil || want == "" {
+		return store.Host{}, fmt.Errorf("no saved host named %q", name)
+	}
+	hosts := m.st.Hosts()
+	for _, h := range hosts {
+		if strings.ToLower(h.Name) == want {
+			return h, nil
+		}
+	}
+	var matched []string
+	var first store.Host
+	for _, h := range hosts {
+		if strings.HasPrefix(strings.ToLower(h.Name), want) {
+			if len(matched) == 0 {
+				first = h
+			}
+			matched = append(matched, h.Name)
+		}
+	}
+	switch len(matched) {
+	case 1:
+		return first, nil
+	case 0:
+		return store.Host{}, fmt.Errorf("no saved host named %q", name)
+	default:
+		return store.Host{}, fmt.Errorf("%q matches %s", name, strings.Join(matched, ", "))
+	}
 }
 
 // lock saves, closes the vault and the sync engine, wipes the in-memory

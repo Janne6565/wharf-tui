@@ -9,6 +9,7 @@ import (
 	"github.com/Janne6565/wharf-tui/internal/data"
 	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
+	"github.com/Janne6565/wharf-tui/internal/sessd"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
 	syncx "github.com/Janne6565/wharf-tui/internal/sync"
@@ -46,7 +47,17 @@ func (vaultProjectCrypto) Unwrap(wrapped, pub, priv []byte) ([]byte, error) {
 type Config struct {
 	Demo      bool
 	VaultPath string
-	Manager   *sshx.Manager
+	// Manager runs port forwards, which stay in-process by design.
+	Manager *sshx.Manager
+	// Sessions spawns and adopts the session-host children that keep
+	// interactive shells alive across a quit. Nil disables connecting.
+	Sessions *sessd.Pool
+
+	// ConnectHost is a saved host's name given on the command line
+	// (`wharf prod-api-01`). Real mode only: once the vault unlocks, the model
+	// resolves it and dials straight through, reporting a toast on the hosts
+	// list if it matches no host or more than one.
+	ConnectHost string
 
 	// Vault access hooks. Nil fields default to the real vault package; tests
 	// inject fakes so unit tests avoid argon2's cost.
@@ -76,6 +87,8 @@ func New(cfg Config) Model {
 	m := Model{
 		themeName:         "abyss",
 		vaultPath:         cfg.VaultPath,
+		connectTo:         cfg.ConnectHost,
+		pool:              cfg.Sessions,
 		mgr:               cfg.Manager,
 		projects:          data.Projects(),
 		sessions:          map[string]*session{},

@@ -763,7 +763,7 @@ func (e *Engine) dropProjectLocked(id string) {
 
 // projectsDir is the blob-cache directory next to the session file.
 func (e *Engine) projectsDir() string {
-	return filepath.Join(filepath.Dir(e.cfg.SessionPath), "projects")
+	return filepath.Join(filepath.Dir(e.cfg.SessionPath), projectsDirName)
 }
 
 func (e *Engine) blobCachePath(id string) string {

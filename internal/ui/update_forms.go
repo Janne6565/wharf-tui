@@ -84,6 +84,10 @@ func (m Model) modalKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		return m.quitConfirmKey(key)
 	case modalConnecting:
 		return m.connectingKey(key)
+	case modalSessionHint:
+		return m.sessionHintKey(key)
+	case modalSessionPicker:
+		return m.sessionPickerKey(key)
 	case modalHostKey:
 		return m.hostKeyModalKey(key)
 	case modalSecret:
@@ -566,7 +570,7 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	if m.demo {
 		return m, tea.Quit
 	}
-	if m.mgr != nil && (len(m.mgr.List()) > 0 || len(m.mgr.Forwards()) > 0) {
+	if m.liveSessions() > 0 || m.liveForwards() > 0 {
 		m.modal = modalQuitConfirm
 		return m, nil
 	}
@@ -574,6 +578,11 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) doQuit() (tea.Model, tea.Cmd) {
+	// Sessions are deliberately left running in their child processes; only the
+	// control connections go away. Forwards are process-bound and do close.
+	if m.pool != nil {
+		m.pool.Detach()
+	}
 	if m.mgr != nil {
 		m.mgr.CloseAll()
 	}

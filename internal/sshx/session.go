@@ -103,6 +103,47 @@ func (s *Session) Alive() bool {
 // Done is closed when the session ends.
 func (s *Session) Done() <-chan struct{} { return s.done }
 
+// --- remote-attach surface --------------------------------------------------
+//
+// These mirror what attach.go does in-process, but as an exported API so a
+// session-host child process can serve the same stream over a socket instead
+// of over its own terminal. Attach itself stays the in-process path.
+
+// Snapshot copies the session's scrollback ring in write order. It is the
+// replay a client renders before live output starts.
+func (s *Session) Snapshot() []byte { return s.ring.Snapshot() }
+
+// SetLive routes remote output to w for as long as it stays installed, in
+// addition to the ring. A writer that errors is dropped by the tee, so a dead
+// client never stalls the session.
+func (s *Session) SetLive(w io.Writer) { s.tee.setLive(w) }
+
+// UnsetLive stops routing output to w, unless a later attach has already
+// replaced it.
+func (s *Session) UnsetLive(w io.Writer) { s.tee.unsetLive(w) }
+
+// Write sends bytes to the remote shell's stdin.
+func (s *Session) Write(p []byte) (int, error) { return s.stdin.Write(p) }
+
+// Resize reports a new terminal size to the remote and records it, so the next
+// replay can jiggle the window at the right dimensions.
+func (s *Session) Resize(cols, rows int) error {
+	if cols <= 0 || rows <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	s.cols, s.rows = cols, rows
+	s.mu.Unlock()
+	return s.sess.WindowChange(rows, cols)
+}
+
+// Size returns the last reported terminal size.
+func (s *Session) Size() (cols, rows int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cols, s.rows
+}
+
 // Close terminates the session. It is idempotent and safe to call from any
 // goroutine; the waiter goroutine performs the actual bookkeeping via end.
 func (s *Session) Close() error {

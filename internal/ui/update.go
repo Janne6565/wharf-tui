@@ -298,9 +298,17 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		if !m.demo && m.mgr != nil {
 			return m.openForwards(), nil
 		}
+	case "S":
+		// Live-sessions overlay, mirroring F for forwards. This is the reliable
+		// way to reattach: alt+1..9 needs a terminal that sends Option as Meta,
+		// which macOS does not do by default.
+		if !m.demo && m.pool != nil {
+			return m.openAllSessions()
+		}
 	}
 
-	// alt+1..9 reattaches a live session from anywhere on the dashboard.
+	// alt+1..9 reattaches a live session from anywhere on the dashboard. It only
+	// arrives when the terminal maps Option/Alt to Meta; S is the portable route.
 	if strings.HasPrefix(key, "alt+") && len(key) == 5 && key[4] >= '1' && key[4] <= '9' {
 		return m.reattachByIndex(int(key[4] - '1'))
 	}

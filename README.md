@@ -26,12 +26,80 @@ go run .
 # or build a single static binary:
 go build -o wharf . && ./wharf
 
+# stamp a release identity (otherwise --version reports "dev (<commit>)"):
+go build -ldflags "-X main.version=v1.2.3" -o wharf .
+
 # the original design prototype (sample data, simulated shell, no disk I/O):
 go run . --demo
 ```
 
 Requires Go 1.24+. No root, no daemon. The vault lives at
 `${XDG_DATA_HOME:-~/.local/share}/wharf/vault.enc` (override with `WHARF_VAULT`).
+
+## CLI
+
+```
+wharf [flags] [host]
+```
+
+Bare `wharf` opens the TUI. A **host argument** names a saved host to connect to right
+after the vault unlocks — exact name, else a unique name prefix, both case-insensitive
+(`wharf prod` works while only one host starts with `prod`). An argument that matches
+nothing, or several hosts, only raises a toast: you land on the hosts list, never back
+at your shell. Personal hosts only — project hosts need a projects sync that has not
+run yet at unlock time.
+
+Verbs are spelled as **flags** precisely so they never claim a name a host could have:
+
+| flag | what it does |
+| --- | --- |
+| `--version` | print the version and exit |
+| `--logout` | delete the local sync session (sign this device out) and exit |
+| `--doctor` | print resolved paths and environment, then exit |
+| `--reset` | **destructive:** erase this device's vault, session and caches |
+| `--vault <path>` | vault file path, overriding `$WHARF_VAULT` |
+| `--demo` | sample data and a simulated session — no disk I/O, no real SSH |
+
+`--logout` deliberately needs no master password. The session file is sealed under the
+vault DEK, so the in-TUI sign-out is only reachable while unlocked — this is the escape
+hatch for a vault you cannot open at all. It is **local only**: the refresh token cannot
+be read, let alone revoked server-side, without the vault key. To invalidate sessions on
+the server, reset with your recovery code — that rotates the code and revokes every
+token.
+
+`--reset` erases this device's wharf state — `vault.enc`, `session.enc`, the cached
+project blobs and the lock sidecar — and it cannot be undone: the recovery code unlocks
+a vault *file*, so once the file is gone, so is every host, key and stored password in
+it. The one exception worth knowing: if the device is signed in, the **server's copy is
+untouched**, so signing in again with your master password pulls the vault back.
+
+It only deletes after a typed confirmation:
+
+```
+$ wharf --reset
+Are you sure you want to reset your wharf instance?
+
+This permanently erases, on this device:
+  • ~/.local/share/wharf/projects
+  • ~/.local/share/wharf/session.enc
+  • ~/.local/share/wharf/vault.enc
+  • ~/.local/share/wharf/vault.lock
+…
+Type "I am sure" to confirm:
+```
+
+`y`/`yes` does not count — the phrase has to be typed out (case, spacing and the
+apostrophe in `I'm sure` are forgiven). Three further guards: it lists only paths that
+actually exist, it refuses when **stdin is not a terminal** so a pipe or CI job can never
+satisfy the prompt, and it refuses while **another wharf instance holds the vault lock**,
+whose next save would otherwise write the vault straight back.
+
+`--doctor` reads no secrets and never unlocks the vault; it prints the version, Go
+version and platform, the resolved vault / session / `known_hosts` paths (with a
+present/missing marker each), and the API base and device URL. It is what to paste into
+a bug report.
+
+Environment: `WHARF_VAULT` (vault file path), `WHARF_API_BASE` (sync backend base URL).
 
 ## How it works
 
@@ -40,10 +108,15 @@ Requires Go 1.24+. No root, no daemon. The vault lives at
   in if you forget the password. Every later run starts at the unlock screen
   (`r` switches to recovery-code entry, which forces a password reset and issues a
   *new* code).
-- **Sessions are full-fidelity.** Connecting hands your real terminal to the remote
-  shell — vim, htop and tmux behave exactly as over plain `ssh`. Press **`ctrl+\`** to
-  detach: the session keeps running while you use the dashboard, and reattaching
-  replays recent output. `alt+1..9` jumps straight back into a live session.
+- **Sessions are full-fidelity, and they outlive wharf.** Connecting hands your real
+  terminal to the remote shell — vim, htop and tmux behave exactly as over plain `ssh`.
+  Press **`ctrl+\`** to detach: the session keeps running while you use the dashboard,
+  and reattaching replays recent output. Press **`S`** for the live-sessions overlay.
+  Quitting wharf does **not** kill them — see
+  [Sessions that outlive wharf](#sessions-that-outlive-wharf).
+- **A host can have several sessions.** `enter` on a host that already has one opens a
+  picker: reattach to a specific session, kill one (`x` twice — a live shell is not
+  something to lose to a stray key), or start another with `n`.
 - **Two auth modes per host.** **key** (the default): ssh-agent → configured key
   file (passphrase prompted in the TUI) → keyboard-interactive (2FA). **password**:
   stored/prompted password → keyboard-interactive — it never offers public keys,
@@ -154,6 +227,53 @@ awaiting-access until an admin re-grants).
   offers **`p`** to republish your local key over the server's copy. A server that
   cannot be reached is *unknown*, not a mismatch.
 
+## Sessions that outlive wharf
+
+Connecting does not open the SSH connection inside the TUI. wharf re-executes itself as
+a **session host** — one child process per session — hands it a listening unix socket,
+and that child owns the `ssh.Client`, the PTY and the 256 KiB scrollback ring. The TUI
+attaches over the socket and proxies bytes to your terminal.
+
+So quitting wharf just drops a control connection. The shell keeps running, and the next
+`wharf` scans the socket directory, reattaches to whatever is still alive and lists it in
+the live strip — `alt+1..9` or `enter` on a host row marked live picks up where you left
+off, scrollback and all.
+
+One child per session is deliberate: no singleton daemon to supervise, no protocol
+handshake to keep compatible across upgrades, and a crash costs one session instead of
+all of them.
+
+```
+wharf (TUI)                     wharf --session-host (one per session)
+  │                               │ owns ssh.Client + PTY + scrollback ring
+  │  spawn, listener on fd 3 ──▶  │ serves $XDG_RUNTIME_DIR/wharf/sessions/*.sock
+  │  attach: raw stream ◀──────▶  │
+  │  quit ──▶ (child lives on)    │
+  └── next run: scan + adopt ──▶  │ still there
+```
+
+### Reattaching
+
+`S` opens the live-sessions overlay from any tab: every running session, newest state,
+`enter` to attach and `x x` to kill. `enter` on a host row that already has sessions
+opens the same picker scoped to that host, plus a **+ new session** row.
+
+`alt+1..9` also jumps to a session, but only in terminals that send Option/Alt as Meta —
+**macOS does not by default**. In Terminal.app enable *Settings → Profiles → Keyboard →
+Use Option as Meta key*; in iTerm2 set *Settings → Profiles → Keys → Left Option key →
+Esc+*. Without that, `S` is the portable route and needs no configuration.
+
+**Boundaries.** Sessions do not survive a reboot or a logout (the runtime directory is
+wiped). **Port forwards are not hosted this way** — they are documented as ephemeral and
+never persisted, so they still die with the TUI, and the quit prompt says so.
+
+**Trust model.** The socket directory is `0700` (verified, not assumed — it is checked
+for ownership and mode on every start) and each socket is `0600`. Anyone who can open
+the socket can type into that shell: the same exposure `tmux` and OpenSSH's
+`ControlMaster` accept, but new for wharf. The child never receives the master password
+and never touches the vault — it gets one host spec over the socket, authenticates with
+it, and holds nothing else. `WHARF_RUNTIME_DIR` overrides the location.
+
 ## Keybindings
 
 | Key | Action |
@@ -170,9 +290,10 @@ awaiting-access until an admin re-grants).
 | `s` | sync now *(settings tab, signed in)* |
 | `ctrl+r` | remember the typed password *(password prompt)* |
 | `ctrl+\` | **detach** the attached session |
-| `alt`+`1..9` | reattach a live session |
+| `S` | live sessions: reattach, kill, or open another |
+| `alt`+`1..9` | reattach a live session *(needs Option-as-Meta — see below)* |
 | `q` | lock the vault |
-| `ctrl+q` | quit (confirms if sessions are live) |
+| `ctrl+q` | quit (confirms when sessions or forwards are running) |
 | `?` | toggle help |
 
 ## Layout
@@ -187,6 +308,7 @@ internal/
   identity/ cross-client fingerprint of the X25519 project identity key
   sync/     sync engine: session file, optimistic versioning, conflicts
   sshx/     SSH engine: auth chain, known_hosts/TOFU, detachable sessions
+  sessd/    session-host child processes + their unix-socket protocol
   keys/     ~/.ssh scan + ed25519 generation
   sshcfg/   ~/.ssh/config import
   probe/    advisory TCP reachability checks
@@ -201,7 +323,8 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) +
 ## Roadmap
 
 - [x] Sync client against `wharf-backend` (device-code auth, ciphertext push/pull)
-- [ ] Port forwarding (`-L`-style local forwards per host)
+- [x] Port forwarding (`-L`/`-R`/`-D`, per host)
+- [x] Sessions that survive quitting wharf (session-host child processes)
 - [ ] Team projects backed by the real backend
 - [ ] Hardware keys (YubiKey resident / `-SK`)
 - [ ] Assign a scanned key to a host from the keys tab

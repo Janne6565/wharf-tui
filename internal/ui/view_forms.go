@@ -25,6 +25,10 @@ func (m Model) modalView(t theme.Theme) []string {
 		return m.quitConfirmView(t)
 	case modalConnecting:
 		return m.connectingView(t)
+	case modalSessionHint:
+		return m.sessionHintView(t)
+	case modalSessionPicker:
+		return m.sessionPickerView(t)
 	case modalHostKey:
 		return m.hostKeyView(t)
 	case modalSecret:
@@ -270,6 +274,28 @@ func (m Model) signOutView(t theme.Theme) []string {
 
 // --- connecting -------------------------------------------------------------
 
+// sessionHintView is the first-connect primer: the session is up, and these are
+// the keys that get you out of it and back into it.
+func (m Model) sessionHintView(t theme.Theme) []string {
+	key := func(k, rest string) string {
+		return stl(t.Hi, t.Panel).Render(k) + stl(t.Dim, t.Panel).Render(rest)
+	}
+	body := []string{
+		stl(t.Ok, t.Panel).Render("● connected to " + m.hostName(m.pendingAttachID)),
+		"",
+		stl(t.Fg, t.Panel).Render("Wharf hands your terminal to the session. To get back:"),
+		"",
+		key("ctrl+\\", "   detach — the session keeps running"),
+		key("alt+1..9", " reattach from the dashboard"),
+		key("enter", "    reattach from a host row marked live"),
+		"",
+		stl(t.Ok, t.Panel).Render("Sessions survive quitting wharf — reattach from a later run."),
+		"",
+		key("enter", " attach now · ") + key("esc", " stay on the dashboard"),
+	}
+	return m.modalBox(t, "session", "ok", body)
+}
+
 func (m Model) connectingView(t theme.Theme) []string {
 	name := m.hostName(m.dialHostID)
 	verb, title := "connecting to ", "connecting"
@@ -412,29 +438,24 @@ func (m Model) keygenView(t theme.Theme) []string {
 // --- quit confirm -----------------------------------------------------------
 
 func (m Model) quitConfirmView(t theme.Theme) []string {
-	ns, nf := 0, 0
-	if m.mgr != nil {
-		ns = len(m.mgr.List())
-		nf = len(m.mgr.Forwards())
-	}
-	var parts []string
+	ns, nf := m.liveSessions(), m.liveForwards()
+	var body []string
+	// Sessions and forwards now part ways on quit: sessions live in their own
+	// child processes and keep running, forwards are process-bound and close.
 	if ns > 0 {
-		parts = append(parts, itoa(ns)+" live session(s)")
+		body = append(body, stl(t.Ok, t.Panel).Render(itoa(ns)+" live session(s) keep running — reattach next time."))
 	}
 	if nf > 0 {
-		parts = append(parts, itoa(nf)+" active forward(s)")
+		body = append(body, stl(t.Warn, t.Panel).Render(itoa(nf)+" active forward(s) will be closed."))
 	}
-	what := strings.Join(parts, " and ")
-	if what == "" {
-		what = "nothing"
+	if len(body) == 0 {
+		body = append(body, stl(t.Dim, t.Panel).Render("Nothing is running."))
 	}
-	body := []string{
-		stl(t.Warn, t.Panel).Render(what + " will be closed."),
-		"",
-		stl(t.Hi, t.Panel).Render("y") + stl(t.Dim, t.Panel).Render("/") + stl(t.Hi, t.Panel).Render("enter") +
-			stl(t.Dim, t.Panel).Render(" quit · ") + stl(t.Hi, t.Panel).Render("esc") +
-			stl(t.Dim, t.Panel).Render("/") + stl(t.Hi, t.Panel).Render("n") + stl(t.Dim, t.Panel).Render(" cancel"),
-	}
+	body = append(body, "")
+	body = append(body,
+		stl(t.Hi, t.Panel).Render("y")+stl(t.Dim, t.Panel).Render("/")+stl(t.Hi, t.Panel).Render("enter")+
+			stl(t.Dim, t.Panel).Render(" quit · ")+stl(t.Hi, t.Panel).Render("esc")+
+			stl(t.Dim, t.Panel).Render("/")+stl(t.Hi, t.Panel).Render("n")+stl(t.Dim, t.Panel).Render(" cancel"))
 	return m.modalBox(t, "quit wharf", "err", body)
 }
 

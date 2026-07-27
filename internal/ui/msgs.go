@@ -5,6 +5,7 @@ import (
 
 	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
+	"github.com/Janne6565/wharf-tui/internal/sessd"
 	"github.com/Janne6565/wharf-tui/internal/sshcfg"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
@@ -163,19 +164,21 @@ func (m Model) importCmd() tea.Cmd {
 
 type dialDoneMsg struct {
 	hostID string
-	sess   *sshx.Session
+	sess   *sessd.Remote
 	err    error
 }
 
 // detachedMsg is returned by the tea.Exec attach callback: the takeover ended,
 // either by an explicit detach (ctrl+\) or the remote session dying.
 type detachedMsg struct {
-	hostID string
+	sessionID string
 }
 
-func dialCmd(mgr *sshx.Manager, ctx context.Context, spec sshx.HostSpec, cols, rows int) tea.Cmd {
+// dialCmd spawns a session host for spec and drives it through authentication.
+// The session it returns lives in that child process, so it survives this one.
+func dialCmd(pool *sessd.Pool, ctx context.Context, spec sshx.HostSpec, cols, rows int) tea.Cmd {
 	return func() tea.Msg {
-		sess, err := mgr.Dial(ctx, spec, cols, rows)
+		sess, err := pool.Dial(ctx, spec, cols, rows)
 		return dialDoneMsg{hostID: spec.ID, sess: sess, err: err}
 	}
 }

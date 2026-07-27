@@ -33,6 +33,14 @@ const SessionKeyInfo = "wharf/session-file/v1"
 // sessionFileName sits in the same directory as the vault file.
 const sessionFileName = "session.enc"
 
+// projectsDirName holds the cached project blobs, next to the session file.
+const projectsDirName = "projects"
+
+// ProjectsDir resolves the project blob-cache directory for a given vault path.
+func ProjectsDir(vaultPath string) string {
+	return filepath.Join(filepath.Dir(vaultPath), projectsDirName)
+}
+
 // errNoSession distinguishes "never paired" from a broken file.
 var errNoSession = errors.New("sync: no session file")
 
