@@ -362,6 +362,10 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		m.move(1)
 	case "k", "up":
 		m.move(-1)
+	case "left", "h":
+		return m.cycleSetting(-1)
+	case "right", "l":
+		return m.cycleSetting(1)
 	case "i":
 		if m.tab == 1 && m.signedIn {
 			m.inviteOpen = true
@@ -544,13 +548,30 @@ func (m *Model) move(d int) {
 	case 2:
 		m.keyIdx = clampIdx(m.keyIdx+d, len(m.mergedKeys()))
 	case 3:
-		m.setIdx = clampIdx(m.setIdx+d, len(settingDefs))
+		m.setIdx = m.settingCursor(d)
 	}
+}
+
+// cycleSetting steps a "‹ value ›" settings row by d — the chevrons in the row
+// are the affordance, and left/right are what people reach for. Rows without a
+// cycle ignore it rather than falling back to enter's action: an arrow key must
+// never fire something like sign-out.
+func (m Model) cycleSetting(d int) (tea.Model, tea.Cmd) {
+	if m.tab != 3 || m.settingRows()[m.settingIdx()].key != "theme" {
+		return m, nil
+	}
+	next := theme.Next(m.themeName)
+	if d < 0 {
+		next = theme.Prev(m.themeName)
+	}
+	m.themeName = next
+	m.settings.Theme = next
+	return m.persistSettings()
 }
 
 // toggleSetting toggles or actions the selected settings row and persists.
 func (m Model) toggleSetting() (tea.Model, tea.Cmd) {
-	def := settingDefs[clampIdx(m.setIdx, len(settingDefs))]
+	def := m.settingRows()[m.settingIdx()]
 	switch def.key {
 	case "theme":
 		next := theme.Next(m.themeName)
@@ -558,19 +579,17 @@ func (m Model) toggleSetting() (tea.Model, tea.Cmd) {
 		m.settings.Theme = next
 		return m.persistSettings()
 	case "account":
-		if m.signedIn {
-			if m.demo {
-				m.signedIn = false
-				m.email = ""
-				return m, nil
-			}
-			return m.signOut(), nil
-		}
+		// Only actionable while signed out — signing in.
 		m.postAuthTab = 3
 		m.screen = scAuth
 		m.authStep = 0
 		m.code = ""
 		m.authErr = ""
+		return m, nil
+	case "signout":
+		// Unpairing costs a trip through the browser to undo, so it confirms
+		// first — like quit, delete-host and unsync-key.
+		m.modal = modalSignOut
 		return m, nil
 	case "password":
 		if m.demo || m.vault == nil {
@@ -579,10 +598,10 @@ func (m Model) toggleSetting() (tea.Model, tea.Cmd) {
 		return m.openChangePassword(), nil
 	case "agent":
 		m.settings.Agent = !m.settings.Agent
+		m.applySSHSettings()
 	case "keepalive":
 		m.settings.Keepalive = !m.settings.Keepalive
-	case "telemetry":
-		m.settings.Telemetry = !m.settings.Telemetry
+		m.applySSHSettings()
 	}
 	return m.persistSettings()
 }

@@ -840,8 +840,10 @@ func (m Model) settingsTab(t theme.Theme, contentH int) []string {
 	const valW = 16
 	pad := bgpad(padX, t.Panel)
 	var body []string
-	for i, d := range settingDefs {
-		sel := i == m.setIdx
+	rows := m.settingRows()
+	cur := m.settingIdx()
+	for i, d := range rows {
+		sel := i == cur
 		bg := t.Panel
 		mark := " "
 		labelFg := t.Fg
@@ -849,6 +851,9 @@ func (m Model) settingsTab(t theme.Theme, contentH int) []string {
 			bg = t.Sel
 			mark = "▸"
 			labelFg = t.Hi
+		}
+		if !d.act {
+			labelFg = t.Dim // status row: never selected, so never highlighted
 		}
 		var val string
 		var vc lipgloss.Color
@@ -859,8 +864,10 @@ func (m Model) settingsTab(t theme.Theme, contentH int) []string {
 			if m.signedIn {
 				val, vc = m.email, t.Ok
 			} else {
-				val, vc = "signed out", t.Dim
+				val, vc = "sign in ›", t.Hi
 			}
+		case "signout":
+			val, vc = "sign out ›", t.Warn
 		case "password":
 			val, vc = "change ›", t.Hi
 		default:
@@ -870,15 +877,27 @@ func (m Model) settingsTab(t theme.Theme, contentH int) []string {
 				val, vc = "[off]", t.Dim
 			}
 		}
+		// The account row carries an address rather than a short value, so it
+		// gets a wider value column — "deniz@example.c…" defeats the point of
+		// showing which account is paired.
+		vw := valW
+		if d.key == "account" && m.signedIn {
+			vw = 2 * valW
+		}
 		mid := stl(t.Hi, bg).Render(mark+" ") +
-			rowSeg(d.label, avail-2-valW, labelFg, bg, false) +
-			rowSeg(val, valW, vc, bg, true)
+			rowSeg(d.label, avail-2-vw, labelFg, bg, false) +
+			rowSeg(val, vw, vc, bg, true)
 		body = append(body, selRow(inner, bg, mid))
+	}
+	action := "sign in"
+	if m.signedIn {
+		action = "sign out"
 	}
 	body = append(body, "",
 		pad+ruleIn(t, avail),
 		"",
-		pad+stl(t.Hi, t.Panel).Render("enter")+stl(t.Dim, t.Panel).Render(" toggle / cycle / sign in · theme applies live"))
+		pad+stl(t.Hi, t.Panel).Render("enter")+stl(t.Dim, t.Panel).Render(" toggle / "+action+" · ")+
+			stl(t.Hi, t.Panel).Render("←/→")+stl(t.Dim, t.Panel).Render(" theme, applies live"))
 	box := listPanel(t, "settings", t.Hi, pw, len(body)+4, body)
 	return topInArea(box, m.w, contentH, t.Bg)
 }
@@ -890,8 +909,6 @@ func (m Model) settingOn(key string) bool {
 		return m.settings.Agent
 	case "keepalive":
 		return m.settings.Keepalive
-	case "telemetry":
-		return m.settings.Telemetry
 	}
 	return false
 }
@@ -1011,7 +1028,18 @@ func (m Model) hintBar(t theme.Theme) []string {
 			}
 		}
 	case 3:
-		hints = append(hints, hk{"enter", "toggle"})
+		// Name what enter does on *this* row: "toggle" on the sign-out row read
+		// as harmless, which is how it got pressed by accident.
+		switch m.settingRows()[m.settingIdx()].key {
+		case "signout":
+			hints = append(hints, hk{"enter", "sign out"})
+		case "account":
+			hints = append(hints, hk{"enter", "sign in"})
+		case "theme":
+			hints = append(hints, hk{"←/→", "theme"}, hk{"enter", "cycle"})
+		default:
+			hints = append(hints, hk{"enter", "toggle"})
+		}
 		if m.signedIn && !m.demo {
 			hints = append(hints, hk{"s", "sync now"})
 		}
@@ -1077,7 +1105,9 @@ func (m Model) helpView(t theme.Theme) []string {
 		{"esc", "back / clear / detach / cancel"},
 		{"ctrl+\\", "detach from a live session"},
 		{"alt+1..9", "reattach a live session"},
-		{"q", "lock vault (sign in/out in demo)"},
+		{"q", "lock vault — keeps you signed in (sign in/out in demo)"},
+		{"4", "settings: sign in / sign out this device"},
+		{"← / →", "cycle theme (settings)"},
 		{"ctrl+q", "quit wharf"},
 		{"?", "toggle this help"},
 	}

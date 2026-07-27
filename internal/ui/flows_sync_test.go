@@ -8,7 +8,9 @@ import (
 	"testing"
 
 	"github.com/Janne6565/wharf-tui/internal/api"
+	"github.com/Janne6565/wharf-tui/internal/sshx"
 	syncx "github.com/Janne6565/wharf-tui/internal/sync"
+	"github.com/Janne6565/wharf-tui/internal/theme"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -132,10 +134,7 @@ func pairModel(t *testing.T) (tea.Model, *fakeVault, *fakeBackend) {
 	t.Helper()
 	tm, fv, fb := syncedModel(t)
 	// settings → account row → enter opens the sign-in screen.
-	tm = send(tm, runes("4"))
-	tm = send(tm, runes("j"))
-	tm = send(tm, runes("j"))
-	tm = send(tm, runes("j")) // land on Account
+	tm = gotoSettingRow(t, tm, "account")
 	tm, _ = step(tm, special(tea.KeyEnter))
 	if !strings.Contains(tm.View(), "pairing code") {
 		t.Fatalf("account row should open the real sign-in screen:\n%s", tm.View())
@@ -336,19 +335,69 @@ func TestConflictPromptAndResolve(t *testing.T) {
 	}
 }
 
-func TestSignOutKeepsVault(t *testing.T) {
-	tm, fv, _ := pairModel(t)
+// gotoSettingRow opens the settings tab and walks the cursor to the row with
+// the given key. Navigating by identity rather than by index keeps the helper
+// honest when the row set changes with the account state (the "Account" status
+// row is skipped while signed in).
+func gotoSettingRow(t *testing.T, tm tea.Model, key string) tea.Model {
+	t.Helper()
 	tm = send(tm, runes("4"))
-	for i := 0; i < len(settingDefs); i++ { // to the top…
+	rows := tm.(Model).settingRows()
+	for i := 0; i < len(rows); i++ {
+		tm = send(tm, runes("k")) // clamp to the top row
+	}
+	for i := 0; i < len(rows); i++ {
+		if rows[tm.(Model).settingIdx()].key == key {
+			return tm
+		}
+		tm = send(tm, runes("j"))
+	}
+	t.Fatalf("settings row %q never got selected", key)
+	return tm
+}
+
+// The cursor must never land on the "Account" status row: it exists to show
+// which address is paired, and enter there used to sign the device out.
+func TestSettingsCursorSkipsAccountStatusRow(t *testing.T) {
+	tm, _, _ := pairModel(t)
+	tm = send(tm, runes("4"))
+	rows := tm.(Model).settingRows()
+	for i := 0; i < len(rows); i++ {
 		tm = send(tm, runes("k"))
 	}
-	tm = send(tm, runes("j"))
-	tm = send(tm, runes("j"))
-	tm = send(tm, runes("j")) // …then down to the Account row
+	for i := 0; i < len(rows); i++ {
+		if got := rows[tm.(Model).settingIdx()]; got.key == "account" {
+			t.Fatalf("cursor landed on the account status row (step %d)", i)
+		}
+		tm = send(tm, runes("j"))
+	}
+}
+
+func TestSignOutConfirmCancelKeepsSession(t *testing.T) {
+	tm, _, _ := pairModel(t)
+	tm = gotoSettingRow(t, tm, "signout")
 	tm, _ = step(tm, special(tea.KeyEnter))
+	if tm.(Model).modal != modalSignOut {
+		t.Fatalf("the sign-out row should confirm first, got modal %d", tm.(Model).modal)
+	}
+	if !strings.Contains(tm.View(), "pairing code") {
+		t.Fatalf("the confirmation should say re-pairing needs a browser code:\n%s", tm.View())
+	}
+	tm, _ = step(tm, special(tea.KeyEsc))
+	m := tm.(Model)
+	if m.modal != modalNone || !m.signedIn {
+		t.Fatalf("esc must cancel: modal %d, signedIn %v", m.modal, m.signedIn)
+	}
+}
+
+func TestSignOutKeepsVault(t *testing.T) {
+	tm, fv, _ := pairModel(t)
+	tm = gotoSettingRow(t, tm, "signout")
+	tm, _ = step(tm, special(tea.KeyEnter)) // opens the confirmation
+	tm, _ = step(tm, special(tea.KeyEnter)) // confirms it
 	m := tm.(Model)
 	if m.signedIn {
-		t.Fatal("enter on the account row should sign out")
+		t.Fatal("confirming the sign-out modal should sign out")
 	}
 	if !strings.Contains(tm.View(), "signed out") {
 		t.Fatalf("sign-out should confirm via toast:\n%s", tm.View())
@@ -377,20 +426,7 @@ func TestSessionDeadSignsOutUI(t *testing.T) {
 // password modal from the "password" row. It leaves the cursor on the top field.
 func openChangePwModal(t *testing.T, tm tea.Model) tea.Model {
 	t.Helper()
-	tm = send(tm, runes("4")) // settings tab
-	for i := 0; i < len(settingDefs); i++ {
-		tm = send(tm, runes("k")) // clamp to the top row
-	}
-	// The "password" row sits just after "account".
-	pwIdx := 0
-	for i, d := range settingDefs {
-		if d.key == "password" {
-			pwIdx = i
-		}
-	}
-	for i := 0; i < pwIdx; i++ {
-		tm = send(tm, runes("j"))
-	}
+	tm = gotoSettingRow(t, tm, "password")
 	tm, _ = step(tm, special(tea.KeyEnter))
 	if tm.(Model).modal != modalChangePassword {
 		t.Fatalf("password row should open the change-password modal, got modal %d\n%s",
@@ -495,5 +531,99 @@ func TestChangePasswordMismatchIsRejected(t *testing.T) {
 	}
 	if !strings.Contains(tm.View(), "do not match") {
 		t.Fatalf("the mismatch error should be shown:\n%s", tm.View())
+	}
+}
+
+// Left/right cycle the theme in place — the "‹ abyss ›" chevrons promise it.
+func TestThemeCyclesWithArrowKeys(t *testing.T) {
+	tm, _, _ := pairModel(t)
+	tm = gotoSettingRow(t, tm, "theme")
+	start := tm.(Model).themeName
+
+	tm, _ = step(tm, special(tea.KeyRight))
+	if got := tm.(Model).themeName; got != theme.Next(start) {
+		t.Fatalf("right should advance the theme: %q -> %q", start, got)
+	}
+	tm, _ = step(tm, special(tea.KeyLeft))
+	if got := tm.(Model).themeName; got != start {
+		t.Fatalf("left should step back to %q, got %q", start, got)
+	}
+	tm, _ = step(tm, special(tea.KeyLeft))
+	if got := tm.(Model).themeName; got != theme.Prev(start) {
+		t.Fatalf("left should wrap backwards: %q -> %q", start, got)
+	}
+}
+
+// Arrows must not double as "activate" on rows that have no cycle: the
+// sign-out row sits right above the theme row.
+func TestArrowKeysDoNotFireRowActions(t *testing.T) {
+	tm, _, _ := pairModel(t)
+	tm = gotoSettingRow(t, tm, "signout")
+	for _, k := range []tea.KeyType{tea.KeyLeft, tea.KeyRight} {
+		tm, _ = step(tm, special(k))
+		m := tm.(Model)
+		if m.modal != modalNone || !m.signedIn {
+			t.Fatalf("arrow on the sign-out row must do nothing: modal %d, signedIn %v", m.modal, m.signedIn)
+		}
+	}
+}
+
+// The keep-alive and agent rows must actually reach the SSH manager: both were
+// stored and never read, so toggling them changed nothing but the label.
+func TestSSHSettingRowsReachManager(t *testing.T) {
+	fv := &fakeVault{}
+	mgr := sshx.NewManager(filepath.Join(t.TempDir(), "known_hosts"), true)
+	m := New(Config{
+		VaultPath:   filepath.Join(t.TempDir(), "vault.enc"),
+		VaultExists: func(string) bool { return true },
+		OpenVault:   func(string, []byte) (vaultHandle, error) { return fv, nil },
+		Manager:     mgr,
+	})
+	var tm tea.Model = m
+	tm = send(tm, tea.WindowSizeMsg{Width: 100, Height: 32})
+	tm = typeStr(tm, "pw")
+	tm, cmd := step(tm, special(tea.KeyEnter))
+	tm, _ = step(tm, cmd()) // vaultOpenedMsg → dashboard
+
+	// Unlock alone must reconcile the manager with the persisted setting.
+	on := tm.(Model).settings.Keepalive
+	if mgr.Keepalive() != on {
+		t.Fatalf("unlock should push the stored setting (%v) into the manager, got %v", on, mgr.Keepalive())
+	}
+
+	if agentOn := tm.(Model).settings.Agent; mgr.UseAgent() != agentOn {
+		t.Fatalf("unlock should push the agent setting (%v) into the manager, got %v",
+			agentOn, mgr.UseAgent())
+	}
+
+	tm = gotoSettingRow(t, tm, "agent")
+	agentOn := tm.(Model).settings.Agent
+	tm, _ = step(tm, special(tea.KeyEnter))
+	if got := mgr.UseAgent(); got != !agentOn {
+		t.Fatalf("toggling the agent row should set the manager to %v, got %v", !agentOn, got)
+	}
+
+	tm = gotoSettingRow(t, tm, "keepalive")
+	tm, _ = step(tm, special(tea.KeyEnter))
+	if got := mgr.Keepalive(); got != !on {
+		t.Fatalf("toggling the row should set the manager to %v, got %v", !on, got)
+	}
+	tm, _ = step(tm, special(tea.KeyEnter))
+	if got := mgr.Keepalive(); got != on {
+		t.Fatalf("toggling back should restore %v, got %v", on, got)
+	}
+}
+
+// The telemetry row is gone: wharf sends nothing, and the row implied it did.
+func TestNoTelemetryRow(t *testing.T) {
+	tm, _, _ := pairModel(t)
+	for _, r := range tm.(Model).settingRows() {
+		if r.key == "telemetry" {
+			t.Fatal("the telemetry row should no longer exist")
+		}
+	}
+	tm = send(tm, runes("4"))
+	if strings.Contains(strings.ToLower(tm.View()), "telemetry") {
+		t.Fatalf("settings should not mention telemetry:\n%s", tm.View())
 	}
 }

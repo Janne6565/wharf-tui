@@ -70,3 +70,13 @@ func Next(name string) string {
 	}
 	return Order[0]
 }
+
+// Prev returns the theme before name in the cycle.
+func Prev(name string) string {
+	for i, n := range Order {
+		if n == name {
+			return Order[(i-1+len(Order))%len(Order)]
+		}
+	}
+	return Order[len(Order)-1]
+}

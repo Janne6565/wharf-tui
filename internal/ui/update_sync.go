@@ -359,7 +359,27 @@ func (m Model) signOut() Model {
 	m.email = ""
 	m.syncSt = ssNone
 	m.conflict = nil
+	// The sign-out row is gone from under the cursor; park it on the account
+	// row so the way back in is what the settings tab points at.
+	for i, r := range m.settingRows() {
+		if r.key == "account" {
+			m.setIdx = i
+		}
+	}
 	return m.setToast("signed out — local vault kept", "ok")
+}
+
+// signOutConfirmKey drives the sign-out confirmation opened from the settings
+// tab. Cancelling leaves the pairing untouched.
+func (m Model) signOutConfirmKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "y", "Y", "enter":
+		m.modal = modalNone
+		return m.signOut(), nil
+	case "n", "N", "esc":
+		m.modal = modalNone
+	}
+	return m, nil
 }
 
 // --- conflict modal -----------------------------------------------------------

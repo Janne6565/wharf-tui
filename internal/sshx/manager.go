@@ -12,6 +12,7 @@ import (
 type Manager struct {
 	knownHostsPath string
 	keepalive      bool
+	useAgent       bool
 
 	mu           sync.Mutex
 	sessions     map[string]*Session
@@ -29,9 +30,44 @@ func NewManager(knownHostsPath string, keepalive bool) *Manager {
 	return &Manager{
 		knownHostsPath: knownHostsPath,
 		keepalive:      keepalive,
+		useAgent:       true, // matches DefaultSettings; the UI corrects it on unlock
 		sessions:       make(map[string]*Session),
 		forwards:       make(map[string]*Forward),
 	}
+}
+
+// SetUseAgent controls whether key-mode auth offers the keys held by the local
+// ssh-agent ($SSH_AUTH_SOCK). Off, wharf authenticates from key files and
+// vault keys only. Settable for the same reason as SetKeepalive: the manager
+// predates the vault the preference is stored in.
+func (m *Manager) SetUseAgent(on bool) {
+	m.mu.Lock()
+	m.useAgent = on
+	m.mu.Unlock()
+}
+
+// UseAgent reports whether ssh-agent keys are offered during key-mode auth.
+func (m *Manager) UseAgent() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.useAgent
+}
+
+// SetKeepalive turns the 30s pings on or off. The manager outlives the vault it
+// takes the setting from — it is built before unlock — so this is settable
+// rather than construction-only. Live sessions and forwards observe the change
+// at their next tick; nothing is torn down or restarted.
+func (m *Manager) SetKeepalive(on bool) {
+	m.mu.Lock()
+	m.keepalive = on
+	m.mu.Unlock()
+}
+
+// Keepalive reports whether the 30s pings are enabled.
+func (m *Manager) Keepalive() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.keepalive
 }
 
 // SetNotify wires prompt/lifecycle messages into the UI event loop

@@ -227,9 +227,7 @@ func (f *Forward) start() {
 		f.end(err)
 	}()
 
-	if f.mgr.keepalive {
-		go f.keepaliveLoop()
-	}
+	go f.keepaliveLoop() // checks the setting per tick, like sessions
 }
 
 // acceptLoop accepts connections until the listener fails (which, after Close or
@@ -359,6 +357,9 @@ func (f *Forward) keepaliveLoop() {
 		case <-f.done:
 			return
 		case <-t.C:
+			if !f.mgr.Keepalive() {
+				continue
+			}
 			if _, _, err := f.client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
 				_ = f.Close()
 				return

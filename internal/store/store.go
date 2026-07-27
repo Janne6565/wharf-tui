@@ -60,9 +60,12 @@ func (h Host) Conn() string {
 // Settings are the persisted app preferences (replaces the ad-hoc bool map).
 type Settings struct {
 	Theme     string `json:"theme"`
-	Agent     bool   `json:"agent"`     // ssh-agent forwarding to auth chain
+	Agent     bool   `json:"agent"`     // offer $SSH_AUTH_SOCK keys during key-mode auth
 	Keepalive bool   `json:"keepalive"` // 30s keepalive@openssh.com pings
-	Telemetry bool   `json:"telemetry"`
+	// Telemetry has no reader: wharf collects and sends nothing. The field is
+	// retained only so the cross-implementation vault fixtures (web, mobile)
+	// stay byte-identical; its settings row was removed.
+	Telemetry bool `json:"telemetry"`
 }
 
 // DefaultSettings for a fresh vault.

@@ -256,7 +256,20 @@ func (m *Model) openStoreFromVault() error {
 	if m.settings.Theme != "" {
 		m.themeName = m.settings.Theme
 	}
+	m.applySSHSettings()
 	return nil
+}
+
+// applySSHSettings pushes the persisted SSH preferences into the manager. The
+// manager is built in main before there is a vault to read them from, so it
+// starts on the defaults and is corrected here (on unlock) and again whenever
+// one of the rows is toggled.
+func (m Model) applySSHSettings() {
+	if m.mgr == nil {
+		return
+	}
+	m.mgr.SetKeepalive(m.settings.Keepalive)
+	m.mgr.SetUseAgent(m.settings.Agent)
 }
 
 // afterUnlockCmds fans out probes, a key scan, and the sync-session resume

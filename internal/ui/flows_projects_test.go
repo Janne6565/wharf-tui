@@ -321,10 +321,7 @@ func projectModel(t *testing.T) (tea.Model, *fakeVault, *fakeBackend) {
 	tm, _ = step(tm, cmd()) // vaultOpenedMsg → dashboard, engine built
 
 	// Pair via the account row (settings tab).
-	tm = send(tm, runes("4"))
-	tm = send(tm, runes("j"))
-	tm = send(tm, runes("j"))
-	tm = send(tm, runes("j")) // Account row
+	tm = gotoSettingRow(t, tm, "account")
 	tm, _ = step(tm, special(tea.KeyEnter))
 	tm, _ = step(tm, special(tea.KeyEnter)) // intro → code entry
 	tm = typeStr(tm, "K7PQ-M2XR")

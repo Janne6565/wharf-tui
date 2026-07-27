@@ -112,6 +112,8 @@ func (m Model) modalKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		return m.forwardsKey(key)
 	case modalKeyUnsync:
 		return m.keyUnsyncConfirmKey(key)
+	case modalSignOut:
+		return m.signOutConfirmKey(key)
 	}
 	return m, nil
 }

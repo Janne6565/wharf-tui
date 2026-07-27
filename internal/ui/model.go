@@ -64,6 +64,7 @@ const (
 	modalForwardForm     // -L/-R/-D port-forward form (real mode; k9s-style, never persisted)
 	modalForwards        // active-forwards overlay (F)
 	modalKeyUnsync       // confirm removing a synced key from the vault (keys tab)
+	modalSignOut         // confirm unpairing this device (settings tab)
 )
 
 // syncState is the rendered sync status (header indicator). It is pure
@@ -125,21 +126,68 @@ type session struct {
 	input string
 }
 
-// settingDef describes one row on the settings screen.
+// settingDef describes one row on the settings screen. A row with act unset is
+// status only: the cursor skips it, so enter is never a no-op.
 type settingDef struct {
 	key   string
 	label string
+	act   bool
 }
 
-// settingDefs drives the settings screen. The mosh row was dropped (port
-// forwarding / mosh are roadmap); an "account" action row was added.
-var settingDefs = []settingDef{
-	{"agent", "SSH agent forwarding"},
-	{"keepalive", "Keep-alive packets (30s)"},
-	{"telemetry", "Anonymous usage telemetry"},
-	{"account", "Account"},
-	{"password", "Master password"},
-	{"theme", "Theme"},
+// settingRows drives the settings screen for the current account state. The
+// mosh row was dropped (port forwarding / mosh are roadmap), as was the
+// "Anonymous usage telemetry" row: wharf collects and sends nothing, so the
+// row claimed a feature that does not exist and let people believe they had
+// switched something off. store.Settings keeps the field so the committed
+// cross-implementation vault fixtures stay byte-identical. Signing in and
+// signing out are deliberately *different rows*: while signed in, "Account" is
+// a status row showing the address and a separate "Sign out" row carries the
+// action, so enter on the account line can never unpair the device by
+// surprise. Signed out there is nothing to show, so the one row signs in.
+func (m Model) settingRows() []settingDef {
+	rows := []settingDef{
+		{key: "agent", label: "Use SSH agent keys", act: true},
+		{key: "keepalive", label: "Keep-alive packets (30s)", act: true},
+	}
+	if m.signedIn {
+		rows = append(rows,
+			settingDef{key: "account", label: "Account"},
+			settingDef{key: "signout", label: "Sign out", act: true})
+	} else {
+		rows = append(rows, settingDef{key: "account", label: "Account", act: true})
+	}
+	return append(rows,
+		settingDef{key: "password", label: "Master password", act: true},
+		settingDef{key: "theme", label: "Theme", act: true})
+}
+
+// settingIdx is the effective settings cursor: clamped into range and nudged
+// off a status-only row. Signing in or out changes the row set underneath a
+// stored index, so this is resolved at use rather than written back.
+func (m Model) settingIdx() int {
+	rows := m.settingRows()
+	i := clampIdx(m.setIdx, len(rows))
+	for i+1 < len(rows) && !rows[i].act {
+		i++
+	}
+	return i
+}
+
+// settingCursor returns the index d actionable rows away, skipping status rows.
+func (m Model) settingCursor(d int) int {
+	rows := m.settingRows()
+	start := m.settingIdx()
+	i := start
+	for {
+		n := clampIdx(i+d, len(rows))
+		if n == i {
+			return start // ran into the edge with nothing actionable ahead
+		}
+		i = n
+		if rows[i].act {
+			return i
+		}
+	}
 }
 
 var tabNames = []string{"hosts", "projects", "keys", "settings"}

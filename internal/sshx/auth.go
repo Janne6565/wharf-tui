@@ -32,10 +32,12 @@ func (m *Manager) authMethods(ctx context.Context, hs HostSpec) []ssh.AuthMethod
 	} else {
 		// Key mode (default; also legacy "" / "auto"): agent + key file, no
 		// password. Auto's old password fallback is gone.
-		if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
-			if conn, err := net.Dial("unix", sock); err == nil {
-				ag := agent.NewClient(conn)
-				methods = append(methods, ssh.PublicKeysCallback(ag.Signers))
+		if m.UseAgent() {
+			if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
+				if conn, err := net.Dial("unix", sock); err == nil {
+					ag := agent.NewClient(conn)
+					methods = append(methods, ssh.PublicKeysCallback(ag.Signers))
+				}
 			}
 		}
 

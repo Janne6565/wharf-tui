@@ -53,6 +53,8 @@ func (m Model) modalView(t theme.Theme) []string {
 		return m.forwardsView(t)
 	case modalKeyUnsync:
 		return m.keyUnsyncView(t)
+	case modalSignOut:
+		return m.signOutView(t)
 	}
 	return m.mainView(t)
 }
@@ -240,6 +242,30 @@ func (m Model) keyUnsyncView(t theme.Theme) []string {
 			stl(t.Dim, t.Panel).Render("/") + stl(t.Hi, t.Panel).Render("n") + stl(t.Dim, t.Panel).Render(" cancel"),
 	}
 	return m.modalBox(t, "remove from vault", "warn", body)
+}
+
+// --- sign out ---------------------------------------------------------------
+
+// signOutView spells out what signing out does and does not touch: the whole
+// point of the confirmation is that "sign out" reads like it might take the
+// vault with it, and that getting back in is a browser round-trip.
+func (m Model) signOutView(t theme.Theme) []string {
+	who := m.email
+	if who == "" {
+		who = "this device"
+	}
+	body := []string{
+		stl(t.Fg, t.Panel).Render("Stop syncing ") + stl(t.Hi, t.Panel).Render(who) + stl(t.Fg, t.Panel).Render("?"),
+		"",
+		stl(t.Ok, t.Panel).Render("·") + stl(t.Dim, t.Panel).Render(" your local vault, hosts and keys stay on this machine"),
+		stl(t.Warn, t.Panel).Render("·") + stl(t.Dim, t.Panel).Render(" shared projects become unavailable until you sign in again"),
+		stl(t.Warn, t.Panel).Render("·") + stl(t.Dim, t.Panel).Render(" signing back in needs a fresh browser pairing code"),
+		"",
+		stl(t.Hi, t.Panel).Render("y") + stl(t.Dim, t.Panel).Render("/") + stl(t.Hi, t.Panel).Render("enter") +
+			stl(t.Dim, t.Panel).Render(" sign out · ") + stl(t.Hi, t.Panel).Render("esc") +
+			stl(t.Dim, t.Panel).Render("/") + stl(t.Hi, t.Panel).Render("n") + stl(t.Dim, t.Panel).Render(" cancel"),
+	}
+	return m.modalBox(t, "sign out", "warn", body)
 }
 
 // --- connecting -------------------------------------------------------------

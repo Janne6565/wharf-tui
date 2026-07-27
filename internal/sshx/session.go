@@ -51,9 +51,9 @@ func (s *Session) start(stdout, stderr io.Reader) {
 		s.end(err)
 	}()
 
-	if s.mgr.keepalive {
-		go s.keepaliveLoop()
-	}
+	// The loop always runs and checks the setting per tick, so toggling
+	// keepalives in settings takes effect on sessions that are already open.
+	go s.keepaliveLoop()
 }
 
 // end marks the session dead exactly once: closes done, unregisters from the
@@ -79,6 +79,9 @@ func (s *Session) keepaliveLoop() {
 		case <-s.done:
 			return
 		case <-t.C:
+			if !s.mgr.Keepalive() {
+				continue
+			}
 			if _, _, err := s.client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
 				_ = s.Close()
 				return
