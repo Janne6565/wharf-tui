@@ -35,6 +35,17 @@ func RuntimeDir() (string, error) {
 			base = filepath.Join("/tmp", "wharf-"+strconv.Itoa(os.Getuid()))
 		}
 	}
+	// The parent is checked too, not just the socket directory itself. Under a
+	// world-writable /tmp anyone can create /tmp/wharf-<uid> first; owning that
+	// parent lets them rename or replace "sessions" underneath us however
+	// carefully we create it. Validating only the leaf is a lock on a door in a
+	// wall someone else built.
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", fmt.Errorf("sessd: creating %s: %w", base, err)
+	}
+	if err := checkPrivateParent(base); err != nil {
+		return "", err
+	}
 	dir := filepath.Join(base, "sessions")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("sessd: creating %s: %w", dir, err)
@@ -46,6 +57,30 @@ func RuntimeDir() (string, error) {
 		return "", err
 	}
 	return dir, nil
+}
+
+// checkPrivateParent enforces that the directory holding the socket directory
+// is ours and not writable by anyone else. Unlike checkPrivateDir it never
+// chmods: the base can be user-chosen (WHARF_RUNTIME_DIR), and silently
+// tightening a directory wharf was merely pointed at is not wharf's call —
+// saying why it refuses is.
+func checkPrivateParent(dir string) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("sessd: checking %s: %w", dir, err)
+	}
+	if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("sessd: %s is not a directory", dir)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("sessd: %s is owned by uid %d, not %d — refusing to keep "+
+			"session sockets under a directory another user controls", dir, st.Uid, os.Getuid())
+	}
+	if perm := fi.Mode().Perm(); perm&0o022 != 0 {
+		return fmt.Errorf("sessd: %s is writable by group or others (%#o); "+
+			"chmod 700 it or point WHARF_RUNTIME_DIR somewhere private", dir, perm)
+	}
+	return nil
 }
 
 // checkPrivateDir enforces that dir is a real directory, owned by this user,
@@ -126,6 +161,12 @@ func listSockets(dir string) ([]string, error) {
 	}
 	return out, nil
 }
+
+// logPathFor is where a session host's stderr goes: beside its socket, with a
+// suffix listSockets ignores. A child is spawned with no terminal, so without
+// this a panic or a failed Serve vanishes and the user is left with a session
+// that simply never appeared.
+func logPathFor(sockPath string) string { return sockPath + ".log" }
 
 // sessionIDFor derives a session's stable identifier from its socket path: the
 // basename without the suffix. It is unique by construction (socketPath adds

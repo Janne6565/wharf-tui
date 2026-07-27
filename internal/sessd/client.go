@@ -25,6 +25,12 @@ const SessionHostFlag = "--session-host"
 // control connection before the spawn is called a failure.
 const dialTimeout = 5 * time.Second
 
+// adoptTimeout bounds each probe during adoption. Adoption runs before the UI
+// paints, once per socket, so this is startup latency the user waits on: a
+// local socket answers in microseconds, and anything that does not is not worth
+// blocking a cold start for.
+const adoptTimeout = 1500 * time.Millisecond
+
 // Pool is the TUI-side view of every session host: the ones it spawned and the
 // ones it adopted from a previous run. It mirrors the slice of *sshx.Manager
 // the UI used to consume for sessions, so prompts and lifecycle still arrive as
@@ -64,6 +70,23 @@ func NewPool(dir, knownHosts string, keepalive bool) *Pool {
 // SetExecutable overrides the binary spawned for new sessions (tests point this
 // at a built test binary).
 func (p *Pool) SetExecutable(path string) { p.exe = path }
+
+// SetKeepalive controls the keepalive policy handed to session hosts spawned
+// from now on. The pool is built before the vault is unlocked, so the value it
+// starts with is a default the UI corrects; children already running keep the
+// policy they were dialed with, since it lives in their own manager.
+func (p *Pool) SetKeepalive(on bool) {
+	p.mu.Lock()
+	p.keepalive = on
+	p.mu.Unlock()
+}
+
+// Keepalive reports the policy new sessions will be dialed with.
+func (p *Pool) Keepalive() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.keepalive
+}
 
 // SetNotify wires prompt and lifecycle messages into the UI event loop, exactly
 // as sshx.Manager.SetNotify does.
@@ -148,17 +171,36 @@ func (p *Pool) Adopt() (int, error) {
 	}
 	var n int
 	for _, sock := range socks {
-		c, err := net.DialTimeout("unix", sock, dialTimeout)
+		c, err := net.DialTimeout("unix", sock, adoptTimeout)
 		if err != nil {
-			// Nobody is listening: the host died without cleaning up.
+			// Nobody is listening: the host died without cleaning up. Its log
+			// goes too — Serve only leaves one behind after a crash, and it has
+			// already outlived anything that could read it.
 			_ = os.Remove(sock)
+			_ = os.Remove(logPathFor(sock))
 			continue
 		}
 		r := newRemote(p, sock, c)
-		info, err := r.requestInfo()
+		info, err := r.requestInfo(adoptTimeout)
 		switch {
-		case err != nil, !info.Alive, info.Protocol != protocolVersion:
+		case err != nil:
+			// Reachable but not answering. Leave the socket: the host's own
+			// watchdog retires a purposeless one, and a busy host deserves
+			// another chance on the next run rather than being unlinked here.
 			r.closeConn()
+			continue
+		case info.Protocol != protocolVersion:
+			// A different build's host. Its session may well be real, so the
+			// socket stays; this wharf just cannot frame a stream to it.
+			r.closeConn()
+			continue
+		case !info.Alive:
+			// Reachable, understood, and has nothing running: retire it, or it
+			// is re-probed on every start for the rest of the login session.
+			_ = r.writeFrame(kindKill, nil)
+			r.closeConn()
+			_ = os.Remove(sock)
+			_ = os.Remove(logPathFor(sock))
 			continue
 		}
 		r.spec = sshx.HostSpec{
@@ -221,6 +263,13 @@ func (p *Pool) Dial(ctx context.Context, spec sshx.HostSpec, cols, rows int) (*R
 	cmd := exec.Command(exe, SessionHostFlag, sock)
 	cmd.ExtraFiles = []*os.File{lnFile} // becomes fd 3 in the child
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	// The child has no terminal, so its stderr goes to a file beside the socket
+	// and Serve deletes it on a clean exit. Failing to open it is not worth
+	// failing the spawn over — it only costs diagnosability.
+	if logf, err := os.OpenFile(logPathFor(sock), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		cmd.Stderr = logf
+		defer logf.Close()
+	}
 	// A new session detaches the child from the terminal, so quitting the TUI
 	// (or closing the window) does not take the shell down with it.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -243,7 +292,7 @@ func (p *Pool) Dial(ctx context.Context, spec sshx.HostSpec, cols, rows int) (*R
 	r := newRemote(p, sock, conn)
 	r.spec = spec
 	r.startedAt = time.Now()
-	if err := r.dial(ctx, spec, cols, rows, p.knownHosts, p.keepalive); err != nil {
+	if err := r.dial(ctx, spec, cols, rows, p.knownHosts, p.Keepalive()); err != nil {
 		r.closeConn()
 		return nil, err
 	}
@@ -511,8 +560,8 @@ func (r *Remote) dial(ctx context.Context, spec sshx.HostSpec, cols, rows int, k
 	}
 }
 
-func (r *Remote) requestInfo() (infoResponse, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+func (r *Remote) requestInfo(timeout time.Duration) (infoResponse, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if err := r.writeFrame(kindInfo, nil); err != nil {
 		return infoResponse{}, err

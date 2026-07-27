@@ -109,14 +109,14 @@ func (s *Session) Done() <-chan struct{} { return s.done }
 // session-host child process can serve the same stream over a socket instead
 // of over its own terminal. Attach itself stays the in-process path.
 
-// Snapshot copies the session's scrollback ring in write order. It is the
-// replay a client renders before live output starts.
-func (s *Session) Snapshot() []byte { return s.ring.Snapshot() }
-
-// SetLive routes remote output to w for as long as it stays installed, in
-// addition to the ring. A writer that errors is dropped by the tee, so a dead
-// client never stalls the session.
-func (s *Session) SetLive(w io.Writer) { s.tee.setLive(w) }
+// GoLive hands replay the scrollback and then routes remote output to w for as
+// long as it stays installed. Both happen under the tee lock, so no output can
+// fall between the replay and the handover. replay returning an error aborts
+// the attach and leaves the previous live writer in place. A writer that errors
+// later is dropped by the tee, so a dead client never stalls the session.
+func (s *Session) GoLive(w io.Writer, replay func([]byte) error) error {
+	return s.tee.goLive(w, replay)
+}
 
 // UnsetLive stops routing output to w, unless a later attach has already
 // replaced it.

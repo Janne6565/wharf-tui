@@ -202,7 +202,7 @@ func TestDialRunsSessionInChildProcess(t *testing.T) {
 		t.Fatalf("ForHost should find the session, got %d", len(hs))
 	}
 
-	info, err := r.requestInfo()
+	info, err := r.requestInfo(dialTimeout)
 	if err != nil {
 		t.Fatalf("info: %v", err)
 	}
@@ -460,7 +460,7 @@ func TestReadFrameRejectsOversizedLength(t *testing.T) {
 
 func mustInfo(t *testing.T, r *Remote) infoResponse {
 	t.Helper()
-	info, err := r.requestInfo()
+	info, err := r.requestInfo(dialTimeout)
 	if err != nil {
 		t.Fatalf("info: %v", err)
 	}

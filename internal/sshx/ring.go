@@ -83,29 +83,34 @@ type tee struct {
 
 func newTee(r *ring) *tee { return &tee{ring: r} }
 
+// Write records into the ring and mirrors to the live writer under one lock, so
+// that goLive can define an exact handover point: every chunk is either in the
+// replay it hands out or delivered live afterwards, never both and never
+// neither. The lock costs nothing in practice — a single pump goroutine writes.
 func (t *tee) Write(p []byte) (int, error) {
-	t.ring.Write(p)
 	t.mu.Lock()
-	w := t.live
-	t.mu.Unlock()
-	if w != nil {
-		if _, err := w.Write(p); err != nil {
-			// Drop this writer but only if it is still the current one, so we
-			// don't clobber a concurrent re-attach.
-			t.mu.Lock()
-			if t.live == w {
-				t.live = nil
-			}
-			t.mu.Unlock()
+	defer t.mu.Unlock()
+	t.ring.Write(p)
+	if t.live != nil {
+		if _, err := t.live.Write(p); err != nil {
+			t.live = nil // a broken terminal must not stop the ring recording
 		}
 	}
 	return len(p), nil
 }
 
-func (t *tee) setLive(w io.Writer) {
+// goLive replays the scrollback to w and installs it as the live writer, both
+// under the tee lock. Output arriving meanwhile queues behind the replay rather
+// than interleaving with it or slipping through the gap between the two — the
+// gap a plain Snapshot-then-setLive leaves open.
+func (t *tee) goLive(w io.Writer, replay func([]byte) error) error {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err := replay(t.ring.Snapshot()); err != nil {
+		return err
+	}
 	t.live = w
-	t.mu.Unlock()
+	return nil
 }
 
 // unsetLive clears the live writer if it is still w (an attach clearing its

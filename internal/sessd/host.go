@@ -48,7 +48,20 @@ type conn struct {
 	wmu sync.Mutex
 
 	replies chan promptReply // answers to prompts this client was asked
+
+	// closed fires when this client goes away. Anything waiting on the client —
+	// an outstanding prompt, the dial it is driving — must select on it, or a
+	// TUI that quits mid-prompt strands this process forever.
+	closed    chan struct{}
+	closeOnce sync.Once
 }
+
+// idleGrace is how long a host may sit with no session and no clients before it
+// gives up and exits. It has to outlast the spawn handshake (the parent dials
+// within dialTimeout), and exists so a child can never outlive the run that
+// spawned it without having anything to show for itself. A var only so tests
+// can shrink it; nothing outside this package changes it.
+var idleGrace = 30 * time.Second
 
 // Serve runs the session host on ln until the session ends or a client kills
 // it. sockPath is unlinked on return. Serve owns ln and closes it.
@@ -64,11 +77,15 @@ func Serve(ln net.Listener, sockPath string) error {
 		done:      make(chan struct{}),
 	}
 	go h.acceptLoop()
+	go h.watchdog()
 	<-h.done
 
 	_ = ln.Close()
 	if sockPath != "" {
 		_ = os.Remove(sockPath)
+		// Returning normally means nothing went wrong worth keeping: only a
+		// crash should leave a log behind.
+		_ = os.Remove(logPathFor(sockPath))
 	}
 	h.closeClients()
 	return nil
@@ -80,7 +97,12 @@ func (h *Host) acceptLoop() {
 		if err != nil {
 			return // listener closed on shutdown
 		}
-		cn := &conn{net: c, host: h, replies: make(chan promptReply, 1)}
+		cn := &conn{
+			net:     c,
+			host:    h,
+			replies: make(chan promptReply, 1),
+			closed:  make(chan struct{}),
+		}
 		h.mu.Lock()
 		h.conns[cn] = struct{}{}
 		h.mu.Unlock()
@@ -133,12 +155,49 @@ func (h *Host) drop(c *conn) {
 	if h.dialConn == c {
 		h.dialConn = nil
 	}
-	sess := h.sess
+	sess, idle := h.sess, len(h.conns) == 0
 	h.mu.Unlock()
+	// Unblock anything waiting on this client: an outstanding prompt, and the
+	// dial it was driving.
+	c.closeOnce.Do(func() { close(c.closed) })
 	if sess != nil {
 		sess.UnsetLive(c.outWriter())
 	}
 	_ = c.net.Close()
+	// The last client left before there was ever a session: nothing can arrive
+	// on this socket that would give the process a purpose again, so go now
+	// rather than waiting out idleGrace.
+	if sess == nil && idle {
+		h.shutdown(nil)
+	}
+}
+
+// watchdog exits a host that never got a session and has no client to get one
+// from. Without it a spawn whose parent died — or gave up — leaves a process
+// and a socket behind for the rest of the login session, and every later wharf
+// start pays to re-probe it.
+func (h *Host) watchdog() {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	var idleFor time.Duration
+	for {
+		select {
+		case <-h.done:
+			return
+		case <-t.C:
+			h.mu.Lock()
+			idle := h.sess == nil && len(h.conns) == 0
+			h.mu.Unlock()
+			if !idle {
+				idleFor = 0
+				continue
+			}
+			if idleFor += time.Second; idleFor >= idleGrace {
+				h.shutdown(nil)
+				return
+			}
+		}
+	}
 }
 
 // notify receives the engine's messages. Prompts are relayed to the dialing
@@ -188,6 +247,8 @@ func (h *Host) relayPrompt(req promptRequest, respond func(promptReply, bool)) {
 	select {
 	case r := <-c.replies:
 		respond(r, true)
+	case <-c.closed:
+		respond(promptReply{}, false)
 	case <-h.done:
 		respond(promptReply{}, false)
 	}
@@ -217,17 +278,22 @@ type connOut conn
 
 func (o *connOut) Write(p []byte) (int, error) {
 	c := (*conn)(o)
+	// Counted up as frames land rather than reported from the loop variable:
+	// p is consumed as it is chunked, so returning len(p) at the end reported
+	// a zero-length write for every call. io.Copy would call that ErrShortWrite.
+	var written int
 	for len(p) > 0 {
 		n := len(p)
 		if n > outChunk {
 			n = outChunk
 		}
 		if err := c.writeFrame(kindOutput, p[:n]); err != nil {
-			return 0, err
+			return written, err
 		}
+		written += n
 		p = p[n:]
 	}
-	return len(p), nil
+	return written, nil
 }
 
 func (c *conn) serve() {
@@ -367,7 +433,21 @@ func (c *conn) dial(req dialRequest) {
 		rows = 24
 	}
 
-	sess, err := mgr.Dial(context.Background(), spec, cols, rows)
+	// The dial belongs to the client that asked for it: if that client gives up
+	// — the TUI quit, the terminal closed — the auth chain must unwind instead
+	// of blocking on a prompt nobody will ever answer. Without this the process
+	// hangs for the rest of the login session.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-c.closed:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	sess, err := mgr.Dial(ctx, spec, cols, rows)
 
 	h.mu.Lock()
 	h.dialing = false
@@ -377,6 +457,17 @@ func (c *conn) dial(req dialRequest) {
 		_ = c.writeJSON(kindError, errorNotice{Err: err.Error()})
 		h.shutdown(nil) // nothing to keep alive; the client reports the error
 		return
+	}
+
+	// The client vanished while the dial was completing: it never learned about
+	// this session, so nothing can ever reattach to it. Close it rather than
+	// leave a shell running that no wharf will claim.
+	select {
+	case <-c.closed:
+		_ = sess.Close()
+		h.shutdown(nil)
+		return
+	default:
 	}
 
 	h.mu.Lock()
@@ -407,18 +498,22 @@ func (c *conn) attach(req attachRequest) {
 	if req.Cols > 0 && req.Rows > 0 {
 		_ = sess.Resize(req.Cols, req.Rows)
 	}
-	// Replay the scrollback before going live so no output falls between the
-	// snapshot and the tee installation.
+	// Replay and handover are one step: output produced while the scrollback is
+	// being sent queues behind it instead of falling into the gap between the
+	// snapshot and the live install.
 	w := c.outWriter()
-	if snap := sess.Snapshot(); len(snap) > 0 {
-		if _, err := w.Write(snap); err != nil {
-			h.mu.Lock()
-			h.attached = nil
-			h.mu.Unlock()
-			return
+	err := sess.GoLive(w, func(snap []byte) error {
+		if len(snap) == 0 {
+			return nil
 		}
+		_, err := w.Write(snap)
+		return err
+	})
+	if err != nil {
+		h.mu.Lock()
+		h.attached = nil
+		h.mu.Unlock()
 	}
-	sess.SetLive(w)
 }
 
 func (c *conn) detach() {

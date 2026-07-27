@@ -8,8 +8,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// noKillArmed is the pickKill value meaning "no row is armed".
-const noKillArmed = -1
+// noKillArmed is the pickKill value meaning "nothing is armed".
+const noKillArmed = ""
 
 // hostSessions lists the live sessions for a host, oldest first.
 func (m Model) hostSessions(hostID string) []*sessd.Remote {
@@ -125,8 +125,11 @@ func (m Model) sessionPickerKey(key string) (tea.Model, tea.Cmd) {
 		if m.pickIdx >= len(sessions) {
 			return m, nil // the "new session" row has nothing to kill
 		}
-		if m.pickKill != m.pickIdx {
-			m.pickKill = m.pickIdx
+		// Arm the session itself: between the two presses a session may end and
+		// the list shift under the cursor, and killing whatever now sits at the
+		// armed index is exactly the accident the two presses exist to prevent.
+		if s := sessions[m.pickIdx]; m.pickKill != s.ID() {
+			m.pickKill = s.ID()
 			return m, nil
 		}
 		return m.killPicked(sessions[m.pickIdx])

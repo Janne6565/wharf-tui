@@ -326,6 +326,11 @@ func resetInstance(vaultPath string, in io.Reader, out io.Writer) error {
 		fmt.Fprintln(out, "  •", p)
 	}
 	fmt.Fprintln(out)
+	if n := runningSessions(); n > 0 {
+		fmt.Fprintln(out)
+		fmt.Fprintf(out, "It also closes %s still running on this machine.\n", plural(n, "background session"))
+	}
+	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Every saved host, key and stored password goes with it. Your recovery code")
 	fmt.Fprintln(out, "cannot bring it back — it unlocks a vault file, and there will not be one.")
 	fmt.Fprintln(out, "If this device is signed in, the server's copy is untouched: sign in again")
@@ -342,6 +347,14 @@ func resetInstance(vaultPath string, in io.Reader, out io.Writer) error {
 		return nil
 	}
 
+	// Session hosts are separate processes holding live SSH connections and the
+	// host spec — stored password included — in their memory. Erasing the vault
+	// while they keep running would leave exactly what the reset promises to
+	// erase, on the machine, reachable through a socket.
+	if n := closeRunningSessions(); n > 0 {
+		fmt.Fprintln(out, "closed", plural(n, "background session"))
+	}
+
 	var failed []string
 	for _, p := range targets {
 		if err := os.RemoveAll(p); err != nil {
@@ -355,6 +368,41 @@ func resetInstance(vaultPath string, in io.Reader, out io.Writer) error {
 	}
 	fmt.Fprintln(out, "wharf: reset complete — the next run starts at vault creation")
 	return nil
+}
+
+// runningSessions counts the session hosts alive on this machine, for the reset
+// confirmation. It never fails the reset: a runtime directory that cannot be
+// read simply reports nothing to close.
+func runningSessions() int {
+	dir, err := sessd.RuntimeDir()
+	if err != nil {
+		return 0
+	}
+	pool := sessd.NewPool(dir, knownHostsPath(), true)
+	n, _ := pool.Adopt()
+	pool.Detach()
+	return n
+}
+
+// closeRunningSessions terminates every session host and returns how many it
+// closed.
+func closeRunningSessions() int {
+	dir, err := sessd.RuntimeDir()
+	if err != nil {
+		return 0
+	}
+	pool := sessd.NewPool(dir, knownHostsPath(), true)
+	n, _ := pool.Adopt()
+	pool.CloseAll()
+	return n
+}
+
+// plural renders "1 thing" / "3 things".
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // printDoctor dumps the resolved environment: what to paste into a bug report.

@@ -262,11 +262,15 @@ func (m *Model) openStoreFromVault() error {
 // starts on the defaults and is corrected here (on unlock) and again whenever
 // one of the rows is toggled.
 func (m Model) applySSHSettings() {
-	if m.mgr == nil {
-		return
+	if m.mgr != nil {
+		m.mgr.SetKeepalive(m.settings.Keepalive)
+		m.mgr.SetUseAgent(m.settings.Agent)
 	}
-	m.mgr.SetKeepalive(m.settings.Keepalive)
-	m.mgr.SetUseAgent(m.settings.Agent)
+	// Sessions live in child processes dialed by the pool, so the same
+	// preference has to reach it or the row would only govern port forwards.
+	if m.pool != nil {
+		m.pool.SetKeepalive(m.settings.Keepalive)
+	}
 }
 
 // afterUnlockCmds fans out probes, a key scan, and the sync-session resume

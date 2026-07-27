@@ -379,10 +379,12 @@ type Model struct {
 	// Session picker: shown when connecting to a host that already has one or
 	// more sessions open. pickHost is the host being connected to, pickIdx the
 	// highlighted row (len(sessions) is the "new session" row) and pickKill the
-	// row armed for a kill, so x never terminates a shell on one keypress.
+	// *session* armed for a kill, so x never terminates a shell on one keypress.
+	// It is an ID, not a row: sessions end on their own while the picker is
+	// open, and an index would silently come to mean a different shell.
 	pickHost store.Host
 	pickIdx  int
-	pickKill int
+	pickKill string
 
 	// --- port forwards (real mode; k9s-style, nothing persisted) ---
 	fwdVals     [ffCount]string             // forward-form buffers (see ff* indices)

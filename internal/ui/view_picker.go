@@ -37,7 +37,7 @@ func (m Model) sessionPickerView(t theme.Theme) []string {
 			stl(t.Hi, bg).Render(padTo2(trunc(label, 18), 18)) +
 			stl(t.Dim, bg).Render(padTo2("started "+sessionAge(s.StartedAt()), 17))
 		switch {
-		case m.pickKill == i:
+		case m.pickKill != noKillArmed && m.pickKill == s.ID():
 			row += stl(t.Err, bg).Render("press x again to kill")
 		case !s.Alive():
 			row += stl(t.Err, bg).Render("ended")

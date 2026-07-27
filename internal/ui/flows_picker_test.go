@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Janne6565/wharf-tui/internal/sessd"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
@@ -88,8 +89,8 @@ func TestPickerKillNeedsTwoPresses(t *testing.T) {
 
 	before := len(got.hostSessions(h.ID))
 	got = send(got, runes("x")).(Model)
-	if got.pickKill != 0 {
-		t.Fatal("the first x should only arm the row")
+	if got.pickKill != got.pickerSessions()[0].ID() {
+		t.Fatal("the first x should only arm the selected session")
 	}
 	if len(got.hostSessions(h.ID)) != before {
 		t.Fatal("the first x must not kill anything")
@@ -198,4 +199,51 @@ func fakePool(t *testing.T, hostID string, n int) *sessd.Pool {
 	}
 	t.Cleanup(pool.CloseAll)
 	return pool
+}
+
+// Arming a kill follows the session, not the row. Sessions end on their own
+// while the picker is open, so if the list shifts between the two presses, an
+// index-based arm would silently point at a different shell — and the second x
+// would kill it with no arming step at all.
+func TestPickerKillArmsTheSessionNotTheRow(t *testing.T) {
+	m, h := pickerModel(t, 3)
+	next, _ := m.startConnect(h)
+	got := next.(Model)
+
+	// Arm the second session, then let the first one end underneath the cursor.
+	got = send(got, runes("j")).(Model)
+	armed := got.pickerSessions()[1]
+	got = send(got, runes("x")).(Model)
+	if got.pickKill != armed.ID() {
+		t.Fatalf("x should arm session %s, armed %q", armed.ID(), got.pickKill)
+	}
+
+	first := got.pickerSessions()[0]
+	_ = first.Close()
+	waitPicker(t, &got, func(m Model) bool { return len(m.pickerSessions()) == 2 })
+
+	// Row 1 is now a different session; the armed one moved to row 0.
+	if now := got.pickerSessions()[1]; now.ID() == armed.ID() {
+		t.Skip("the list did not shift; nothing to assert")
+	}
+	before := len(got.pickerSessions())
+	got = send(got, runes("x")).(Model)
+	if len(got.pickerSessions()) != before {
+		t.Fatal("x on a row that is no longer the armed session must re-arm, not kill")
+	}
+	if got.pickKill != got.pickerSessions()[got.pickIdx].ID() {
+		t.Fatal("the press should have armed whatever now sits under the cursor")
+	}
+}
+
+// waitPicker polls until cond holds against the live pool behind the model.
+func waitPicker(t *testing.T, m *Model, cond func(Model) bool) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		if cond(*m) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for the session list to shrink")
 }

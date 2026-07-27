@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,5 +144,40 @@ func TestResolveVaultPathPrecedence(t *testing.T) {
 	}
 	if got == "" || strings.TrimSpace(got) != got {
 		t.Errorf("a blank $WHARF_VAULT should fall through to the default, got %q", got)
+	}
+}
+
+// The reset confirmation has to mention the background sessions it will close:
+// they are separate processes holding live connections and the host spec —
+// stored password included — that the reset promises to erase.
+func TestResetWarnsAboutRunningSessions(t *testing.T) {
+	dir := t.TempDir()
+	vaultPath := filepath.Join(dir, "vault.enc")
+	if err := os.WriteFile(vaultPath, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// No sessions running: the line must not appear at all rather than saying
+	// "0 background sessions".
+	var out bytes.Buffer
+	if err := resetInstance(vaultPath, strings.NewReader("no\n"), &out); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if strings.Contains(out.String(), "background session") {
+		t.Fatalf("with nothing running the warning should be absent:\n%s", out.String())
+	}
+}
+
+func TestPluralReadsNaturally(t *testing.T) {
+	for _, tc := range []struct {
+		n    int
+		want string
+	}{
+		{1, "1 session"},
+		{2, "2 sessions"},
+		{0, "0 sessions"},
+	} {
+		if got := plural(tc.n, "session"); got != tc.want {
+			t.Fatalf("plural(%d) = %q, want %q", tc.n, got, tc.want)
+		}
 	}
 }

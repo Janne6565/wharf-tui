@@ -68,9 +68,15 @@ func (a *attachCmd) Run() error {
 	defer stopWindow()
 
 	// Replay: clear the screen, dump the ring, then jiggle the window so
-	// full-screen (curses) apps repaint from a clean slate.
+	// full-screen (curses) apps repaint from a clean slate. Replay and handover
+	// are one step: anything the remote emits meanwhile lands after the replay
+	// instead of being dropped in the gap between them.
 	_, _ = io.WriteString(stdout, "\x1b[2J\x1b[H")
-	_, _ = stdout.Write(s.ring.Snapshot())
+	_ = s.tee.goLive(stdout, func(snap []byte) error {
+		_, _ = stdout.Write(snap)
+		return nil
+	})
+	defer s.tee.unsetLive(stdout)
 	s.mu.Lock()
 	rows, cols := s.rows, s.cols
 	s.mu.Unlock()
@@ -78,10 +84,6 @@ func (a *attachCmd) Run() error {
 		_ = s.sess.WindowChange(rows-1, cols)
 		_ = s.sess.WindowChange(rows, cols)
 	}
-
-	// Route remote output to this terminal for the attach lifetime.
-	s.tee.setLive(stdout)
-	defer s.tee.unsetLive(stdout)
 
 	return a.stdinLoop(stdin)
 }

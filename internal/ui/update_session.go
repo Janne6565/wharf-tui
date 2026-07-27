@@ -370,10 +370,25 @@ func (m Model) restoreAfterPrompt() Model {
 
 func (m Model) handleSessionEnded(msg sshx.SessionEndedMsg) (tea.Model, tea.Cmd) {
 	name := m.hostName(msg.HostID)
-	if msg.Err != nil {
-		return m.setToast("session to "+name+" ended: "+msg.Err.Error(), "err"), nil
+	// A host can have several shells open, and the message names only the host.
+	// Saying how many survive answers the question the toast otherwise raises:
+	// "which one — and have I still got the other?"
+	var rest string
+	if n := m.hostSessionCount(msg.HostID); n > 0 {
+		rest = " · " + plural(n, "session") + " still open"
 	}
-	return m.setToast("session to "+name+" closed", "ok"), nil
+	if msg.Err != nil {
+		return m.setToast("session to "+name+" ended: "+msg.Err.Error()+rest, "err"), nil
+	}
+	return m.setToast("session to "+name+" closed"+rest, "ok"), nil
+}
+
+// plural renders "1 session" / "3 sessions".
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return itoa(n) + " " + noun + "s"
 }
 
 // --- connecting / error modals ----------------------------------------------
