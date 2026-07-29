@@ -47,6 +47,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case vaultCreatedMsg, vaultOpenedMsg, vaultRecoveredMsg, vaultResetMsg:
 		return m.handleVaultMsg(msg)
 
+	// account sign-in (gate bootstrap and post-pairing adoption).
+	case accountFetchedMsg:
+		return m.handleAccountFetched(msg)
+	case vaultInstalledMsg:
+		return m.handleVaultInstalled(msg)
+
 	// sync engine results (real mode).
 	case pairedMsg:
 		return m.handlePaired(msg)
@@ -95,6 +101,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.probes[msg.HostID] = msg.Result
 		return m, nil
 	case keysScannedMsg:
+		// Scanned either way: a failed scan is still an answer, and leaving the
+		// tab on its loading placeholder forever would be worse than empty.
+		m.keysScanned = true
 		if msg.err != nil {
 			return m.setToast("key scan failed: "+msg.err.Error(), "err"), nil
 		}
@@ -398,6 +407,11 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 	case "m":
 		if m.tab == 0 && !m.demo {
 			return m.setToast("importing ~/.ssh/config…", "ok"), m.importCmd()
+		}
+	case "p":
+		// Move the selected host between the personal vault and a project.
+		if m.tab == 0 && !m.demo {
+			return m.openMoveProject()
 		}
 	case "R":
 		if m.tab == 0 && !m.demo {

@@ -40,6 +40,7 @@ type fakeVault struct {
 	closed        bool
 	changePwCalls int
 	lastPw        string
+	installs      int
 }
 
 func (f *fakeVault) Payload() []byte { return f.payload }
@@ -106,8 +107,12 @@ func TestCreateFlow(t *testing.T) {
 	var tm tea.Model = m
 	tm = send(tm, tea.WindowSizeMsg{Width: 100, Height: 32})
 
+	if !strings.Contains(tm.View(), "get started") {
+		t.Fatalf("first run should offer local-or-account:\n%s", tm.View())
+	}
+	tm = send(tm, runes("1")) // local vault only
 	if !strings.Contains(tm.View(), "create vault") {
-		t.Fatalf("fresh vault should show create screen:\n%s", tm.View())
+		t.Fatalf("choosing local should show the create screen:\n%s", tm.View())
 	}
 	tm = typeStr(tm, "hunter2")        // password field
 	tm = send(tm, special(tea.KeyTab)) // → confirm field
@@ -134,6 +139,7 @@ func TestCreatePasswordMismatch(t *testing.T) {
 	})
 	var tm tea.Model = m
 	tm = send(tm, tea.WindowSizeMsg{Width: 100, Height: 32})
+	tm = send(tm, runes("1")) // local vault only
 	tm = typeStr(tm, "abc")
 	tm = send(tm, special(tea.KeyTab))
 	tm = typeStr(tm, "xyz")
@@ -623,5 +629,80 @@ func TestKeygenSyncToggleLandsKey(t *testing.T) {
 	ks := tm.(Model).st.Keys()
 	if len(ks) != 1 || ks[0].Name != "id_ed25519" {
 		t.Fatalf("keygen with sync on should land the key in the vault, got %+v", ks)
+	}
+}
+
+// The status-toast row is reserved whether or not a toast is showing. Toasts
+// raise and expire on their own timer, so a row that came and went would
+// resize the panes — and move the row under the cursor — unprompted.
+func TestToastRowIsAlwaysReserved(t *testing.T) {
+	tm, _ := openedModel(t)
+	m := tm.(Model)
+
+	quiet := strings.Split(m.View(), "\n")
+	loud := strings.Split(m.setToast("re-probing hosts…", "ok").View(), "\n")
+
+	if len(quiet) != len(loud) {
+		t.Fatalf("a toast must not change the frame height: %d rows vs %d", len(quiet), len(loud))
+	}
+	changed := 0
+	for i := range quiet {
+		if quiet[i] == loud[i] {
+			continue
+		}
+		changed++
+		if !strings.Contains(loud[i], "re-probing hosts") {
+			t.Fatalf("row %d moved instead of the toast row:\n  quiet: %q\n  loud:  %q", i, quiet[i], loud[i])
+		}
+	}
+	if changed != 1 {
+		t.Fatalf("a toast should change exactly one row, changed %d", changed)
+	}
+}
+
+// In password mode the password is always required — the only choice is
+// whether to store it now or be asked at connect. Labelling the field
+// "(optional)" stated the opposite of the auth mode the user just picked.
+func TestPasswordFieldSaysWhatEmptyMeans(t *testing.T) {
+	tm, _ := openedModel(t)
+	tm = send(tm, runes("a")) // add-host form
+	tm = typeStr(tm, "web1")
+	for tm.(Model).formFocus != fAuth {
+		tm = send(tm, special(tea.KeyTab))
+	}
+	tm = send(tm, special(tea.KeyRight)) // key → password
+	if tm.(Model).formVals[fAuth] != "password" {
+		t.Fatalf("expected password mode, got %q", tm.(Model).formVals[fAuth])
+	}
+
+	v := tm.View()
+	if strings.Contains(v, "(optional)") {
+		t.Fatalf("the password field must not read as optional:\n%s", v)
+	}
+	if !strings.Contains(v, "asked at connect") {
+		t.Fatalf("the field should say what leaving it empty does:\n%s", v)
+	}
+
+	// Typing masks it, and the placeholder gives way.
+	tm = send(tm, special(tea.KeyTab))
+	tm = typeStr(tm, "hunter2")
+	v = tm.View()
+	if strings.Contains(v, "asked at connect") || !strings.Contains(v, "•••••••") {
+		t.Fatalf("a typed password should be masked, not hinted:\n%s", v)
+	}
+}
+
+// An empty keygen passphrase writes an unencrypted private key, which
+// "(optional)" did not convey.
+func TestKeygenPassphraseSaysWhatEmptyMeans(t *testing.T) {
+	tm, _ := openedModel(t)
+	tm = send(tm, runes("3")) // keys tab
+	tm = send(tm, runes("g")) // generate
+	v := tm.View()
+	if strings.Contains(v, "(optional)") {
+		t.Fatalf("the passphrase field should name the consequence:\n%s", v)
+	}
+	if !strings.Contains(v, "unencrypted") {
+		t.Fatalf("an empty passphrase means an unencrypted key; say so:\n%s", v)
 	}
 }

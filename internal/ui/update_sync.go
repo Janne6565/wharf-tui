@@ -58,10 +58,10 @@ func (m Model) initSync(pw string) Model {
 	if err != nil {
 		return m // closed vault — no sync this session
 	}
-	apiClient := m.syncAPI
-	if apiClient == nil {
-		apiClient = api.New(api.BaseURL())
-	}
+	// Memoized on the model, not local to this call: the engine's client holds
+	// the session tokens, and the sign-in adoption calls Me/GetVault outside
+	// the engine. A second client would carry no tokens and 401 on both.
+	apiClient := m.apiClient()
 	readBlob := m.syncReadBlob
 	if readBlob == nil {
 		path := m.vaultPath
@@ -199,13 +199,14 @@ func (m Model) handlePaired(msg pairedMsg) (tea.Model, tea.Cmd) {
 	m.email = msg.email
 	m.authErr = ""
 	m.code = ""
-	m.authStep = 0
-	if m.screen == scAuth {
-		m.screen = scMain
-		m.tab = m.postAuthTab
-	}
-	m = m.setToast("signed in as "+msg.email, "ok")
-	return m.startSync()
+	// Pairing is only half the job: this machine has a local vault with its own
+	// password and its own recovery code, and the account has a vault with its
+	// own. Adopting the account's — rather than pushing ours over it — is what
+	// keeps a single password and a single recovery code valid everywhere
+	// (see update_signin.go).
+	m.authStep = 2
+	m.syncSt = ssSyncing
+	return m, m.adoptAccountVaultCmd(true)
 }
 
 // pairErrText renders a pairing failure for the code screen.
@@ -247,7 +248,11 @@ func (m Model) handleSessionResumed(msg sessionResumedMsg) (tea.Model, tea.Cmd) 
 	}
 	m.signedIn = true
 	m.email = msg.email
-	return m.startSync()
+	m, syncCmd := m.startSync()
+	// Projects load with the session, not with the projects tab: the hosts tab
+	// merges project hosts in, and "move to project" needs the list.
+	m, projCmd := m.bootstrapProjects()
+	return m, tea.Batch(syncCmd, projCmd)
 }
 
 func (m Model) handleSyncDone(msg syncDoneMsg) (tea.Model, tea.Cmd) {
@@ -280,6 +285,14 @@ func (m Model) handleSyncDone(msg syncDoneMsg) (tea.Model, tea.Cmd) {
 	case res.Err != nil:
 		m.syncSt = ssOffline
 		if errors.Is(res.Err, vault.ErrWrongSecret) {
+			// The account vault answers to a different master password than
+			// this machine's. That used to be terminal — sync simply stayed
+			// wedged forever. It is recoverable: adopt the account vault (see
+			// update_signin.go), which asks for its password and merges the
+			// local hosts in. Skipped if an adoption is already under way.
+			if m.boot == nil && m.vault != nil {
+				return m, m.adoptAccountVaultCmd(false)
+			}
 			return m.setToast("remote vault uses a different master password — cannot sync", "err"), nil
 		}
 		return m, nil
@@ -359,6 +372,7 @@ func (m Model) signOut() Model {
 	m.email = ""
 	m.syncSt = ssNone
 	m.conflict = nil
+	m.projectsLoaded = false
 	// The sign-out row is gone from under the cursor; park it on the account
 	// row so the way back in is what the settings tab points at.
 	for i, r := range m.settingRows() {

@@ -249,3 +249,63 @@ func TestGoldenHeader(t *testing.T) {
 		t.Fatalf("headerLen = %d, want 218", headerLen)
 	}
 }
+
+// TestInstallBlobKeepsBothSlots is the guarantee the account sign-in flow rests
+// on: installing an account's blob as the local vault carries the *whole*
+// header over, so the account's master password and the account's recovery
+// code both keep working on this machine. Re-sealing the payload into a
+// locally created file instead would leave the device with a recovery code the
+// server has never heard of.
+func TestInstallBlobKeepsBothSlots(t *testing.T) {
+	dir := t.TempDir()
+	accountPath := filepath.Join(dir, "account.enc")
+	acc, code, err := CreateWithParams(accountPath, []byte("account-pw"), testParams)
+	if err != nil {
+		t.Fatalf("CreateWithParams: %v", err)
+	}
+	if err := acc.Save([]byte(`{"schema":3,"hosts":[]}`)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := acc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	blob, err := os.ReadFile(accountPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	localPath := filepath.Join(dir, "local.enc")
+	if _, _, err := CreateWithParams(localPath, []byte("local-pw"), testParams); err != nil {
+		t.Fatalf("CreateWithParams(local): %v", err)
+	}
+
+	if _, err := InstallBlob(localPath, blob, []byte("wrong")); !errors.Is(err, ErrWrongSecret) {
+		t.Fatalf("InstallBlob with a wrong password = %v, want ErrWrongSecret", err)
+	}
+	if same, err := os.ReadFile(localPath); err != nil || bytes.Equal(same, blob) {
+		t.Fatal("a rejected password must leave the existing vault file untouched")
+	}
+
+	v, err := InstallBlob(localPath, blob, []byte("account-pw"))
+	if err != nil {
+		t.Fatalf("InstallBlob: %v", err)
+	}
+	if got := string(v.Payload()); got != `{"schema":3,"hosts":[]}` {
+		t.Fatalf("installed payload = %q", got)
+	}
+	if err := v.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if on, err := os.ReadFile(localPath); err != nil || !bytes.Equal(on, blob) {
+		t.Fatal("the installed file must be the account blob byte-for-byte")
+	}
+	if _, err := Open(localPath, []byte("local-pw")); !errors.Is(err, ErrWrongSecret) {
+		t.Fatal("the old local password must no longer open the vault")
+	}
+	rec, err := OpenWithRecovery(localPath, code)
+	if err != nil {
+		t.Fatalf("the account's recovery code must open the installed vault: %v", err)
+	}
+	rec.Close()
+}

@@ -255,6 +255,41 @@ func (e *Engine) Pair(ctx context.Context, code string) (email string, err error
 	return as.Email, nil
 }
 
+// Pairing is a device pairing established *outside* the engine, by the
+// first-run sign-in flow: at that point no vault exists yet, so there is no
+// DEK to seal a session file with and no engine to own it. The UI pairs with a
+// bare API client, installs the account's vault blob, and then hands the
+// result here.
+type Pairing struct {
+	RefreshToken string
+	Email        string
+	UserID       string
+	// Version is the remote vault version the installed blob came from, and
+	// Payload its decrypted contents. Recording agreement at that point is what
+	// keeps the first sync a no-op instead of a spurious push.
+	Version int64
+	Payload []byte
+}
+
+// Attach adopts an externally established pairing, persisting the session file
+// under the (now available) vault subkey and recording agreement with the
+// remote vault the caller installed.
+func (e *Engine) Attach(p Pairing) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return errors.New("sync: engine closed")
+	}
+	e.sess = &session{
+		RefreshToken: p.RefreshToken,
+		Email:        p.Email,
+		UserID:       p.UserID,
+		Projects:     map[string]ProjectSyncState{},
+	}
+	e.cfg.API.SetTokens("", p.RefreshToken)
+	return e.commit(p.Version, fingerprint(p.Payload))
+}
+
 // SignOut deletes the session file and forgets the session. The local vault
 // is untouched.
 func (e *Engine) SignOut() {
@@ -264,6 +299,22 @@ func (e *Engine) SignOut() {
 	e.sess = nil
 	e.pending = nil
 	e.cfg.API.SetTokens("", "")
+}
+
+// MasterPassword returns a copy of the retained master password, or nil when
+// the engine has none (closed). It exists for the sign-in adoption path: when a
+// device that already had a local vault pairs with an account, the account's
+// blob has to be opened and installed as the local vault file, and the common
+// case is that both use the same password — asking for it again would be
+// friction for no security gain, since the engine is holding it either way.
+// The caller must zero the copy.
+func (e *Engine) MasterPassword() []byte {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed || e.cfg.Password == nil {
+		return nil
+	}
+	return append([]byte(nil), e.cfg.Password...)
 }
 
 // SetPassword replaces the retained master password, zeroing the old one. The

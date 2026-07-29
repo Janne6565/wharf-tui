@@ -92,3 +92,34 @@ func TestSessionHintOnlyOncePerRun(t *testing.T) {
 		t.Fatal("the hint must not reappear on a later connect")
 	}
 }
+
+// The first-connect primer is where most users learn how to get back to a
+// session, so it has to name the route that always works. alt+1..9 only
+// reaches wharf when the terminal maps Option to Meta — which macOS does not
+// do by default — so S must be listed, and listed before it.
+func TestSessionHintNamesTheSessionsOverlay(t *testing.T) {
+	m, _ := hintModel(t)
+	view := m.View()
+
+	if !strings.Contains(view, "S ") || !strings.Contains(view, "list live sessions") {
+		t.Fatalf("the session hint should name S:\n%s", view)
+	}
+	sIdx := strings.Index(view, "list live sessions")
+	altIdx := strings.Index(view, "alt+1..9")
+	if sIdx < 0 || altIdx < 0 || sIdx > altIdx {
+		t.Fatalf("S should come before the alt+# route (S at %d, alt at %d):\n%s", sIdx, altIdx, view)
+	}
+	if !strings.Contains(view, "needs Option-as-Meta") {
+		t.Fatalf("the alt+# caveat should be stated where it is offered:\n%s", view)
+	}
+}
+
+// The help overlay is the fallback place to look one up.
+func TestHelpListsTheSessionsOverlay(t *testing.T) {
+	tm, _ := openedModel(t)
+	m := tm.(Model)
+	m.helpOpen = true
+	if !strings.Contains(m.View(), "live sessions") {
+		t.Fatalf("the help overlay should list S:\n%s", m.View())
+	}
+}
