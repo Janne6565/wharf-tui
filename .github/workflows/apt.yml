@@ -84,8 +84,11 @@ jobs:
         working-directory: repo
         run: |
           set -euo pipefail
+          # apt-ftparchive writes indexes into these but will not create them,
+          # and without CacheDir it puts its .db files at the filesystem root.
+          mkdir -p dists/stable/main/binary-amd64 dists/stable/main/binary-arm64
           cat > apt-ftparchive.conf <<'EOF'
-          Dir { ArchiveDir "."; };
+          Dir { ArchiveDir "."; CacheDir "."; };
           Default { Packages::Compress ". gzip"; };
           TreeDefault { Directory "pool/"; };
           Tree "dists/stable" {
@@ -106,7 +109,9 @@ jobs:
           # the binary-<arch> index matching their real architecture.
           apt-ftparchive generate apt-ftparchive.conf
           apt-ftparchive -c release.conf release dists/stable > dists/stable/Release
-          rm apt-ftparchive.conf release.conf
+          # The configs and the cache DBs are build inputs, not repository
+          # content — they must not end up served from Pages.
+          rm -f apt-ftparchive.conf release.conf ./*.db
 
       - name: Sign the release
         if: steps.guard.outputs.skip == 'false'
