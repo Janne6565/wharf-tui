@@ -255,7 +255,11 @@ winget:
       owner: Janne6565
       name: winget-pkgs
       branch: "wharf-{{ .Version }}"
-      token: '{{ envOrDefault "WINGET_TOKEN" "" }}'
+      # .Env, not envOrDefault: the template context for a token field does not
+      # define envOrDefault, and this only surfaces at release time — a
+      # `goreleaser check` passes either way. The workflow always exports
+      # WINGET_TOKEN (empty when unset), so the lookup never misses.
+      token: '{{ .Env.WINGET_TOKEN }}'
       pull_request:
         enabled: true
         draft: false
