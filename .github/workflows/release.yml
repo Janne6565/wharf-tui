@@ -58,7 +58,10 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
-          registry-url: https://registry.npmjs.org
+          # Deliberately no registry-url: it writes an .npmrc pinning
+          # _authToken=${NODE_AUTH_TOKEN}, and with trusted publishing there is
+          # no such token. npm then authenticates with an empty string instead
+          # of falling back to OIDC, and reports it as a 404 on PUT.
 
       # Nothing is published before the tests that gate it pass.
       - name: Test
