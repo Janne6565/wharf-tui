@@ -147,7 +147,7 @@ homebrew_casks:
     # Without the deploy key there is nothing to push to. Skipping keeps the
     # GitHub release itself from failing; the release workflow prints which
     # channels it skipped, so this is never silent.
-    skip_upload: '{{ if isEnvSet "TAP_DEPLOY_KEY" }}false{{ else }}true{{ end }}'
+    skip_upload: '{{ if isEnvSet "TAP_DEPLOY_KEY" }}auto{{ else }}true{{ end }}'
     commit_author:
       name: wharf-release
       email: jabbekeipert@gmail.com
@@ -214,7 +214,7 @@ scoops:
       git:
         url: ssh://git@github.com/Janne6565/scoop-bucket.git
         private_key: '{{ envOrDefault "SCOOP_DEPLOY_KEY" "" }}'
-    skip_upload: '{{ if isEnvSet "SCOOP_DEPLOY_KEY" }}false{{ else }}true{{ end }}'
+    skip_upload: '{{ if isEnvSet "SCOOP_DEPLOY_KEY" }}auto{{ else }}true{{ end }}'
     commit_author:
       name: wharf-release
       email: jabbekeipert@gmail.com
@@ -273,7 +273,7 @@ winget:
           owner: microsoft
           name: winget-pkgs
           branch: master
-    skip_upload: '{{ if isEnvSet "WINGET_TOKEN" }}false{{ else }}true{{ end }}'
+    skip_upload: '{{ if isEnvSet "WINGET_TOKEN" }}auto{{ else }}true{{ end }}'
     commit_author:
       name: wharf-release
       email: jabbekeipert@gmail.com

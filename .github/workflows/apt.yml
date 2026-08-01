@@ -68,7 +68,10 @@ jobs:
           mkdir -p repo/pool
           # --exclude-drafts: a draft release is not published yet, and its
           # assets must not appear in a public repository.
-          tags="$(gh release list --exclude-drafts --limit 100 --json tagName --jq '.[].tagName')"
+          # --exclude-pre-releases: the suite here is `stable`, so an -rc must
+          # not land in it — apt would otherwise offer it as an upgrade to
+          # everyone.
+          tags="$(gh release list --exclude-drafts --exclude-pre-releases --limit 100 --json tagName --jq '.[].tagName')"
           if [ -z "$tags" ]; then
             echo "no releases yet" >&2
             exit 1
