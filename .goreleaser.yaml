@@ -177,8 +177,14 @@ aurs:
     license: MIT
     private_key: '{{ envOrDefault "AUR_KEY" "" }}'
     git_url: ssh://aur@aur.archlinux.org/wharf-tui-bin.git
+    # TEMPORARY: hard-disabled while aur.archlinux.org is down for maintenance.
+    # GoReleaser aborts the whole release when a channel push fails, and that
+    # abort is what stops dist/artifacts.json being written — which the npm
+    # publisher reads. Restore the line below once the AUR is back.
+    #
     # Same reasoning as the cask: no AUR key, no push, but the release stands.
-    disable: '{{ if isEnvSet "AUR_KEY" }}false{{ else }}true{{ end }}'
+    # disable: '{{ if isEnvSet "AUR_KEY" }}false{{ else }}true{{ end }}'
+    disable: true
     commit_author:
       name: wharf-release
       email: jabbekeipert@gmail.com
