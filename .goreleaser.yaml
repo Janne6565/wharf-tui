@@ -248,8 +248,9 @@ winget:
       On Windows, sessions run inside wharf itself: detaching with ctrl+\ keeps a
       session running while wharf is open, but quitting closes it. On macOS and
       Linux sessions outlive wharf and are picked up again by the next run.
-    # A PR needs an API token; a deploy key cannot open one. This is a PAT with
-    # public_repo scope on the fork below.
+    # A PR needs an API token; a deploy key cannot open one, and a fine-grained
+    # PAT cannot open one against a repo it is not scoped to. Hence a classic
+    # PAT with public_repo scope — see docs/PACKAGING.md.
     repository:
       owner: Janne6565
       name: winget-pkgs

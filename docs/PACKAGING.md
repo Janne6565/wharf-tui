@@ -103,9 +103,16 @@ pbcopy < ~/.ssh/wharf-scoop       # → wharf-tui → Secrets → SCOOP_DEPLOY_K
 
 Fork [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) to
 `Janne6565/winget-pkgs` — GoReleaser pushes a branch there and opens the PR from it.
-A deploy key cannot open a pull request, so this one needs a token: a fine-grained
-PAT with **Contents: read and write** and **Pull requests: read and write** on the
-fork, stored as `WINGET_TOKEN`.
+A deploy key cannot open a pull request, so this one needs a token — and it has to be
+a **classic** PAT with the **`public_repo`** scope, stored as `WINGET_TOKEN`. A
+fine-grained PAT is scoped to repositories you own, which is enough to push the
+branch to the fork but not to open a PR against `microsoft/winget-pkgs`; classic
+`public_repo` is what the winget tooling assumes and the only combination that
+reliably does both halves.
+
+This is the one credential here that is not scoped to a single repo — `public_repo`
+grants write to every public repo on the account, so give it a short expiry and
+rotate it rather than treating it as permanent.
 
 Merges into winget-pkgs are largely automated, but the **first** submission of a new
 package identifier gets a human look.
