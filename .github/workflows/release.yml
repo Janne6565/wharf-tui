@@ -147,7 +147,12 @@ jobs:
       # Runs after GoReleaser because it reads the binaries out of dist/.
       - name: Publish to npm
         id: npm
-        if: env.HAS_NPM_TOKEN == 'true' && env.DRY_RUN != 'true'
+        # !cancelled() rather than the default success(): npm reads binaries out
+        # of dist/, which GoReleaser has already written by the time it pushes
+        # to any channel. An outage at one of those channels — AUR went down
+        # mid-release once — must not skip a publish that has everything it
+        # needs.
+        if: ${{ !cancelled() && env.HAS_NPM_TOKEN == 'true' && env.DRY_RUN != 'true' }}
         # A failing npm publish must not take Chocolatey and the APT rebuild
         # with it — both are gated on this job's result, and they have nothing
         # to do with npm. The outcome is reported in the summary below instead.
@@ -184,7 +189,11 @@ jobs:
     name: Chocolatey
     needs: release
     runs-on: windows-latest
-    if: ${{ needs.release.result == 'success' && github.event.inputs.dry_run != 'true' }}
+    # Not gated on the release job succeeding: this installs the binary out of
+    # the finished GitHub release, which exists as soon as GoReleaser has
+    # uploaded it — well before the channel pushes that might fail afterwards.
+    # The download step fails loudly if the release really is absent.
+    if: ${{ !cancelled() && needs.release.result != 'skipped' && github.event.inputs.dry_run != 'true' }}
     env:
       VERSION_TAG: ${{ needs.release.outputs.version_tag }}
       CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}

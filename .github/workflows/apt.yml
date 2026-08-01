@@ -31,8 +31,12 @@ jobs:
   build:
     name: Build and publish
     runs-on: ubuntu-latest
-    # A failed release has nothing worth publishing.
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    # Deliberately not gated on the release succeeding. This rebuilds from
+    # every published release, so it is idempotent and correct even when the
+    # run that triggered it failed partway — and a failure in an unrelated
+    # channel (npm, AUR) used to skip the apt repo for no reason. It exits
+    # non-zero on its own if there is genuinely nothing to publish.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion != 'cancelled' }}
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
