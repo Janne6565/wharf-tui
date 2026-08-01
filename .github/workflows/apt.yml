@@ -1,0 +1,163 @@
+name: APT repository
+
+# Debian and Ubuntu have no equivalent of a Homebrew tap: `apt install wharf`
+# only works against a repository that is signed and served over HTTPS. This
+# builds one from the .deb assets attached to the GitHub releases and publishes
+# it to GitHub Pages.
+#
+# It rebuilds from scratch every time rather than appending to a branch, so the
+# published repo is a pure function of the releases that exist — re-running it
+# after deleting a bad release actually removes that version.
+#
+# Triggered by the Release workflow rather than the `release` event: GoReleaser
+# creates the release with GITHUB_TOKEN, and events raised by GITHUB_TOKEN
+# deliberately do not start further workflow runs.
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: apt-repo
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    # A failed release has nothing worth publishing.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for a signing key
+        id: guard
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$APT_GPG_PRIVATE_KEY" ]; then
+            echo "APT_GPG_PRIVATE_KEY is not set — skipping the APT repository." >> "$GITHUB_STEP_SUMMARY"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install apt-utils
+        if: steps.guard.outputs.skip == 'false'
+        run: sudo apt-get update && sudo apt-get install -y apt-utils
+
+      - name: Collect every released .deb
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p repo/pool
+          # --exclude-drafts: a draft release is not published yet, and its
+          # assets must not appear in a public repository.
+          tags="$(gh release list --exclude-drafts --limit 100 --json tagName --jq '.[].tagName')"
+          if [ -z "$tags" ]; then
+            echo "no releases yet" >&2
+            exit 1
+          fi
+          for tag in $tags; do
+            gh release download "$tag" --dir repo/pool --pattern '*.deb' --clobber || \
+              echo "no .deb assets on $tag, skipping"
+          done
+          ls -1 repo/pool
+
+      - name: Build the repository index
+        if: steps.guard.outputs.skip == 'false'
+        working-directory: repo
+        run: |
+          set -euo pipefail
+          cat > apt-ftparchive.conf <<'EOF'
+          Dir { ArchiveDir "."; };
+          Default { Packages::Compress ". gzip"; };
+          TreeDefault { Directory "pool/"; };
+          Tree "dists/stable" {
+            Sections "main";
+            Architectures "amd64 arm64";
+          };
+          EOF
+          cat > release.conf <<'EOF'
+          APT::FTPArchive::Release::Origin "wharf";
+          APT::FTPArchive::Release::Label "wharf";
+          APT::FTPArchive::Release::Suite "stable";
+          APT::FTPArchive::Release::Codename "stable";
+          APT::FTPArchive::Release::Components "main";
+          APT::FTPArchive::Release::Architectures "amd64 arm64";
+          APT::FTPArchive::Release::Description "Wharf — terminal SSH client";
+          EOF
+          # apt-ftparchive reads each .deb's control file, so packages land in
+          # the binary-<arch> index matching their real architecture.
+          apt-ftparchive generate apt-ftparchive.conf
+          apt-ftparchive -c release.conf release dists/stable > dists/stable/Release
+          rm apt-ftparchive.conf release.conf
+
+      - name: Sign the release
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$(mktemp -d)"
+          printf '%s' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          key_id="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')"
+          sign() {
+            gpg --batch --yes --pinentry-mode loopback \
+              ${APT_GPG_PASSPHRASE:+--passphrase "$APT_GPG_PASSPHRASE"} \
+              --local-user "$key_id" "$@"
+          }
+          # Both forms: InRelease for modern apt, detached Release.gpg for
+          # older clients that still look for it.
+          sign --clearsign --output repo/dists/stable/InRelease repo/dists/stable/Release
+          sign --detach-sign --armor --output repo/dists/stable/Release.gpg repo/dists/stable/Release
+          # The public key users install into /etc/apt/keyrings, in the
+          # dearmored form `signed-by=` expects.
+          gpg --export "$key_id" > repo/wharf-archive-keyring.gpg
+          rm -rf "$GNUPGHOME"
+
+      - name: Write an index page
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          cat > repo/index.html <<'EOF'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>wharf APT repository</title>
+          <style>
+            body { font: 16px/1.6 system-ui, sans-serif; max-width: 42rem; margin: 4rem auto; padding: 0 1rem; }
+            pre { background: #f4f4f5; padding: 1rem; border-radius: .5rem; overflow-x: auto; }
+            @media (prefers-color-scheme: dark) {
+              body { background: #18181b; color: #e4e4e7; }
+              pre { background: #27272a; }
+            }
+          </style>
+          <h1>wharf APT repository</h1>
+          <p>A keyboard-driven terminal SSH client. <a href="https://github.com/Janne6565/wharf-tui">Source on GitHub</a>.</p>
+          <pre><code>sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://janne6565.github.io/wharf-tui/wharf-archive-keyring.gpg \
+            | sudo tee /etc/apt/keyrings/wharf-archive-keyring.gpg &gt; /dev/null
+          echo "deb [signed-by=/etc/apt/keyrings/wharf-archive-keyring.gpg] https://janne6565.github.io/wharf-tui stable main" \
+            | sudo tee /etc/apt/sources.list.d/wharf.list
+          sudo apt update &amp;&amp; sudo apt install wharf</code></pre>
+          EOF
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.guard.outputs.skip == 'false'
+        with:
+          path: repo
+
+      - id: deploy
+        if: steps.guard.outputs.skip == 'false'
+        uses: actions/deploy-pages@v4

@@ -19,22 +19,61 @@ generation are implemented and tested. Device-code sign-in and cross-machine
 (see [Account sync](#account-sync)); team projects are still simulated. See
 [Roadmap](#roadmap).
 
-## Run
+## Install
+
+The command is `wharf` everywhere. Pick whichever fits your machine:
 
 ```sh
-go run .
-# or build a single static binary:
-go build -o wharf . && ./wharf
+# macOS
+brew install Janne6565/tap/wharf
 
-# stamp a release identity (otherwise --version reports "dev (<commit>)"):
-go build -ldflags "-X main.version=v1.2.3" -o wharf .
+# anywhere with npm, bun or pnpm — the package is wharf-tui, the command is wharf
+bun i -g wharf-tui
 
-# the original design prototype (sample data, simulated shell, no disk I/O):
-go run . --demo
+# Arch Linux
+yay -S wharf-tui-bin
+
+# Debian / Ubuntu
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://janne6565.github.io/wharf-tui/wharf-archive-keyring.gpg \
+  | sudo tee /etc/apt/keyrings/wharf-archive-keyring.gpg > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/wharf-archive-keyring.gpg] https://janne6565.github.io/wharf-tui stable main" \
+  | sudo tee /etc/apt/sources.list.d/wharf.list
+sudo apt update && sudo apt install wharf
+
+# anything else with a shell (checksum-verified, no root needed)
+curl -fsSL https://raw.githubusercontent.com/Janne6565/wharf-tui/main/scripts/install.sh | sh
 ```
 
-Requires Go 1.24+. No root, no daemon. The vault lives at
+Or grab a `.tar.gz`, `.deb`, `.rpm` or `.apk` straight from the
+[releases page](https://github.com/Janne6565/wharf-tui/releases) — every release ships
+a `checksums.txt` to verify against.
+
+**Windows is not supported yet.** Sessions that outlive wharf are built on POSIX
+primitives with no Windows equivalent, so there is nothing for winget, Chocolatey or
+Scoop to ship. See [docs/PACKAGING.md](docs/PACKAGING.md#windows-is-not-wired-up).
+
+No root, no daemon. The vault lives at
 `${XDG_DATA_HOME:-~/.local/share}/wharf/vault.enc` (override with `WHARF_VAULT`).
+
+## Build from source
+
+```sh
+go install github.com/Janne6565/wharf-tui/cmd/wharf@latest
+
+# or from a checkout:
+go run ./cmd/wharf
+go build -o wharf ./cmd/wharf && ./wharf
+
+# stamp a release identity (otherwise --version reports "dev (<commit>)"):
+go build -ldflags "-X main.version=v1.2.3" -o wharf ./cmd/wharf
+
+# the original design prototype (sample data, simulated shell, no disk I/O):
+go run ./cmd/wharf --demo
+```
+
+Requires Go 1.24+. Releases are cut with GoReleaser — see
+[docs/PACKAGING.md](docs/PACKAGING.md).
 
 ## CLI
 

@@ -1,0 +1,182 @@
+# Release pipeline for wharf.
+#
+# One tag (vX.Y.Z) produces every artifact and pushes it to every channel:
+# GitHub release archives, .deb/.rpm/.apk packages, a Homebrew cask, an AUR
+# package, and — via scripts/npm-publish.mjs in the release workflow — the
+# npm/bun packages.
+#
+# Windows is deliberately absent: internal/sessd hands a listening socket to a
+# detached child over fd 3 and internal/vault flocks its sidecar, neither of
+# which exists on Windows. winget, Chocolatey and Scoop stay unwired until that
+# port lands — see docs/PACKAGING.md.
+#
+# Validate with `goreleaser check`; dry-run the whole thing with
+# `goreleaser release --snapshot --clean`.
+version: 2
+
+project_name: wharf
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: wharf
+    main: ./cmd/wharf
+    binary: wharf
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    # -s -w drops the symbol table and DWARF; main.version is the same knob the
+    # README documents for hand-built binaries.
+    ldflags:
+      - -s -w -X main.version={{ .Tag }}
+    # Reproducible builds: stamp the commit time rather than the build time.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: wharf
+    formats: [tar.gz]
+    # scripts/install.sh derives this name template from uname output — keep the
+    # two in step.
+    name_template: "wharf_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Other
+      order: 99
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+
+release:
+  github:
+    owner: Janne6565
+    name: wharf-tui
+  draft: false
+  prerelease: auto
+  footer: |
+    ## Install
+
+    ```sh
+    brew install Janne6565/tap/wharf         # macOS
+    bun i -g wharf-tui                       # any platform with bun/npm
+    yay -S wharf-tui-bin                     # Arch
+    curl -fsSL https://raw.githubusercontent.com/Janne6565/wharf-tui/main/scripts/install.sh | sh
+    ```
+
+    Verify a download against `checksums.txt` before running it.
+
+# .deb / .rpm / .apk. The .deb files are what the apt repo workflow signs and
+# serves from GitHub Pages.
+nfpms:
+  - id: wharf
+    package_name: wharf
+    vendor: Janne Keipert
+    homepage: https://wharf.jannekeipert.de
+    maintainer: Janne Keipert <jabbekeipert@gmail.com>
+    description: |-
+      Keyboard-driven terminal SSH client.
+      Wharf manages your SSH hosts, keys and sessions from a fast TUI. It is
+      local-first: everything works with no account, backed by a local
+      encrypted vault. Signing in adds end-to-end encrypted cross-machine sync
+      and team projects.
+    license: MIT
+    formats: [deb, rpm, apk]
+    bindir: /usr/bin
+    section: net
+    # No hard dependency on an ssh client: wharf speaks SSH itself.
+    recommends:
+      - openssh-client
+    file_name_template: "wharf_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/wharf/LICENSE
+      - src: README.md
+        dst: /usr/share/doc/wharf/README.md
+    overrides:
+      rpm:
+        recommends:
+          - openssh-clients
+
+# macOS. `brews` (formulae) is deprecated in GoReleaser v2, and casks are the
+# supported path for pre-built binaries — they also let us strip the Gatekeeper
+# quarantine flag, which an unsigned binary needs to run at all.
+homebrew_casks:
+  - name: wharf
+    binaries: [wharf]
+    repository:
+      owner: Janne6565
+      name: homebrew-tap
+      branch: main
+      token: '{{ envOrDefault "TAP_GITHUB_TOKEN" "" }}'
+    # Without the tap token there is nothing to push to. Skipping keeps the
+    # GitHub release itself from failing; the release workflow prints which
+    # channels it skipped, so this is never silent.
+    skip_upload: '{{ if isEnvSet "TAP_GITHUB_TOKEN" }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: wharf-release
+      email: jabbekeipert@gmail.com
+    commit_msg_template: "chore(wharf): bump to {{ .Tag }}"
+    homepage: https://wharf.jannekeipert.de
+    description: Keyboard-driven terminal SSH client with a local-first encrypted vault
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/wharf"]
+          end
+    caveats: |
+      Wharf is local-first — run `wharf` and it will create an encrypted vault on
+      first start. Write down the 40-character recovery code it shows you once:
+      it is the only way back into the vault if you forget the master password.
+
+# Arch Linux. `-bin` is the AUR convention for a package built from a released
+# binary rather than from source.
+aurs:
+  - name: wharf-tui-bin
+    ids: [wharf]
+    homepage: https://wharf.jannekeipert.de
+    description: Keyboard-driven terminal SSH client with a local-first encrypted vault
+    maintainers:
+      - "Janne Keipert <jabbekeipert@gmail.com>"
+    license: MIT
+    private_key: '{{ envOrDefault "AUR_KEY" "" }}'
+    git_url: ssh://aur@aur.archlinux.org/wharf-tui-bin.git
+    # Same reasoning as the cask: no AUR key, no push, but the release stands.
+    disable: '{{ if isEnvSet "AUR_KEY" }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: wharf-release
+      email: jabbekeipert@gmail.com
+    commit_msg_template: "chore(wharf): bump to {{ .Tag }}"
+    provides:
+      - wharf
+    conflicts:
+      - wharf
+    optdepends:
+      - "openssh: ssh-agent support and ~/.ssh/config import"
+    package: |-
+      install -Dm755 "./wharf" "${pkgdir}/usr/bin/wharf"
+      install -Dm644 "./LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+      install -Dm644 "./README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"

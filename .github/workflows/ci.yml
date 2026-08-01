@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      # internal/sshx runs an in-process sshd and internal/sessd forks session
+      # hosts; both are concurrency-heavy enough that -race earns its runtime.
+      - name: Test
+        run: go test -race ./...
+
+  release-config:
+    name: Release config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A broken .goreleaser.yaml must not be discovered at tag time, when the
+      # tag already exists and half the channels may already have published.
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: check
+
+      - name: Build a full snapshot release
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish,announce
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Catches a broken npm layout on every PR rather than at publish time,
+      # when the platform packages are already live and immutable.
+      - name: Stage the npm packages
+        run: node scripts/npm-publish.mjs --version 0.0.0 --dry-run
