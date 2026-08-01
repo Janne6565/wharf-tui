@@ -415,9 +415,17 @@ func (r *Remote) closeConn() {
 	r.finish()
 }
 
-// finish closes done exactly once and drops the remote from its pool.
+// finish marks the session finished, closes done exactly once and drops the
+// remote from its pool.
+//
+// Clearing alive belongs here rather than at the call sites: closeConn nils the
+// connection, so readLoop can observe that at the top of its next iteration and
+// return without ever reaching its error path. When it does, this is the only
+// place left that runs — and an alive flag left set would outlive the session
+// it describes.
 func (r *Remote) finish() {
 	r.doneOnce.Do(func() {
+		r.setAlive(false)
 		close(r.done)
 		r.pool.remove(r.id, r)
 	})
@@ -434,8 +442,7 @@ func (r *Remote) readLoop() {
 		}
 		kind, payload, err := readFrame(c)
 		if err != nil {
-			r.setAlive(false)
-			r.finish()
+			r.finish() // clears alive
 			return
 		}
 		switch kind {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	stdsync "sync"
 	"testing"
 
@@ -615,7 +616,12 @@ func TestSessionFileMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session file missing: %v", err)
 	}
-	if fi.Mode().Perm() != 0600 {
+	// Windows does not model unix permission bits: Go reports 0666 for any
+	// file the current user can write, whatever mode it was created with, so
+	// there is nothing to assert. The encryption check below still applies —
+	// and on Windows it is the only thing protecting the file, which is why it
+	// is not skipped along with the mode.
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0600 {
 		t.Fatalf("session file mode = %v, want 0600", fi.Mode().Perm())
 	}
 	// And it is not plaintext: the refresh token must not appear.

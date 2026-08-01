@@ -101,12 +101,16 @@ func TestResetInstanceNothingToReset(t *testing.T) {
 }
 
 func TestResetTargetsCoverKnownArtifacts(t *testing.T) {
-	got := resetTargets("/data/wharf/vault.enc")
+	// Built with filepath.Join rather than written as literals: resetTargets
+	// joins too, so on Windows a literal "/data/wharf/projects" would differ
+	// from the identical path only by separator.
+	dir := filepath.Join("testdata", "wharf")
+	got := resetTargets(filepath.Join(dir, "vault.enc"))
 	want := []string{
-		"/data/wharf/projects",
-		"/data/wharf/session.enc",
-		"/data/wharf/vault.enc",
-		"/data/wharf/vault.lock",
+		filepath.Join(dir, "projects"),
+		filepath.Join(dir, "session.enc"),
+		filepath.Join(dir, "vault.enc"),
+		filepath.Join(dir, "vault.lock"),
 	}
 	if len(got) != len(want) {
 		t.Fatalf("resetTargets() = %v, want %v", got, want)

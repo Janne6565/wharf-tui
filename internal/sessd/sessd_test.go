@@ -220,6 +220,39 @@ func TestDialRunsSessionInChildProcess(t *testing.T) {
 	}
 }
 
+// Detach has to leave the remote reporting dead the moment it returns, not
+// whenever readLoop next gets scheduled. closeConn nils the connection, so
+// readLoop can take its `c == nil` exit and return without touching the alive
+// flag — the flag has to be cleared on the teardown path itself.
+//
+// Asserting immediately after Detach, with no waitFor, is the point: a poll
+// would pass on the readLoop's error path too and hide exactly this bug.
+func TestDetachMarksSessionDeadSynchronously(t *testing.T) {
+	ts := startServer(t)
+	sockDir, knownHosts := tempDirs(t)
+
+	pool, _ := newPool(t, sockDir, knownHosts)
+	r, err := pool.Dial(context.Background(), ts.spec(), 80, 24)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+
+	pool.Detach()
+
+	if r.Alive() {
+		t.Error("Alive() must report false as soon as Detach returns")
+	}
+	select {
+	case <-r.Done():
+	default:
+		t.Error("Done() must be closed as soon as Detach returns")
+	}
+	if pool.Get(r.ID()) != nil {
+		t.Error("a detached session must no longer be in the pool")
+	}
+}
+
 func TestSessionSurvivesPoolShutdown(t *testing.T) {
 	ts := startServer(t)
 	sockDir, knownHosts := tempDirs(t)
