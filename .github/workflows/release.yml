@@ -146,7 +146,12 @@ jobs:
 
       # Runs after GoReleaser because it reads the binaries out of dist/.
       - name: Publish to npm
+        id: npm
         if: env.HAS_NPM_TOKEN == 'true' && env.DRY_RUN != 'true'
+        # A failing npm publish must not take Chocolatey and the APT rebuild
+        # with it — both are gated on this job's result, and they have nothing
+        # to do with npm. The outcome is reported in the summary below instead.
+        continue-on-error: true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -157,6 +162,20 @@ jobs:
             *)   dist_tag=latest ;;
           esac
           node scripts/npm-publish.mjs --version "$VERSION_TAG" --tag "$dist_tag"
+
+      # continue-on-error above keeps the job green so Chocolatey and the APT
+      # rebuild still run — which would otherwise let a failed publish pass
+      # unnoticed. This makes it loud in the run summary instead.
+      - name: Report the npm outcome
+        if: always() && env.DRY_RUN != 'true'
+        run: |
+          case "${{ steps.npm.outcome }}" in
+            success) echo "npm: published." >> "$GITHUB_STEP_SUMMARY" ;;
+            skipped) echo "npm: skipped — NPM_TOKEN not set." >> "$GITHUB_STEP_SUMMARY" ;;
+            *)       echo "> [!WARNING]" >> "$GITHUB_STEP_SUMMARY"
+                     echo "> **npm publish FAILED** — the rest of the release went out." \
+                       >> "$GITHUB_STEP_SUMMARY" ;;
+          esac
 
   # Chocolatey is the one channel GoReleaser cannot drive: `choco pack` needs
   # the choco binary, which only exists on a Windows runner. It waits for the
