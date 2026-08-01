@@ -31,6 +31,12 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    # Repeated at job level as well as workflow level: npm's OIDC exchange
+    # needs the runner to be handed ACTIONS_ID_TOKEN_REQUEST_URL, and the
+    # job-level grant is the form that reliably provisions it.
+    permissions:
+      contents: write
+      id-token: write
     env:
       VERSION_TAG: ${{ github.event.inputs.tag || github.ref_name }}
       # A dry run builds from whatever it checked out, so it needs no tag and
@@ -62,6 +68,19 @@ jobs:
           # _authToken=${NODE_AUTH_TOKEN}, and with trusted publishing there is
           # no such token. npm then authenticates with an empty string instead
           # of falling back to OIDC, and reports it as a 404 on PUT.
+
+      # npm's trusted publishing reports a missing OIDC identity as a 404 or
+      # ENEEDAUTH, which points at the wrong thing entirely. Checking for the
+      # request URL up front turns that into an obvious diagnosis. The token
+      # itself is never printed.
+      - name: Check the OIDC identity is available
+        run: |
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "OIDC: available — npm can use trusted publishing"
+          else
+            echo "OIDC: MISSING — id-token: write is not in effect;" \
+                 "npm publish will fail with 404/ENEEDAUTH"
+          fi
 
       # Nothing is published before the tests that gate it pass.
       - name: Test
