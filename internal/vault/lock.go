@@ -4,28 +4,26 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-
-	"golang.org/x/sys/unix"
 )
 
 // lockName is the sidecar file that guards a vault directory. It is separate
 // from the vault file so the lock survives the atomic rename during Save.
 const lockName = "vault.lock"
 
-// acquireLock takes an exclusive, non-blocking flock on <dir>/vault.lock. The
+// acquireLock takes an exclusive, non-blocking lock on <dir>/vault.lock. The
 // returned file must be kept open for the lifetime of the lock; closing it
 // releases the lock. A lock already held by another process yields ErrLocked.
+//
+// Only the locking call itself is per-platform (flock on unix, LockFileEx on
+// Windows) — opening the sidecar is not, so it stays here.
 func acquireLock(vaultPath string) (*os.File, error) {
 	lockPath := filepath.Join(filepath.Dir(vaultPath), lockName)
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	if err := lockFile(f); err != nil {
 		f.Close()
-		if errors.Is(err, unix.EWOULDBLOCK) {
-			return nil, ErrLocked
-		}
 		return nil, err
 	}
 	return f, nil

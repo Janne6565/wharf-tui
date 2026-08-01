@@ -24,6 +24,10 @@ jobs:
       # presence check is hoisted into a job-level env var.
       HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
       VERSION_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    outputs:
+      # Repeats the expression rather than reading env.VERSION_TAG: job-level
+      # env is not in scope for job outputs, and it would resolve to empty.
+      version_tag: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -51,9 +55,12 @@ jobs:
       # front means a half-published release is never a surprise.
       - name: Report configured channels
         env:
-          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
           AUR_KEY: ${{ secrets.AUR_KEY }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          SCOOP_DEPLOY_KEY: ${{ secrets.SCOOP_DEPLOY_KEY }}
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
         run: |
           {
             echo "### Release channels"
@@ -61,7 +68,8 @@ jobs:
             echo "| channel | credential | status |"
             echo "| --- | --- | --- |"
             echo "| GitHub release (archives, deb/rpm/apk) | GITHUB_TOKEN | publishing |"
-            for pair in "Homebrew cask:TAP_GITHUB_TOKEN" "AUR:AUR_KEY" "npm / bun:NPM_TOKEN"; do
+            for pair in "Homebrew cask:TAP_DEPLOY_KEY" "AUR:AUR_KEY" "npm / bun:NPM_TOKEN" \
+              "Scoop:SCOOP_DEPLOY_KEY" "winget:WINGET_TOKEN" "Chocolatey:CHOCO_API_KEY"; do
               name="${pair%%:*}"; var="${pair##*:}"
               if [ -n "${!var}" ]; then
                 echo "| $name | $var | publishing |"
@@ -78,11 +86,18 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Fine-grained PAT with contents:write on Janne6565/homebrew-tap.
-          # GITHUB_TOKEN cannot reach another repository.
-          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          # Private half of the write-enabled deploy key on
+          # Janne6565/homebrew-tap; GITHUB_TOKEN cannot reach another
+          # repository, and a deploy key beats a PAT here because it is scoped
+          # to that one repo and does not expire.
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
           # The private half of the SSH key registered with the AUR account.
           AUR_KEY: ${{ secrets.AUR_KEY }}
+          # Same deploy-key arrangement as the tap, for Janne6565/scoop-bucket.
+          SCOOP_DEPLOY_KEY: ${{ secrets.SCOOP_DEPLOY_KEY }}
+          # winget is the exception: GoReleaser opens a pull request against
+          # microsoft/winget-pkgs, and only an API token can do that.
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
 
       # Runs after GoReleaser because it reads the binaries out of dist/.
       - name: Publish to npm
@@ -97,3 +112,68 @@ jobs:
             *)   dist_tag=latest ;;
           esac
           node scripts/npm-publish.mjs --version "$VERSION_TAG" --tag "$dist_tag"
+
+  # Chocolatey is the one channel GoReleaser cannot drive: `choco pack` needs
+  # the choco binary, which only exists on a Windows runner. It waits for the
+  # release job because it installs the binary out of the finished release.
+  chocolatey:
+    name: Chocolatey
+    needs: release
+    runs-on: windows-latest
+    if: ${{ needs.release.result == 'success' }}
+    env:
+      VERSION_TAG: ${{ needs.release.outputs.version_tag }}
+      CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Skip without an API key
+        id: guard
+        shell: bash
+        run: |
+          if [ -z "$CHOCO_API_KEY" ]; then
+            echo "CHOCO_API_KEY is not set — skipping Chocolatey." >> "$GITHUB_STEP_SUMMARY"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Assemble the package
+        if: steps.guard.outputs.skip == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${VERSION_TAG#v}"   # nuspec versions carry no leading v
+          cd packaging/chocolatey
+
+          # Take the exact archive the release published, so the package and
+          # the release are the same bytes — which is what VERIFICATION.txt
+          # tells moderators and users to check.
+          gh release download "$VERSION_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "wharf_${version}_windows_amd64.zip" \
+            --output wharf.zip --clobber
+          unzip -o -j wharf.zip wharf.exe -d tools/
+          cp ../../LICENSE tools/LICENSE.txt
+
+          # The nuspec is committed with a 0.0.0 placeholder so it stays
+          # readable and reviewable in the repo.
+          sed -i "s|<version>0.0.0</version>|<version>${version}</version>|" wharf.nuspec
+          rm wharf.zip
+
+      - name: Pack and push
+        if: steps.guard.outputs.skip == 'false'
+        shell: pwsh
+        working-directory: packaging/chocolatey
+        run: |
+          choco pack wharf.nuspec --out .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $pkg = Get-ChildItem -Filter *.nupkg | Select-Object -First 1
+          # The first version of a package goes through human moderation, so a
+          # successful push means "submitted", not "live".
+          choco push $pkg.FullName --source https://push.chocolatey.org/ --api-key $env:CHOCO_API_KEY
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "Pushed $($pkg.Name) to Chocolatey (first release of a package waits on moderation)." `
+            >> $env:GITHUB_STEP_SUMMARY

@@ -1,12 +1,13 @@
+//go:build !windows
+
 package sessd
 
 import (
 	"bytes"
 	"io"
 	"os"
-	"os/signal"
-	"syscall"
 
+	"github.com/Janne6565/wharf-tui/internal/termsig"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/muesli/cancelreader"
 	"golang.org/x/term"
@@ -54,10 +55,9 @@ func (a *attachCmd) Run() error {
 		}
 	}
 
-	// In raw mode ctrl+\ arrives as a byte; guard against SIGQUIT in case raw
-	// mode ever fails to engage.
-	signal.Ignore(syscall.SIGQUIT)
-	defer signal.Reset(syscall.SIGQUIT)
+	// In raw mode ctrl+\ arrives as a byte; guard against the quit signal in
+	// case raw mode ever fails to engage.
+	defer termsig.IgnoreQuit()()
 
 	cols, rows := terminalSize(stdout)
 	stopWindow := a.syncWindow(stdout)
@@ -91,35 +91,18 @@ func terminalSize(w io.Writer) (cols, rows int) {
 	return c, rws
 }
 
-// syncWindow forwards SIGWINCH to the host for the attach lifetime. The
-// returned func stops the handler and its goroutine.
+// syncWindow forwards terminal resizes to the host for the attach lifetime. The
+// returned func stops the watcher and its goroutine.
 func (a *attachCmd) syncWindow(stdout io.Writer) func() {
 	f, ok := stdout.(*os.File)
 	if !ok || !term.IsTerminal(int(f.Fd())) {
 		return func() {}
 	}
 	r := a.r
-	fd := int(f.Fd())
 
-	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
-	stop := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			case <-winch:
-				if w, h, err := term.GetSize(fd); err == nil {
-					_ = r.writeJSON(kindResize, resizeRequest{Cols: w, Rows: h})
-				}
-			}
-		}
-	}()
-	return func() {
-		signal.Stop(winch)
-		close(stop)
-	}
+	return termsig.WatchResize(int(f.Fd()), func(cols, rows int) {
+		_ = r.writeJSON(kindResize, resizeRequest{Cols: cols, Rows: rows})
+	})
 }
 
 // stdinLoop forwards local input to the host until detach or session death.

@@ -5,10 +5,9 @@
 # package, and — via scripts/npm-publish.mjs in the release workflow — the
 # npm/bun packages.
 #
-# Windows is deliberately absent: internal/sessd hands a listening socket to a
-# detached child over fd 3 and internal/vault flocks its sidecar, neither of
-# which exists on Windows. winget, Chocolatey and Scoop stay unwired until that
-# port lands — see docs/PACKAGING.md.
+# Chocolatey is the one channel not driven from here: `choco pack` needs the
+# choco binary, which does not exist on the Linux runner this pipeline runs on.
+# It has its own job on a Windows runner in .github/workflows/release.yml.
 #
 # Validate with `goreleaser check`; dry-run the whole thing with
 # `goreleaser release --snapshot --clean`.
@@ -26,7 +25,7 @@ builds:
     binary: wharf
     env:
       - CGO_ENABLED=0
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     # -s -w drops the symbol table and DWARF; main.version is the same knob the
     # README documents for hand-built binaries.
@@ -41,6 +40,11 @@ archives:
     # scripts/install.sh derives this name template from uname output — keep the
     # two in step.
     name_template: "wharf_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # A .tar.gz needs a third-party tool to open on Windows; Scoop, winget and
+    # Explorer all handle .zip natively.
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     files:
       - README.md
       - LICENSE
@@ -81,10 +85,14 @@ release:
 
     ```sh
     brew install Janne6565/tap/wharf         # macOS
-    bun i -g wharf-tui                       # any platform with bun/npm
+    bun i -g wharf-tui                       # macOS, Linux, Windows
     yay -S wharf-tui-bin                     # Arch
+    winget install Janne6565.Wharf           # Windows
     curl -fsSL https://raw.githubusercontent.com/Janne6565/wharf-tui/main/scripts/install.sh | sh
     ```
+
+    On Windows, sessions run inside wharf and close when it exits — everything
+    else, detach included, behaves the same.
 
     Verify a download against `checksums.txt` before running it.
 
@@ -130,11 +138,16 @@ homebrew_casks:
       owner: Janne6565
       name: homebrew-tap
       branch: main
-      token: '{{ envOrDefault "TAP_GITHUB_TOKEN" "" }}'
-    # Without the tap token there is nothing to push to. Skipping keeps the
+      # Pushed over SSH with a write-enabled deploy key rather than through the
+      # GitHub API with a PAT: a deploy key is scoped to this one repository by
+      # construction and never expires. Same mechanism as the AUR block below.
+      git:
+        url: ssh://git@github.com/Janne6565/homebrew-tap.git
+        private_key: '{{ envOrDefault "TAP_DEPLOY_KEY" "" }}'
+    # Without the deploy key there is nothing to push to. Skipping keeps the
     # GitHub release itself from failing; the release workflow prints which
     # channels it skipped, so this is never silent.
-    skip_upload: '{{ if isEnvSet "TAP_GITHUB_TOKEN" }}false{{ else }}true{{ end }}'
+    skip_upload: '{{ if isEnvSet "TAP_DEPLOY_KEY" }}false{{ else }}true{{ end }}'
     commit_author:
       name: wharf-release
       email: jabbekeipert@gmail.com
@@ -180,3 +193,77 @@ aurs:
       install -Dm755 "./wharf" "${pkgdir}/usr/bin/wharf"
       install -Dm644 "./LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
       install -Dm644 "./README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+
+# Windows, the no-review channel: a Scoop bucket is just a git repo of JSON
+# manifests, so this lands the moment the release does.
+scoops:
+  - name: wharf
+    ids: [wharf]
+    repository:
+      owner: Janne6565
+      name: scoop-bucket
+      branch: main
+      # Deploy key over SSH, same reasoning as the Homebrew tap: scoped to the
+      # one repo by construction, no expiry to renew.
+      git:
+        url: ssh://git@github.com/Janne6565/scoop-bucket.git
+        private_key: '{{ envOrDefault "SCOOP_DEPLOY_KEY" "" }}'
+    skip_upload: '{{ if isEnvSet "SCOOP_DEPLOY_KEY" }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: wharf-release
+      email: jabbekeipert@gmail.com
+    commit_msg_template: "chore(wharf): bump to {{ .Tag }}"
+    homepage: https://wharf.jannekeipert.de
+    description: Keyboard-driven terminal SSH client with a local-first encrypted vault
+    license: MIT
+
+# Windows, the official channel. GoReleaser pushes a branch to our fork of
+# microsoft/winget-pkgs and opens the PR; merges there are largely automated,
+# so this needs no hand-holding after the fork exists once.
+winget:
+  - name: wharf
+    ids: [wharf]
+    package_identifier: Janne6565.Wharf
+    publisher: Janne6565
+    publisher_url: https://github.com/Janne6565
+    publisher_support_url: https://github.com/Janne6565/wharf-tui/issues
+    homepage: https://wharf.jannekeipert.de
+    license: MIT
+    license_url: https://github.com/Janne6565/wharf-tui/blob/main/LICENSE
+    copyright: Janne Keipert
+    short_description: Keyboard-driven terminal SSH client with a local-first encrypted vault
+    description: |-
+      Wharf manages your SSH hosts, keys and sessions from a fast, keyboard-driven
+      TUI. It is local-first: everything works with no account, backed by a local
+      encrypted vault. Signing in adds end-to-end encrypted cross-machine sync and
+      shared team projects, under a zero-knowledge model where the server only ever
+      holds ciphertext.
+    tags:
+      - ssh
+      - terminal
+      - tui
+      - cli
+      - devops
+    installation_notes: |-
+      On Windows, sessions run inside wharf itself: detaching with ctrl+\ keeps a
+      session running while wharf is open, but quitting closes it. On macOS and
+      Linux sessions outlive wharf and are picked up again by the next run.
+    # A PR needs an API token; a deploy key cannot open one. This is a PAT with
+    # public_repo scope on the fork below.
+    repository:
+      owner: Janne6565
+      name: winget-pkgs
+      branch: "wharf-{{ .Version }}"
+      token: '{{ envOrDefault "WINGET_TOKEN" "" }}'
+      pull_request:
+        enabled: true
+        draft: false
+        base:
+          owner: microsoft
+          name: winget-pkgs
+          branch: master
+    skip_upload: '{{ if isEnvSet "WINGET_TOKEN" }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: wharf-release
+      email: jabbekeipert@gmail.com
+    commit_msg_template: "New version: Janne6565.Wharf version {{ .Version }}"

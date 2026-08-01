@@ -18,7 +18,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -139,22 +138,6 @@ func newSessionPool() (*sessd.Pool, error) {
 		fmt.Fprintln(os.Stderr, "wharf: could not scan for running sessions:", err)
 	}
 	return pool, nil
-}
-
-// runSessionHost is the child process behind a surviving session. The TUI
-// created the listening socket and passed its descriptor as fd 3, so there is
-// no window where the socket exists with nothing accepting on it.
-func runSessionHost(sockPath string) error {
-	f := os.NewFile(3, "wharf-session-listener")
-	if f == nil {
-		return errors.New("no listener on fd 3")
-	}
-	defer f.Close()
-	ln, err := net.FileListener(f)
-	if err != nil {
-		return fmt.Errorf("adopting the listener: %w", err)
-	}
-	return sessd.Serve(ln, sockPath)
 }
 
 func usage() {

@@ -289,7 +289,7 @@ func (m Model) sessionHintView(t theme.Theme) []string {
 		key("alt+1..9", " reattach from the dashboard"),
 		key("enter", "    reattach from a host row marked live"),
 		"",
-		stl(t.Ok, t.Panel).Render("Sessions survive quitting wharf — reattach from a later run."),
+		stl(t.Ok, t.Panel).Render(attachSurvivalNotice),
 		"",
 		key("enter", " attach now · ") + key("esc", " stay on the dashboard"),
 	}
@@ -440,10 +440,15 @@ func (m Model) keygenView(t theme.Theme) []string {
 func (m Model) quitConfirmView(t theme.Theme) []string {
 	ns, nf := m.liveSessions(), m.liveForwards()
 	var body []string
-	// Sessions and forwards now part ways on quit: sessions live in their own
-	// child processes and keep running, forwards are process-bound and close.
+	// Sessions and forwards part ways on quit where sessions outlive wharf:
+	// they live in their own child processes and keep running, while forwards
+	// are process-bound and close. On Windows both go — hence the tone shift.
 	if ns > 0 {
-		body = append(body, stl(t.Ok, t.Panel).Render(itoa(ns)+" live session(s) keep running — reattach next time."))
+		tone := t.Ok
+		if !sessionsSurviveQuit {
+			tone = t.Warn
+		}
+		body = append(body, stl(tone, t.Panel).Render(quitSessionNotice(ns)))
 	}
 	if nf > 0 {
 		body = append(body, stl(t.Warn, t.Panel).Render(itoa(nf)+" active forward(s) will be closed."))

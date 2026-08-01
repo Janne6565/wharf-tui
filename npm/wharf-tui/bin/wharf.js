@@ -20,6 +20,8 @@ const PLATFORMS = {
   "darwin arm64": "darwin-arm64",
   "linux x64": "linux-x64",
   "linux arm64": "linux-arm64",
+  "win32 x64": "win32-x64",
+  "win32 arm64": "win32-arm64",
 };
 
 function resolveBinary() {
@@ -30,15 +32,12 @@ function resolveBinary() {
       error:
         `wharf: no prebuilt binary for ${key}.\n` +
         `Supported: ${Object.keys(PLATFORMS).join(", ")}.\n` +
-        (process.platform === "win32"
-          ? "Windows is not supported yet — wharf's detachable sessions need POSIX\n" +
-            "primitives that have no Windows equivalent yet.\n"
-          : "") +
         "Build from source instead: go install github.com/Janne6565/wharf-tui/cmd/wharf@latest",
     };
   }
+  const exe = process.platform === "win32" ? "wharf.exe" : "wharf";
   try {
-    return { path: require.resolve(`@wharf-tui/${slug}/bin/wharf`) };
+    return { path: require.resolve(`@wharf-tui/${slug}/bin/${exe}`) };
   } catch {
     // The optional dependency was skipped or pruned. This is what an
     // --omit=optional install, or a lockfile built on another platform,
@@ -60,13 +59,16 @@ if (resolved.error) {
 
 // npm preserves the executable bit through the tarball, but a stray umask or an
 // exotic extractor can drop it, and the failure would otherwise read as EACCES.
-try {
-  fs.accessSync(resolved.path, fs.constants.X_OK);
-} catch {
+// Windows has no such bit — executability is decided by the .exe suffix.
+if (process.platform !== "win32") {
   try {
-    fs.chmodSync(resolved.path, 0o755);
+    fs.accessSync(resolved.path, fs.constants.X_OK);
   } catch {
-    /* read-only store — let the spawn below report the real error */
+    try {
+      fs.chmodSync(resolved.path, 0o755);
+    } catch {
+      /* read-only store — let the spawn below report the real error */
+    }
   }
 }
 

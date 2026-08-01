@@ -1,0 +1,38 @@
+VERIFICATION
+
+Verification is intended to assist the Chocolatey moderators and any user in
+verifying that this package's contents are trustworthy.
+
+This package embeds wharf.exe, taken verbatim from the official GitHub release
+of the same version. Nothing is recompiled, patched or repackaged.
+
+To verify:
+
+1. Download the matching archive from the release this package was built from:
+
+     https://github.com/Janne6565/wharf-tui/releases
+
+   The file is wharf_<version>_windows_amd64.zip, where <version> is this
+   package's version.
+
+2. Check it against the checksums.txt published alongside it in the same
+   release:
+
+     Get-FileHash wharf_<version>_windows_amd64.zip -Algorithm SHA256
+
+3. Extract it and compare wharf.exe with the copy in this package:
+
+     Get-FileHash .\wharf.exe -Algorithm SHA256
+
+   The hashes must match.
+
+The binary is built by GitHub Actions from the tagged source, using GoReleaser;
+the workflow and its configuration are public:
+
+  https://github.com/Janne6565/wharf-tui/blob/main/.github/workflows/release.yml
+  https://github.com/Janne6565/wharf-tui/blob/main/.goreleaser.yaml
+
+wharf is MIT licensed. The full license text is in LICENSE.txt beside this file,
+and upstream at:
+
+  https://github.com/Janne6565/wharf-tui/blob/main/LICENSE

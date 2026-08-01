@@ -45,8 +45,16 @@ detect_platform() {
 	case "$os" in
 	Linux) os=linux ;;
 	Darwin) os=darwin ;;
+	MINGW* | MSYS* | CYGWIN*)
+		# A POSIX shell on Windows still installs a Windows binary, and the
+		# native package managers put it on PATH properly.
+		die "on Windows, install with one of:
+  winget install Janne6565.Wharf
+  scoop bucket add janne6565 https://github.com/Janne6565/scoop-bucket; scoop install wharf
+  choco install wharf"
+		;;
 	*)
-		die "unsupported OS: $os — Windows and BSD have no prebuilt binary yet.
+		die "unsupported OS: $os — only macOS, Linux and Windows have prebuilt binaries.
 Build from source instead: go install github.com/$REPO/cmd/$BINARY@latest"
 		;;
 	esac

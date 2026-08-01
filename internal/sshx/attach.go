@@ -4,9 +4,8 @@ import (
 	"bytes"
 	"io"
 	"os"
-	"os/signal"
-	"syscall"
 
+	"github.com/Janne6565/wharf-tui/internal/termsig"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/muesli/cancelreader"
 	"golang.org/x/term"
@@ -59,10 +58,9 @@ func (a *attachCmd) Run() error {
 		}
 	}
 
-	// In raw mode ctrl+\ reaches us as a byte; guard against SIGQUIT in case
-	// raw mode ever fails to engage.
-	signal.Ignore(syscall.SIGQUIT)
-	defer signal.Reset(syscall.SIGQUIT)
+	// In raw mode ctrl+\ reaches us as a byte; guard against the quit signal in
+	// case raw mode ever fails to engage.
+	defer termsig.IgnoreQuit()()
 
 	stopWindow := a.syncWindow(stdout)
 	defer stopWindow()
@@ -99,35 +97,20 @@ func (a *attachCmd) syncWindow(stdout io.Writer) func() {
 	}
 	s := a.s
 	fd := int(f.Fd())
-	if w, h, err := term.GetSize(fd); err == nil {
+
+	resize := func(w, h int) {
 		s.mu.Lock()
 		s.cols, s.rows = w, h
 		s.mu.Unlock()
 		_ = s.sess.WindowChange(h, w)
 	}
 
-	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
-	stop := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			case <-winch:
-				if w, h, err := term.GetSize(fd); err == nil {
-					s.mu.Lock()
-					s.cols, s.rows = w, h
-					s.mu.Unlock()
-					_ = s.sess.WindowChange(h, w)
-				}
-			}
-		}
-	}()
-	return func() {
-		signal.Stop(winch)
-		close(stop)
+	// The initial size is pushed here rather than by the watcher, which only
+	// reports changes.
+	if w, h, err := term.GetSize(fd); err == nil {
+		resize(w, h)
 	}
+	return termsig.WatchResize(fd, resize)
 }
 
 // stdinLoop forwards local input to the remote until detach or session death.

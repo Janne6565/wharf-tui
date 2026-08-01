@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Package sessd makes SSH sessions outlive the wharf process.
 //
 // Each connection runs in its own child process ("session host"): the TUI forks

@@ -41,6 +41,11 @@ echo "deb [signed-by=/etc/apt/keyrings/wharf-archive-keyring.gpg] https://janne6
   | sudo tee /etc/apt/sources.list.d/wharf.list
 sudo apt update && sudo apt install wharf
 
+# Windows
+winget install Janne6565.Wharf
+# or: scoop bucket add janne6565 https://github.com/Janne6565/scoop-bucket; scoop install wharf
+# or: choco install wharf
+
 # anything else with a shell (checksum-verified, no root needed)
 curl -fsSL https://raw.githubusercontent.com/Janne6565/wharf-tui/main/scripts/install.sh | sh
 ```
@@ -49,9 +54,11 @@ Or grab a `.tar.gz`, `.deb`, `.rpm` or `.apk` straight from the
 [releases page](https://github.com/Janne6565/wharf-tui/releases) — every release ships
 a `checksums.txt` to verify against.
 
-**Windows is not supported yet.** Sessions that outlive wharf are built on POSIX
-primitives with no Windows equivalent, so there is nothing for winget, Chocolatey or
-Scoop to ship. See [docs/PACKAGING.md](docs/PACKAGING.md#windows-is-not-wired-up).
+**On Windows, one thing differs:** sessions run inside wharf and close when it quits.
+Detaching with `ctrl+\`, the sessions overlay and reattaching with replay all work the
+same; what does not is a session surviving to the *next* run, which is built on POSIX
+primitives Windows has no equivalent for. See
+[docs/PACKAGING.md](docs/PACKAGING.md#what-windows-gives-up).
 
 No root, no daemon. The vault lives at
 `${XDG_DATA_HOME:-~/.local/share}/wharf/vault.enc` (override with `WHARF_VAULT`).
@@ -151,7 +158,7 @@ Environment: `WHARF_VAULT` (vault file path), `WHARF_API_BASE` (sync backend bas
   terminal to the remote shell — vim, htop and tmux behave exactly as over plain `ssh`.
   Press **`ctrl+\`** to detach: the session keeps running while you use the dashboard,
   and reattaching replays recent output. Press **`S`** for the live-sessions overlay.
-  Quitting wharf does **not** kill them — see
+  Quitting wharf does **not** kill them (on macOS and Linux) — see
   [Sessions that outlive wharf](#sessions-that-outlive-wharf).
 - **A host can have several sessions.** `enter` on a host that already has one opens a
   picker: reattach to a specific session, kill one (`x` twice — a live shell is not
@@ -267,6 +274,11 @@ awaiting-access until an admin re-grants).
   cannot be reached is *unknown*, not a mismatch.
 
 ## Sessions that outlive wharf
+
+> **macOS and Linux only.** On Windows sessions run inside wharf itself and end when it
+> does — `os/exec` has no `ExtraFiles` there, so the descriptor handoff below is not
+> expressible. Everything else in this section, detach included, behaves the same while
+> wharf is open.
 
 Connecting does not open the SSH connection inside the TUI. wharf re-executes itself as
 a **session host** — one child process per session — hands it a listening unix socket,

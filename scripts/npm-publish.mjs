@@ -39,7 +39,15 @@ const PLATFORMS = [
   { goos: "darwin", goarch: "arm64", os: "darwin", cpu: "arm64" },
   { goos: "linux", goarch: "amd64", os: "linux", cpu: "x64" },
   { goos: "linux", goarch: "arm64", os: "linux", cpu: "arm64" },
+  { goos: "windows", goarch: "amd64", os: "win32", cpu: "x64" },
+  { goos: "windows", goarch: "arm64", os: "win32", cpu: "arm64" },
 ];
+
+// Windows needs the .exe suffix to be executable at all; everywhere else the
+// bare name is the convention. bin/wharf.js resolves the same two names.
+function binaryName(platform) {
+  return platform.os === "win32" ? "wharf.exe" : "wharf";
+}
 
 const DESCRIPTION =
   "Keyboard-driven terminal SSH client with a local-first encrypted vault";
@@ -107,7 +115,7 @@ function stagePlatformPackage(platform, binary, version) {
   const dir = path.join(STAGE, name);
   fs.mkdirSync(path.join(dir, "bin"), { recursive: true });
 
-  const target = path.join(dir, "bin", "wharf");
+  const target = path.join(dir, "bin", binaryName(platform));
   fs.copyFileSync(binary, target);
   // npm preserves the mode in the tarball, so setting it here is what makes the
   // installed file executable on the user's machine.

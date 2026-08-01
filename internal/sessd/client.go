@@ -1,3 +1,5 @@
+//go:build !windows
+
 package sessd
 
 import (
@@ -16,10 +18,6 @@ import (
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	tea "github.com/charmbracelet/bubbletea"
 )
-
-// SessionHostFlag is the argument that puts a wharf binary into session-host
-// mode. The TUI re-executes itself with it; main wires it to Serve.
-const SessionHostFlag = "--session-host"
 
 // dialTimeout bounds how long a freshly spawned child gets to accept the
 // control connection before the spawn is called a failure.

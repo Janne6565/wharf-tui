@@ -10,6 +10,11 @@
 *.test
 *.prof
 
+# Chocolatey package contents assembled at release time (*.exe is already
+# ignored above; these are the rest of what the workflow drops into tools/).
+/packaging/chocolatey/tools/LICENSE.txt
+/packaging/chocolatey/*.nupkg
+
 # Editor / OS
 .DS_Store
 .idea/
