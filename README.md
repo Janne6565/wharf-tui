@@ -1,4 +1,4 @@
-# wharf ⌢
+# wharf
 
 > your fleet, one terminal
 
