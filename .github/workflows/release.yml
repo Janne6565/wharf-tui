@@ -21,15 +21,17 @@ on:
 
 permissions:
   contents: write
+  # npm publishes via trusted publishing (OIDC) rather than a token: the job
+  # exchanges this short-lived identity token for publish rights that npm has
+  # bound to this repo and this workflow file. Nothing to rotate, and nothing
+  # worth stealing out of the repo's secrets.
+  id-token: write
 
 jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
     env:
-      # The `secrets` context is not available in a step-level `if`, so the
-      # presence check is hoisted into a job-level env var.
-      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
       VERSION_TAG: ${{ github.event.inputs.tag || github.ref_name }}
       # A dry run builds from whatever it checked out, so it needs no tag and
       # must not reach any publish step.
@@ -69,7 +71,6 @@ jobs:
         env:
           TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
           AUR_KEY: ${{ secrets.AUR_KEY }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           SCOOP_DEPLOY_KEY: ${{ secrets.SCOOP_DEPLOY_KEY }}
           WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
           CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
@@ -84,7 +85,10 @@ jobs:
             echo "| channel | credential | status |"
             echo "| --- | --- | --- |"
             echo "| GitHub release (archives, deb/rpm/apk) | GITHUB_TOKEN | publishing |"
-            for pair in "Homebrew cask:TAP_DEPLOY_KEY" "AUR:AUR_KEY" "npm / bun:NPM_TOKEN" \
+            # npm holds no credential at all — it authenticates with an OIDC
+            # identity token minted per run, so there is nothing to check for.
+            echo "| npm / bun | OIDC (trusted publishing) | publishing |"
+            for pair in "Homebrew cask:TAP_DEPLOY_KEY" "AUR:AUR_KEY" \
               "Scoop:SCOOP_DEPLOY_KEY" "winget:WINGET_TOKEN" "Chocolatey:CHOCO_API_KEY"; do
               name="${pair%%:*}"; var="${pair##*:}"
               if [ -n "${!var}" ]; then
@@ -152,14 +156,18 @@ jobs:
         # to any channel. An outage at one of those channels — AUR went down
         # mid-release once — must not skip a publish that has everything it
         # needs.
-        if: ${{ !cancelled() && env.HAS_NPM_TOKEN == 'true' && env.DRY_RUN != 'true' }}
+        if: ${{ !cancelled() && env.DRY_RUN != 'true' }}
         # A failing npm publish must not take Chocolatey and the APT rebuild
         # with it — both are gated on this job's result, and they have nothing
         # to do with npm. The outcome is reported in the summary below instead.
         continue-on-error: true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          # Node 22 ships npm 10.x; trusted publishing needs 11.5.1 or newer,
+          # and without it npm falls back to looking for a token and fails with
+          # an unhelpful 404/ENEEDAUTH rather than naming the real problem.
+          npm install -g npm@latest
+          npm --version
+
           # A prerelease tag (v1.2.3-rc.1) must not become `latest`, or
           # `bun i -g wharf-tui` would hand every user the release candidate.
           case "$VERSION_TAG" in
@@ -176,7 +184,7 @@ jobs:
         run: |
           case "${{ steps.npm.outcome }}" in
             success) echo "npm: published." >> "$GITHUB_STEP_SUMMARY" ;;
-            skipped) echo "npm: skipped — NPM_TOKEN not set." >> "$GITHUB_STEP_SUMMARY" ;;
+            skipped) echo "npm: skipped." >> "$GITHUB_STEP_SUMMARY" ;;
             *)       echo "> [!WARNING]" >> "$GITHUB_STEP_SUMMARY"
                      echo "> **npm publish FAILED** — the rest of the release went out." \
                        >> "$GITHUB_STEP_SUMMARY" ;;

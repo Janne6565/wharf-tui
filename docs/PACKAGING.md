@@ -71,8 +71,21 @@ first push creates the `wharf-tui-bin` package; no review or moderation is invol
 ### 3. npm
 
 The platform packages live under the `@wharf-tui` scope, so the **organisation
-`wharf-tui` has to exist on npm** — free for public packages. Create it, then create
-an automation access token and store it as `NPM_TOKEN`.
+`wharf-tui` has to exist on npm** — free for public packages.
+
+There is **no npm token**. Publishing uses npm's trusted publishing: the release job
+mints a short-lived OIDC identity token, and npm exchanges it for publish rights it
+has bound to this repository and this workflow file. That needs `id-token: write` on
+the job and npm CLI ≥ 11.5.1 — Node 22 ships 10.x, so the step upgrades npm first.
+
+Trusted publishing is configured **per package**, on npmjs.com under the package's
+Settings → Trusted Publisher (`Janne6565/wharf-tui`, workflow `release.yml`). All
+seven are configured; **a new platform package needs configuring before its first
+release**, or that one publish fails while the rest succeed.
+
+npm cannot configure trusted publishing for a package that does not exist yet, so a
+genuinely new package has to be published once with an automation token before the
+publisher can be attached. That is how the current seven were bootstrapped.
 
 ### 4. APT repository
 
@@ -130,7 +143,6 @@ not "installable".
 | --- | --- | --- |
 | `TAP_DEPLOY_KEY` | Homebrew cask | cask not pushed |
 | `AUR_KEY` | AUR | PKGBUILD not pushed |
-| `NPM_TOKEN` | npm / bun | npm packages not published |
 | `SCOOP_DEPLOY_KEY` | Scoop | manifest not pushed |
 | `WINGET_TOKEN` | winget | no PR opened |
 | `CHOCO_API_KEY` | Chocolatey | package not packed or pushed |
