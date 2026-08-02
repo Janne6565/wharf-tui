@@ -65,6 +65,9 @@ type Config struct {
 	OpenVault    func(string, []byte) (vaultHandle, error)
 	CreateVault  func(string, []byte) (vaultHandle, string, error)
 	OpenRecovery func(string, string) (vaultHandle, error)
+	// InstallVault writes an account's vault blob to path verbatim and opens
+	// it, replacing any local vault (vault.InstallBlob).
+	InstallVault func(path string, blob, password []byte) (vaultHandle, error)
 
 	// Sync hooks (real mode). Nil fields default to the real backend client
 	// (base URL from WHARF_API_BASE or the production default), the vault
@@ -97,6 +100,7 @@ func New(cfg Config) Model {
 		openVault:         cfg.OpenVault,
 		createVault:       cfg.CreateVault,
 		openRecovery:      cfg.OpenRecovery,
+		installVault:      cfg.InstallVault,
 		syncAPI:           cfg.SyncAPI,
 		syncReadBlob:      cfg.SyncReadBlob,
 		syncOpenBlob:      cfg.SyncOpenBlob,
@@ -123,6 +127,9 @@ func New(cfg Config) Model {
 	if m.openRecovery == nil {
 		m.openRecovery = realOpenRecovery
 	}
+	if m.installVault == nil {
+		m.installVault = realInstall
+	}
 
 	if cfg.Demo {
 		return newDemo(m)
@@ -133,7 +140,11 @@ func New(cfg Config) Model {
 	if m.vaultExists(m.vaultPath) {
 		m.unlockStep = ulUnlock
 	} else {
-		m.unlockStep = ulCreate
+		// First run: local-only or account. The choice is offered exactly once,
+		// here, because it decides which vault this machine ends up with —
+		// signing in installs the account's vault rather than creating a
+		// second one (see update_signin.go).
+		m.unlockStep = ulChoose
 	}
 	return m
 }
@@ -212,6 +223,14 @@ func realCreate(path string, pw []byte) (vaultHandle, string, error) {
 
 func realOpen(path string, pw []byte) (vaultHandle, error) {
 	v, err := vault.Open(path, pw)
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+func realInstall(path string, blob, pw []byte) (vaultHandle, error) {
+	v, err := vault.InstallBlob(path, blob, pw)
 	if err != nil {
 		return nil, err
 	}

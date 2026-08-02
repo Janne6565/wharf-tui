@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -118,6 +119,8 @@ func (m Model) modalKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		return m.keyUnsyncConfirmKey(key)
 	case modalSignOut:
 		return m.signOutConfirmKey(key)
+	case modalMoveProject:
+		return m.moveProjectKey(key)
 	}
 	return m, nil
 }
@@ -308,16 +311,37 @@ func (m Model) updateHostInPlace(target string, h store.Host) (tea.Model, tea.Cm
 	return mm.setToast("updated "+h.Name, "ok"), tea.Batch(mm.probeCmds(), pushCmd)
 }
 
-// moveHostBetween moves a host between docs (personal ↔ project) by removing it
-// from the source and adding it to the target, each side persisted via its own
-// path.
+// moveHostBetween moves a host between docs for the host form, reporting a
+// failure inline on the form.
 func (m Model) moveHostBetween(source, target string, h store.Host) (tea.Model, tea.Cmd) {
+	mm, cmd, err := m.moveHostTo(source, target, h)
+	if err != nil {
+		m.formErr = cleanErr(err)
+		return m, nil
+	}
+	return mm, cmd
+}
+
+// moveHostTo moves a host between docs (personal ↔ project) by removing it from
+// the source and adding it to the target, each side persisted via its own path.
+//
+// The order is remove-then-add, and a failure on the add leaves the host
+// nowhere — so the add is validated against the destination *first*: a name
+// already taken there is rejected before anything is removed. The two sides
+// cannot be made atomic (they are separate encrypted documents with separate
+// optimistic-version pushes), so the cheap check is the safeguard.
+func (m Model) moveHostTo(source, target string, h store.Host) (Model, tea.Cmd, error) {
+	if source == target {
+		return m, nil, nil
+	}
+	if err := m.destinationAccepts(target, h); err != nil {
+		return m, nil, err
+	}
 	var cmds []tea.Cmd
 	// Remove from the source.
 	if source == "" {
 		if err := m.st.DeleteHost(h.ID); err != nil {
-			m.formErr = cleanErr(err)
-			return m, nil
+			return m, nil, err
 		}
 		mm, c := m.saveVault()
 		m = mm
@@ -325,8 +349,7 @@ func (m Model) moveHostBetween(source, target string, h store.Host) (tea.Model, 
 	} else {
 		mm, c, err := m.deleteHostFromProject(source, h.ID)
 		if err != nil {
-			m.formErr = cleanErr(err)
-			return m, nil
+			return m, nil, err
 		}
 		m = mm
 		cmds = append(cmds, c)
@@ -336,8 +359,7 @@ func (m Model) moveHostBetween(source, target string, h store.Host) (tea.Model, 
 	h.LastSeen = time.Time{}
 	if target == "" {
 		if _, err := m.st.AddHost(h); err != nil {
-			m.formErr = cleanErr(err)
-			return m, nil
+			return m, nil, err
 		}
 		mm, c := m.saveVault()
 		m = mm
@@ -345,15 +367,38 @@ func (m Model) moveHostBetween(source, target string, h store.Host) (tea.Model, 
 	} else {
 		mm, c, _, err := m.addHostToProject(target, h)
 		if err != nil {
-			m.formErr = cleanErr(err)
-			return m, nil
+			return m, nil, err
 		}
 		m = mm
 		cmds = append(cmds, c)
 	}
 	m.modal = modalNone
 	cmds = append(cmds, m.probeCmds())
-	return m.setToast("moved "+h.Name+" to "+m.projectOptionLabel(target), "ok"), tea.Batch(cmds...)
+	return m.setToast("moved "+h.Name+" to "+m.projectOptionLabel(target), "ok"), tea.Batch(cmds...), nil
+}
+
+// destinationAccepts reports whether target can take h — today, whether its
+// name is free there. Checked before the source side is touched.
+func (m Model) destinationAccepts(target string, h store.Host) error {
+	name := strings.ToLower(strings.TrimSpace(h.Name))
+	if target == "" {
+		for _, ex := range m.storeHosts() {
+			if strings.ToLower(strings.TrimSpace(ex.Name)) == name {
+				return fmt.Errorf("a personal host named %q already exists", h.Name)
+			}
+		}
+		return nil
+	}
+	doc := m.projectDocs[target]
+	if doc == nil {
+		return errNoProjectDoc
+	}
+	for _, ex := range doc.HostList() {
+		if strings.ToLower(strings.TrimSpace(ex.Name)) == name {
+			return fmt.Errorf("%s already has a host named %q", m.projectOptionLabel(target), h.Name)
+		}
+	}
+	return nil
 }
 
 // --- delete confirm ---------------------------------------------------------

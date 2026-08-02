@@ -68,7 +68,13 @@ func (f *fakeBackend) Me(context.Context) (api.Profile, error) {
 	if f.meErr != nil {
 		return api.Profile{}, f.meErr
 	}
-	p := api.Profile{ID: f.uid(), Email: "deniz@example.com"}
+	p := api.Profile{
+		ID:          f.uid(),
+		Email:       "deniz@example.com",
+		HasVault:    !f.noVault,
+		HasPassword: !f.noVault,
+		HasRecovery: !f.noVault,
+	}
 	if len(f.publicKey) > 0 {
 		// Base64 like the real backend: the published-key check compares against
 		// exactly this encoding.
@@ -303,14 +309,20 @@ func (f *fakeBackend) SubmitMemberKey(_ context.Context, projectID, userID strin
 func projectModel(t *testing.T) (tea.Model, *fakeVault, *fakeBackend) {
 	t.Helper()
 	fv := &fakeVault{}
-	fb := &fakeBackend{noVault: true}
+	fb := &fakeBackend{vault: []byte(emptyAccountVault), version: 1}
 	m := New(Config{
-		VaultPath:         t.TempDir() + "/vault.enc",
-		VaultExists:       func(string) bool { return true },
-		OpenVault:         func(string, []byte) (vaultHandle, error) { return fv, nil },
-		SyncAPI:           fb,
-		SyncReadBlob:      func() ([]byte, error) { return fv.Payload(), nil },
-		SyncOpenBlob:      func(blob, _ []byte) ([]byte, error) { return blob, nil },
+		VaultPath:    t.TempDir() + "/vault.enc",
+		VaultExists:  func(string) bool { return true },
+		OpenVault:    func(string, []byte) (vaultHandle, error) { return fv, nil },
+		SyncAPI:      fb,
+		SyncReadBlob: func() ([]byte, error) { return fv.Payload(), nil },
+		SyncOpenBlob: func(blob, _ []byte) ([]byte, error) { return blob, nil },
+		InstallVault: func(_ string, blob, _ []byte) (vaultHandle, error) {
+			fv.payload = append([]byte(nil), blob...)
+			fv.installs++
+			fv.closed = false
+			return fv, nil
+		},
 		SyncProjectCrypto: fakeProjCrypto{},
 		GenIdentity:       fakeIdentity,
 	})
@@ -326,8 +338,9 @@ func projectModel(t *testing.T) (tea.Model, *fakeVault, *fakeBackend) {
 	tm, _ = step(tm, special(tea.KeyEnter)) // intro → code entry
 	tm = typeStr(tm, "K7PQ-M2XR")
 	tm, cmd = step(tm, special(tea.KeyEnter))
-	tm, syncCmd := step(tm, cmd()) // pairedMsg → signed in
-	tm, _ = step(tm, syncCmd())    // initial personal sync
+	tm, adoptCmd := step(tm, cmd())        // pairedMsg → fetch the account vault
+	tm, installCmd := step(tm, adoptCmd()) // accountFetchedMsg → install it
+	tm = drainCmd(t, tm, installCmd)
 	if !tm.(Model).signedIn {
 		t.Fatal("pairing should sign in")
 	}
@@ -441,7 +454,12 @@ func TestProjectsEndToEndFlow(t *testing.T) {
 	tm = send(tm, runes("2"))                       // projects tab
 	tm = drain(t, tm, tm.(Model).syncProjectsCmd()) // refresh + detail
 	tm = drain(t, tm, tm.(Model).projectDetailCmd(projID))
-	tm = send(tm, special(tea.KeyTab)) // focus detail pane (member cursor)
+	// tab rings through the detail pane: hosts first, then members.
+	tm = send(tm, special(tea.KeyTab))
+	tm = send(tm, special(tea.KeyTab))
+	if tm.(Model).focus != pfMembers {
+		t.Fatalf("two tabs should reach the member cursor, focus = %d", tm.(Model).focus)
+	}
 	// move cursor to u2 (index 1).
 	tm = send(tm, runes("j"))
 	tm, _ = step(tm, runes("d")) // open remove confirm
@@ -901,16 +919,16 @@ func TestProjectHostFilterByID(t *testing.T) {
 	}
 	fb.mu.Unlock()
 
-	// Select the project and press enter → hosts tab filtered by project ID.
+	// f shows the merged hosts tab filtered to this project by ID.
 	m := tm.(Model)
 	if _, ok := m.selectedProject(); !ok {
 		// move onto the project row past any invites
 		tm = send(tm, runes("j"))
 	}
-	tm, _ = step(tm, special(tea.KeyEnter))
+	tm, _ = step(tm, runes("f"))
 	m = tm.(Model)
 	if m.tab != 0 || m.projFilterID != projID {
-		t.Fatalf("enter on a project should filter the hosts tab by ID, got tab=%d filter=%q", m.tab, m.projFilterID)
+		t.Fatalf("f on a project should filter the hosts tab by ID, got tab=%d filter=%q", m.tab, m.projFilterID)
 	}
 	if !strings.Contains(tm.View(), "⧉ atlas") {
 		t.Fatalf("the filter chip should render:\n%s", tm.View())
@@ -919,5 +937,348 @@ func TestProjectHostFilterByID(t *testing.T) {
 	tm, _ = step(tm, special(tea.KeyEsc))
 	if tm.(Model).projFilterID != "" {
 		t.Fatal("esc should clear the project filter")
+	}
+}
+
+// projectWithHost builds a signed-in model owning one project that already
+// holds one host, and leaves the cursor on the projects tab.
+func projectWithHost(t *testing.T, hostName string) (tea.Model, *fakeBackend, string) {
+	t.Helper()
+	tm, _, fb := projectModel(t)
+	tm, cmd := step(tm, runes("2"))
+	tm = drain(t, tm, cmd)
+	tm = send(tm, runes("n"))
+	tm = typeStr(tm, "atlas")
+	tm, cmd = step(tm, special(tea.KeyEnter))
+	tm = drain(t, tm, cmd)
+
+	var projID string
+	fb.mu.Lock()
+	for id := range fb.projs {
+		projID = id
+	}
+	fb.mu.Unlock()
+
+	m, _, _, err := tm.(Model).addHostToProject(projID, store.Host{
+		Name: hostName, User: "root", Addr: hostName + ".example.com", Port: 22, Source: "manual",
+	})
+	if err != nil {
+		t.Fatalf("add project host: %v", err)
+	}
+	// Fire the debounced push so the host actually reaches the backend — a doc
+	// that only exists locally would vanish on the next sync.
+	tm = m
+	tm, cmd = step(tm, projPushTimerMsg{id: projID, gen: m.syncGen})
+	tm = drain(t, tm, cmd)
+	return tm, fb, projID
+}
+
+// Opening a project keeps you on the projects tab: the cursor drops into that
+// project's own host list instead of teleporting to the hosts tab.
+func TestProjectEnterOpensHostsInPane(t *testing.T) {
+	tm, _, _ := projectWithHost(t, "proj-web")
+	m := tm.(Model)
+	if _, ok := m.selectedProject(); !ok {
+		tm = send(tm, runes("j"))
+	}
+	tm, _ = step(tm, special(tea.KeyEnter))
+
+	m = tm.(Model)
+	if m.tab != 1 {
+		t.Fatalf("enter on a project must not switch tabs, tab = %d", m.tab)
+	}
+	if m.focus != pfHosts {
+		t.Fatalf("enter should focus the project's hosts, focus = %d", m.focus)
+	}
+	if m.projFilterID != "" {
+		t.Fatalf("enter should no longer set the hosts-tab filter, got %q", m.projFilterID)
+	}
+	v := tm.View()
+	if !strings.Contains(v, "proj-web") {
+		t.Fatalf("the project's hosts should render in the detail pane:\n%s", v)
+	}
+	if !strings.Contains(v, "enter connect") {
+		t.Fatalf("the hints should say what enter does here:\n%s", v)
+	}
+
+	// esc steps back to the project list rather than off the tab.
+	tm, _ = step(tm, special(tea.KeyEsc))
+	m = tm.(Model)
+	if m.tab != 1 || m.focus != pfList {
+		t.Fatalf("esc should return to the project list, tab=%d focus=%d", m.tab, m.focus)
+	}
+}
+
+// A project with no readable hosts has nothing to open, and says so instead of
+// dropping the cursor into an empty list.
+func TestProjectEnterWithNoHosts(t *testing.T) {
+	tm, _, fb := projectModel(t)
+	tm, cmd := step(tm, runes("2"))
+	tm = drain(t, tm, cmd)
+	tm = send(tm, runes("n"))
+	tm = typeStr(tm, "atlas")
+	tm, cmd = step(tm, special(tea.KeyEnter))
+	tm = drain(t, tm, cmd)
+	_ = fb
+
+	if _, ok := tm.(Model).selectedProject(); !ok {
+		tm = send(tm, runes("j"))
+	}
+	tm, _ = step(tm, special(tea.KeyEnter))
+	m := tm.(Model)
+	if m.focus != pfList {
+		t.Fatalf("an empty project should leave the cursor on the list, focus = %d", m.focus)
+	}
+	if !strings.Contains(tm.View(), "no hosts in atlas yet") {
+		t.Fatalf("the empty project should explain itself:\n%s", tm.View())
+	}
+}
+
+// p on a host moves it into a project: it leaves the personal vault and lands
+// in the project doc, which is then pushed.
+func TestMoveHostIntoProject(t *testing.T) {
+	tm, _, fb := projectModel(t)
+	tm, cmd := step(tm, runes("2"))
+	tm = drain(t, tm, cmd)
+	tm = send(tm, runes("n"))
+	tm = typeStr(tm, "atlas")
+	tm, cmd = step(tm, special(tea.KeyEnter))
+	tm = drain(t, tm, cmd)
+
+	var projID string
+	fb.mu.Lock()
+	for id := range fb.projs {
+		projID = id
+	}
+	fb.mu.Unlock()
+
+	// A personal host, then p → picker → the project.
+	tm = addHost(t, tm, "homelab", "10.0.0.5")
+	tm, _ = step(tm, runes("p"))
+	if tm.(Model).modal != modalMoveProject {
+		t.Fatalf("p should open the move picker, modal = %d", tm.(Model).modal)
+	}
+	v := tm.View()
+	if !strings.Contains(v, "Move ") || !strings.Contains(v, "where it is now") {
+		t.Fatalf("the picker should name the host and its current home:\n%s", v)
+	}
+	tm = send(tm, runes("j")) // personal → atlas
+	tm, cmd = step(tm, special(tea.KeyEnter))
+	// Checked before draining: the project push that follows raises its own
+	// toast over this one.
+	if !strings.Contains(tm.View(), "moved homelab to atlas") {
+		t.Fatalf("the move should be confirmed:\n%s", tm.View())
+	}
+	tm = drain(t, tm, cmd)
+
+	m := tm.(Model)
+	for _, h := range m.storeHosts() {
+		if h.Name == "homelab" {
+			t.Fatal("the host should have left the personal vault")
+		}
+	}
+	doc := m.projectDocs[projID]
+	if doc == nil {
+		t.Fatal("project doc missing")
+	}
+	var found bool
+	for _, h := range doc.HostList() {
+		if h.Name == "homelab" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the host should now be in the project, got %+v", doc.HostList())
+	}
+}
+
+// A move is remove-then-add across two separate encrypted documents, so a name
+// already taken at the destination is refused *before* the source is touched —
+// otherwise the host would end up in neither.
+func TestMoveHostRejectsNameClashWithoutLosingIt(t *testing.T) {
+	tm, _, projID := projectWithHost(t, "homelab")
+	tm = addHost(t, tm, "homelab", "10.0.0.5")
+
+	tm, _ = step(tm, runes("p"))
+	tm = send(tm, runes("j")) // personal → atlas
+	tm, _ = step(tm, special(tea.KeyEnter))
+
+	m := tm.(Model)
+	if m.modal != modalMoveProject {
+		t.Fatal("a rejected move should keep the picker open")
+	}
+	if !strings.Contains(tm.View(), "already has a host named") {
+		t.Fatalf("the clash should be explained:\n%s", tm.View())
+	}
+	var stillPersonal bool
+	for _, h := range m.storeHosts() {
+		if h.Name == "homelab" {
+			stillPersonal = true
+		}
+	}
+	if !stillPersonal {
+		t.Fatal("a refused move must leave the host where it was")
+	}
+	if n := len(m.projectDocs[projID].HostList()); n != 1 {
+		t.Fatalf("the project should be unchanged, has %d hosts", n)
+	}
+}
+
+// Projects load when the session comes up, not when the projects tab is first
+// opened: the hosts tab merges project hosts in, and "move to project" needs
+// the list. Pressing p on a host used to report "no projects yet" for an
+// account that had several, purely because the tab had not been visited.
+func TestProjectsLoadWithoutVisitingTheTab(t *testing.T) {
+	tm, _, _ := projectWithHost(t, "proj-web")
+	tm = addHost(t, tm, "homelab", "10.0.0.5") // a personal host to press p on
+
+	// Simulate a fresh run over the same vault: the identity is in the vault
+	// (so initSync marks it ready), but no project state has been fetched yet.
+	m := tm.(Model)
+	if !m.identityReady {
+		t.Fatal("the vault should carry an identity by now")
+	}
+	m.realProjects = nil
+	m.projectDocs = map[string]*store.ProjectDoc{}
+	m.projectsLoaded = false
+	m.tab, m.focus = 0, 0
+	tm = m
+
+	// p before anything has loaded must not claim the account has no projects.
+	tmp, _ := step(tm, runes("p"))
+	if !strings.Contains(tmp.View(), "still loading") {
+		t.Fatalf("an unloaded list must not be reported as empty:\n%s", tmp.View())
+	}
+
+	// The resumed session loads them, with no visit to the projects tab.
+	tm, cmd := step(tm, sessionResumedMsg{email: "deniz@example.com", ok: true})
+	if cmd == nil {
+		t.Fatal("a resumed session should load projects")
+	}
+	tm = drain(t, tm, cmd)
+
+	m = tm.(Model)
+	if m.tab != 0 {
+		t.Fatalf("loading projects must not move the user off their tab, tab = %d", m.tab)
+	}
+	if len(m.realProjects) == 0 {
+		t.Fatal("the project list should be populated after a resume")
+	}
+	if !m.projectsLoaded {
+		t.Fatal("a landed projects sync should mark the list loaded")
+	}
+
+	// And p now offers the project as a destination.
+	tm, _ = step(tm, runes("p"))
+	if tm.(Model).modal != modalMoveProject {
+		t.Fatalf("p should open the picker once projects are loaded:\n%s", tm.View())
+	}
+	if !strings.Contains(tm.View(), "atlas") {
+		t.Fatalf("the loaded project should be a destination:\n%s", tm.View())
+	}
+}
+
+// Signing in must not mint a project identity for someone who never opens
+// projects: generating one writes an X25519 keypair into the vault, publishes
+// it, and bumps the payload to a schema older builds refuse to open.
+func TestSignInDoesNotCreateProjectIdentity(t *testing.T) {
+	tm, fv, fb := projectModel(t)
+
+	m := tm.(Model)
+	if m.identityReady || m.identityBooting {
+		t.Fatal("a vault with no identity should not have one after signing in")
+	}
+	if id := m.st.Identity(); id != nil {
+		t.Fatalf("signing in wrote a project identity into the vault: %+v", id)
+	}
+	if bytes.Contains(fv.Payload(), []byte("x25519Priv")) {
+		t.Fatal("the vault payload must not carry an identity yet")
+	}
+	fb.mu.Lock()
+	published := len(fb.publicKey)
+	fb.mu.Unlock()
+	if published != 0 {
+		t.Fatal("signing in must not publish a public key")
+	}
+
+	// Opening the projects tab still bootstraps one on demand.
+	tm, cmd := step(tm, runes("2"))
+	tm = drain(t, tm, cmd)
+	if !tm.(Model).identityReady {
+		t.Fatal("opening the projects tab should create the identity")
+	}
+}
+
+// An account whose hosts all live in projects used to see the fresh-install
+// "No hosts yet" panel for as long as the project sync took — a claim about
+// the account made before the data that would contradict it had arrived.
+func TestHostsTabShowsLoadingBeforeProjectsLand(t *testing.T) {
+	tm, _, _ := projectWithHost(t, "proj-web")
+
+	// A fresh run over the same vault: identity present, nothing fetched yet.
+	m := tm.(Model)
+	m.realProjects = nil
+	m.projectDocs = map[string]*store.ProjectDoc{}
+	m.projectsLoaded = false
+	m.tab, m.focus = 0, 0
+	tm = m
+
+	if !m.projectsPending() {
+		t.Fatal("projects should count as pending before the first sync lands")
+	}
+	v := tm.View()
+	if strings.Contains(v, "No hosts yet") {
+		t.Fatalf("an unloaded hosts tab must not claim to be empty:\n%s", v)
+	}
+	if !strings.Contains(v, "loading your hosts") {
+		t.Fatalf("the hosts tab should show a loading state:\n%s", v)
+	}
+
+	// The projects tab is in the same position.
+	tm, cmd := step(tm, runes("2"))
+	if !strings.Contains(tm.View(), "loading your projects") &&
+		!strings.Contains(tm.View(), "setting up project encryption") {
+		t.Fatalf("the projects tab should show a loading state:\n%s", tm.View())
+	}
+	tm = drain(t, tm, cmd)
+
+	// Once the sync lands the real content replaces it, and never the empty state.
+	v = tm.View()
+	if strings.Contains(v, "loading your projects") {
+		t.Fatalf("the placeholder should give way to the project list:\n%s", v)
+	}
+	if !strings.Contains(v, "atlas") {
+		t.Fatalf("the loaded project should render:\n%s", v)
+	}
+	tm = send(tm, runes("1"))
+	if v := tm.View(); !strings.Contains(v, "proj-web") || strings.Contains(v, "loading your hosts") {
+		t.Fatalf("the project host should appear on the hosts tab:\n%s", v)
+	}
+}
+
+// A failed projects sync must resolve the placeholder rather than spin
+// forever: an empty list is a worse answer than nothing at all only while an
+// answer is still coming.
+func TestLoadingResolvesWhenProjectsSyncFails(t *testing.T) {
+	tm, fb, _ := projectWithHost(t, "proj-web")
+	m := tm.(Model)
+	m.realProjects = nil
+	m.projectDocs = map[string]*store.ProjectDoc{}
+	m.projectsLoaded = false
+	m.tab, m.focus = 0, 0
+	tm = m
+
+	fb.mu.Lock()
+	fb.meErr = errors.New("offline")
+	fb.mu.Unlock()
+
+	tm, cmd := step(tm, sessionResumedMsg{email: "deniz@example.com", ok: true})
+	tm = drain(t, tm, cmd)
+
+	if tm.(Model).projectsPending() {
+		t.Fatal("a finished attempt must clear the pending state, even on failure")
+	}
+	if v := tm.View(); strings.Contains(v, "loading your hosts") {
+		t.Fatalf("the placeholder must not outlive the attempt:\n%s", v)
 	}
 }

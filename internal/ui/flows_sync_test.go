@@ -100,12 +100,18 @@ func (f *fakeBackend) ChangePassword(_ context.Context, currentAuthKey, newAuthK
 func (f *fakeBackend) SetTokens(string, string) {}
 func (f *fakeBackend) RefreshToken() string     { return "ref" }
 
+// emptyAccountVault is the payload of an account vault that has been created
+// (in the browser) but holds nothing yet — what a fresh account offers a
+// device that signs in.
+const emptyAccountVault = `{"schema":3,"hosts":[],"settings":{"theme":"abyss","agent":true,"keepalive":true,"telemetry":false}}`
+
 // syncedModel returns a real-mode model unlocked over a fake vault and wired
-// to a fake backend, plus both fakes.
+// to a fake backend, plus both fakes. The account already has a vault, as any
+// account created through the browser does; the sign-in flow installs it.
 func syncedModel(t *testing.T) (tea.Model, *fakeVault, *fakeBackend) {
 	t.Helper()
 	fv := &fakeVault{}
-	fb := &fakeBackend{noVault: true}
+	fb := &fakeBackend{vault: []byte(emptyAccountVault), version: 1}
 	m := New(Config{
 		VaultPath:   filepath.Join(t.TempDir(), "vault.enc"),
 		VaultExists: func(string) bool { return true },
@@ -114,6 +120,14 @@ func syncedModel(t *testing.T) (tea.Model, *fakeVault, *fakeBackend) {
 		// Blob == payload for tests; OpenBlob is the identity.
 		SyncReadBlob: func() ([]byte, error) { return fv.Payload(), nil },
 		SyncOpenBlob: func(blob, _ []byte) ([]byte, error) { return blob, nil },
+		// Installing the account vault replaces this machine's vault file in
+		// place, so the same handle keeps standing in for it.
+		InstallVault: func(_ string, blob, _ []byte) (vaultHandle, error) {
+			fv.payload = append([]byte(nil), blob...)
+			fv.installs++
+			fv.closed = false // a fresh handle on the replaced file
+			return fv, nil
+		},
 	})
 	var tm tea.Model = m
 	tm = send(tm, tea.WindowSizeMsg{Width: 100, Height: 32})
@@ -145,15 +159,23 @@ func pairModel(t *testing.T) (tea.Model, *fakeVault, *fakeBackend) {
 	if cmd == nil {
 		t.Fatal("code submit should produce the pair command")
 	}
-	tm, syncCmd := step(tm, cmd()) // pairedMsg → signed in + initial sync
+	// pairedMsg → fetch the account vault → install it → initial sync.
+	tm, adoptCmd := step(tm, cmd())
+	if adoptCmd == nil {
+		t.Fatal("pairing should fetch the account vault")
+	}
+	tm, installCmd := step(tm, adoptCmd()) // accountFetchedMsg
+	if installCmd == nil {
+		t.Fatalf("a matching master password should install the account vault without prompting:\n%s", tm.View())
+	}
+	tm = drainCmd(t, tm, installCmd) // vaultInstalledMsg → signed in + sync
 	m := tm.(Model)
 	if !m.signedIn || m.email != "deniz@example.com" {
 		t.Fatalf("pairing should sign in, got signedIn=%v email=%q", m.signedIn, m.email)
 	}
-	if syncCmd == nil {
-		t.Fatal("pairing should trigger the initial sync")
+	if fv.installs != 1 {
+		t.Fatalf("pairing should install the account vault exactly once, got %d", fv.installs)
 	}
-	tm, _ = step(tm, syncCmd()) // syncDoneMsg
 	return tm, fv, fb
 }
 

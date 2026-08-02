@@ -405,14 +405,29 @@ func (m Model) sessionStrip(t theme.Theme) []string {
 		label := " " + itoa(i+1) + ":" + m.sessionLabel(s) + " "
 		left += stl(t.Hi, t.Sel).Render(label) + bgpad(1, t.Bg)
 	}
-	right := stl(t.Dim, t.Bg).Render("alt+# reattach") + " "
+	// S first: alt+# only reaches wharf when the terminal maps Option to Meta,
+	// which macOS does not do by default, so naming it alone taught the one
+	// route that silently does nothing for many users.
+	right := stl(t.Hi, t.Bg).Render("S") + stl(t.Dim, t.Bg).Render(" sessions") +
+		stl(t.Dim, t.Bg).Render(" · ") + stl(t.Dim, t.Bg).Render("alt+# reattach") + " "
 	return []string{barLine(t, m.w, left, right)}
 }
 
-// toastLine renders the transient status toast, or nothing.
+// liveSessionCount is how many detachable sessions are running (0 in demo).
+func (m Model) liveSessionCount() int {
+	if m.demo || m.pool == nil {
+		return 0
+	}
+	return len(m.pool.List())
+}
+
+// toastLine renders the transient status toast. The row is always emitted,
+// blank when there is no toast: toasts come and go on their own timer, and a
+// row that appears and disappears would resize the panes under the cursor
+// every time one does.
 func (m Model) toastLine(t theme.Theme) []string {
 	if m.toast == "" {
-		return nil
+		return []string{bgpad(m.w, t.Bg)}
 	}
 	c := t.Ok
 	if m.toastRole == "err" {
@@ -471,6 +486,12 @@ func (m Model) hostLive(id string) bool {
 func (m Model) hostsTab(t theme.Theme, contentH int) []string {
 	total := len(m.mergedHosts())
 	if total == 0 && m.query == "" && m.projFilterID == "" {
+		// "No hosts yet" is a claim about the account, and project hosts arrive
+		// asynchronously — asserting it before they land showed a fresh-install
+		// screen to people with a fleet.
+		if m.projectsPending() {
+			return m.loadingPanel(t, contentH, "hosts", "loading your hosts…")
+		}
 		return m.hostsEmpty(t, contentH)
 	}
 	fh := m.filteredMergedHosts()
@@ -547,6 +568,31 @@ func (m Model) hostsTab(t theme.Theme, contentH int) []string {
 
 	title := "hosts · " + itoa(len(fh)) + "/" + itoa(total)
 	return m.twoPane(t, contentH, title, m.listBorder(t), lRows, 3, "host", m.detailBorder(t), rBody, 2)
+}
+
+// projectsPending reports that this session's project data is still on its way,
+// and with it any hosts that live in a project. False when the account has no
+// project identity (nothing is being fetched) and once an attempt has finished,
+// success or not — a placeholder that never resolves is worse than an empty
+// list.
+func (m Model) projectsPending() bool {
+	if !m.realMode() || m.projectsLoaded {
+		return false
+	}
+	return m.identityReady || m.identityBooting
+}
+
+// loadingPanel is the placeholder a list shows while its contents are still
+// being fetched, in place of an empty state that would assert there is nothing
+// to show.
+func (m Model) loadingPanel(t theme.Theme, contentH int, title, what string) []string {
+	pw := 60
+	if pw > m.w-6 {
+		pw = m.w - 6
+	}
+	body := []string{stl(t.Warn, t.Panel).Render(m.spinner() + " " + what)}
+	box := boxPanelAuto(t, title, t.Border, pw, body)
+	return centerInArea(box, m.w, contentH, t.Bg)
 }
 
 // hostsEmpty renders the friendly empty state for a fresh vault.
@@ -702,6 +748,10 @@ func (m Model) projectsGate(t theme.Theme, contentH int) []string {
 func (m Model) keysTab(t theme.Theme, contentH int) []string {
 	mks := m.mergedKeys()
 	if len(mks) == 0 {
+		// The ~/.ssh scan is async; until it answers there is nothing to say.
+		if !m.demo && !m.keysScanned {
+			return m.loadingPanel(t, contentH, "keys", "scanning ~/.ssh…")
+		}
 		return m.keysEmpty(t, contentH)
 	}
 	kIdx := clampIdx(m.keyIdx, len(mks))
@@ -1007,13 +1057,25 @@ func (m Model) hintBar(t theme.Theme) []string {
 	case 0:
 		hints = append(hints, hk{"enter", "connect"}, hk{"/", "filter"})
 		if !m.demo {
-			hints = append(hints, hk{"a/e/d", "add/edit/del"}, hk{"m", "import"}, hk{"R", "probe"})
+			hints = append(hints, hk{"a/e/d", "add/edit/del"})
+			if m.realMode() {
+				hints = append(hints, hk{"p", "to project"})
+			}
+			hints = append(hints, hk{"m", "import"}, hk{"R", "probe"})
 		}
 	case 1:
-		if m.signedIn {
-			hints = append(hints, hk{"enter", "view hosts"}, hk{"i", "invite"})
-		} else {
+		if !m.signedIn {
 			hints = append(hints, hk{"enter", "sign in"})
+			break
+		}
+		// The ring the cursor is in decides what enter means, so say which.
+		switch m.focus {
+		case pfHosts:
+			hints = append(hints, hk{"enter", "connect"}, hk{"esc", "back"})
+		case pfMembers:
+			hints = append(hints, hk{"d/x", "remove/revoke"}, hk{"esc", "back"})
+		default:
+			hints = append(hints, hk{"enter", "open hosts"}, hk{"f", "in hosts tab"}, hk{"i", "invite"})
 		}
 	case 2:
 		if !m.demo {
@@ -1043,6 +1105,12 @@ func (m Model) hintBar(t theme.Theme) []string {
 		if m.signedIn && !m.demo {
 			hints = append(hints, hk{"s", "sync now"})
 		}
+	}
+	// The sessions overlay is worth a slot exactly while there is something in
+	// it — otherwise a detached session is only findable by already knowing
+	// about S (or by opening the help).
+	if n := m.liveSessionCount(); n > 0 {
+		hints = append(hints, hk{"S", plural(n, "session")})
 	}
 	if m.demo {
 		signLabel := "sign in"

@@ -125,8 +125,9 @@ func pairModelForDump(t *testing.T) (tea.Model, *fakeVault, *fakeBackend) {
 	tm = typeStr(tm, "K7PQ-M2XR")
 	dump(t, tm, "s0b device code entry")
 	tm, cmd := step(tm, special(tea.KeyEnter))
-	tm, syncCmd := step(tm, cmd())
-	tm, _ = step(tm, syncCmd())
+	tm, adoptCmd := step(tm, cmd())        // pairedMsg → fetch the account vault
+	tm, installCmd := step(tm, adoptCmd()) // accountFetchedMsg → install it
+	tm = drainCmd(t, tm, installCmd)
 	return tm, fv, fb
 }
 

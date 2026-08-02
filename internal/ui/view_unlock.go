@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 
+	"github.com/Janne6565/wharf-tui/internal/api"
 	"github.com/Janne6565/wharf-tui/internal/theme"
 )
 
@@ -10,7 +11,7 @@ import (
 // (centered panel, wharf branding).
 func (m Model) unlockView(t theme.Theme) []string {
 	logo := bold(t.Hi, t.Bg).Render("wharf")
-	subtitle := stl(t.Dim, t.Bg).Render("local encrypted vault")
+	subtitle := stl(t.Dim, t.Bg).Render(m.gateSubtitle())
 
 	pw := 66
 	if pw > m.w-6 {
@@ -23,6 +24,18 @@ func (m Model) unlockView(t theme.Theme) []string {
 	block := []string{logo, subtitle, ""}
 	block = append(block, box...)
 	return centerInArea(block, m.w, m.h, t.Bg)
+}
+
+// gateSubtitle labels the gate for the flow it is currently in.
+func (m Model) gateSubtitle() string {
+	switch m.unlockStep {
+	case ulChoose:
+		return "your fleet, one terminal"
+	case ulSignInCode, ulSignInPairing, ulSignInPassword, ulSignInOpening, ulSignInSetup:
+		return "sign in to your wharf account"
+	default:
+		return "local encrypted vault"
+	}
 }
 
 // unlockBody produces the panel title/border/body for the current gate step.
@@ -50,6 +63,77 @@ func (m Model) unlockBody(t theme.Theme) (string, string, []string) {
 		return "unlock vault", "hi", []string{
 			stl(t.Warn, t.Panel).Render(m.spinner() + " unlocking…"),
 			stl(t.Dim, t.Panel).Render("deriving key (argon2id)"),
+		}
+
+	case ulChoose:
+		return "get started", "hi", []string{
+			stl(t.Dim, t.Panel).Render("Wharf works with no account at all. You can sign in later,"),
+			stl(t.Dim, t.Panel).Render("and your hosts come with you when you do."),
+			"",
+			stl(t.Hi, t.Panel).Render(" 1") + stl(t.Fg, t.Panel).Render("  Use Wharf on this machine only"),
+			stl(t.Dim, t.Panel).Render("    local encrypted vault · own password + recovery code"),
+			"",
+			stl(t.Hi, t.Panel).Render(" 2") + stl(t.Fg, t.Panel).Render("  Sign in to a Wharf account"),
+			stl(t.Dim, t.Panel).Render("    sync across machines · team projects · pairs in browser"),
+			"",
+			stl(t.Hi, t.Panel).Render("1") + stl(t.Dim, t.Panel).Render(" / ") +
+				stl(t.Hi, t.Panel).Render("2") + stl(t.Dim, t.Panel).Render(" choose · ") +
+				stl(t.Hi, t.Panel).Render("q") + stl(t.Dim, t.Panel).Render(" quit"),
+		}
+
+	case ulSignInCode:
+		body := []string{
+			stl(t.Dim, t.Panel).Render("In your browser, open"),
+			stl(t.Hi, t.Panel).Render(stripScheme(m.deviceURL)),
+			"",
+			stl(t.Dim, t.Panel).Render("Sign in there, then type the pairing code it shows:"),
+			m.codeLine(t),
+			"",
+			stl(t.Hi, t.Panel).Render("enter") + stl(t.Dim, t.Panel).Render(" confirm · ") +
+				stl(t.Hi, t.Panel).Render("esc") + stl(t.Dim, t.Panel).Render(" back"),
+		}
+		return "sign in", "hi", errLine(body)
+
+	case ulSignInPairing:
+		return "sign in", "hi", []string{
+			stl(t.Warn, t.Panel).Render(m.spinner() + " pairing this device…"),
+			stl(t.Dim, t.Panel).Render("exchanging the code · fetching your account vault"),
+		}
+
+	case ulSignInPassword:
+		intro := "Enter the master password of " + m.bootEmail() + "."
+		body := []string{
+			stl(t.Dim, t.Panel).Render(intro),
+			stl(t.Dim, t.Panel).Render("Your account vault becomes this machine's vault, so the"),
+			stl(t.Dim, t.Panel).Render("same password and recovery code work everywhere."),
+			"",
+			m.pwLine(t, "password  ", m.pwInput, true),
+			"",
+			stl(t.Hi, t.Panel).Render("enter") + stl(t.Dim, t.Panel).Render(" continue · ") +
+				stl(t.Hi, t.Panel).Render("esc") + stl(t.Dim, t.Panel).Render(" cancel"),
+		}
+		if m.boot != nil && m.boot.merge != nil {
+			body = append(body, "",
+				stl(t.Dim, t.Panel).Render("This machine's hosts and keys are merged into it."))
+		}
+		return "account master password", "hi", errLine(body)
+
+	case ulSignInOpening:
+		return "account master password", "hi", []string{
+			stl(t.Warn, t.Panel).Render(m.spinner() + " opening your account vault…"),
+			stl(t.Dim, t.Panel).Render("deriving key (argon2id) · installing it on this machine"),
+		}
+
+	case ulSignInSetup:
+		return "finish setting up your account", "warn", []string{
+			stl(t.Warn, t.Panel).Render("This account has no vault yet."),
+			"",
+			stl(t.Dim, t.Panel).Render("It was created without a master password (Google or GitHub"),
+			stl(t.Dim, t.Panel).Render("sign-in). Choose one at"),
+			stl(t.Hi, t.Panel).Render(stripScheme(api.SetPasswordURL(apiBaseDisplay()))),
+			stl(t.Dim, t.Panel).Render("and then sign in here again."),
+			"",
+			stl(t.Hi, t.Panel).Render("enter") + stl(t.Dim, t.Panel).Render(" back"),
 		}
 
 	case ulCreate:

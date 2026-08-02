@@ -13,6 +13,13 @@ import (
 // awaiting-access placeholder).
 func (m Model) realProjectsTab(t theme.Theme, contentH int) []string {
 	if m.projectRowCount() == 0 {
+		if m.projectsPending() {
+			what := "loading your projects…"
+			if m.identityBooting {
+				what = "setting up project encryption…"
+			}
+			return m.loadingPanel(t, contentH, "projects", what)
+		}
 		return m.realProjectsEmpty(t, contentH)
 	}
 	pIdx := clampIdx(m.projIdx, m.projectRowCount())
@@ -27,7 +34,7 @@ func (m Model) realProjectsTab(t theme.Theme, contentH int) []string {
 	}
 	for i, p := range m.realProjects {
 		idx := len(m.receivedInvites) + i
-		lRows = append(lRows, realProjRow(t, p, idx == pIdx, lInner))
+		lRows = append(lRows, m.realProjRow(t, p, idx == pIdx, lInner))
 	}
 
 	// Right pane: invite response prompt, awaiting placeholder, or project detail.
@@ -83,11 +90,12 @@ func (m Model) projectDetailBody(t theme.Theme, p projectItem, rw int) []string 
 	}
 	body = append(body,
 		kv(t, "role", strings.ToLower(p.Role), t.Fg, rw),
-		kv(t, "hosts", itoa(p.HostCount), t.Dim, rw),
-		"",
-		stl(t.Dim, t.Panel).Render("members"))
+		"")
 
-	memberFocus := m.focus == 1
+	body = append(body, m.projectHostLines(t, rw)...)
+	body = append(body, "", stl(t.Dim, t.Panel).Render("members"))
+
+	memberFocus := m.focus == pfMembers
 	if d := m.projDetail; d != nil && d.ID == p.ID {
 		for i, mem := range d.Members {
 			marker := "  "
@@ -101,7 +109,8 @@ func (m Model) projectDetailBody(t theme.Theme, p projectItem, rw int) []string 
 				label += " (you)"
 			}
 			body = append(body, stl(t.Hi, t.Panel).Render(marker)+
-				stl(nameFg, t.Panel).Render(padTo2(label, 22))+stl(t.Dim, t.Panel).Render(strings.ToLower(mem.Role)))
+				rowSeg(label, detailNameW, nameFg, t.Panel, false)+
+				stl(t.Dim, t.Panel).Render(strings.ToLower(mem.Role)))
 		}
 		if len(d.Invites) > 0 {
 			body = append(body, "", stl(t.Dim, t.Panel).Render("pending invites"))
@@ -113,7 +122,8 @@ func (m Model) projectDetailBody(t theme.Theme, p projectItem, rw int) []string 
 					marker = "▸ "
 					emailFg = t.Hi
 				}
-				body = append(body, stl(emailFg, t.Panel).Render(marker+padTo2(inv.Email, 22))+
+				body = append(body, stl(emailFg, t.Panel).Render(marker)+
+					rowSeg(inv.Email, detailNameW, emailFg, t.Panel, false)+
 					stl(t.Dim, t.Panel).Render("invited · awaiting accept"))
 			}
 		}
@@ -121,20 +131,78 @@ func (m Model) projectDetailBody(t theme.Theme, p projectItem, rw int) []string 
 		body = append(body, stl(t.Dim, t.Panel).Render("  loading members…"))
 	}
 
-	body = append(body, "")
-	hints := stl(t.Hi, t.Panel).Render("enter") + stl(t.Dim, t.Panel).Render(" filter hosts")
-	if isAdmin(p.Role) {
-		hints += stl(t.Dim, t.Panel).Render(" · ") + stl(t.Hi, t.Panel).Render("i") +
-			stl(t.Dim, t.Panel).Render(" invite · ") + stl(t.Hi, t.Panel).Render("tab") +
-			stl(t.Dim, t.Panel).Render(" members · ") + stl(t.Hi, t.Panel).Render("d/x") +
-			stl(t.Dim, t.Panel).Render(" remove/revoke")
-	}
-	body = append(body, hints)
+	body = append(body, "", m.projectDetailHints(t, p))
 	return body
 }
 
+// projectHostCount is a project's live host count: read from the decrypted doc
+// when it is loaded, so a host added or moved locally shows up immediately
+// rather than at the next projects sync. Falls back to the sync snapshot for a
+// project whose doc has not been fetched.
+func (m Model) projectHostCount(p projectItem) int {
+	if doc := m.projectDocs[p.ID]; doc != nil {
+		return len(doc.HostList())
+	}
+	return p.HostCount
+}
+
+// detailNameW is the shared name column of the detail pane's host and member
+// lists: fixed and truncating, so the two line up and a long address can never
+// run into the status beside it.
+const detailNameW = 26
+
+// projectHostLines renders the selected project's own hosts inside the detail
+// pane. Opening a project moves the cursor here rather than switching tabs, so
+// this list is the tab's primary content, not a footnote under the members.
+func (m Model) projectHostLines(t theme.Theme, rw int) []string {
+	hosts := m.selectedProjectHosts()
+	out := []string{stl(t.Dim, t.Panel).Render("hosts · " + itoa(len(hosts)))}
+	if len(hosts) == 0 {
+		return append(out, stl(t.Dim, t.Panel).Render("  none yet — ")+
+			stl(t.Hi, t.Panel).Render("p")+stl(t.Dim, t.Panel).Render(" on a host moves one in"))
+	}
+	focused := m.focus == pfHosts
+	cur := clampIdx(m.projHostIdx, len(hosts))
+	for i, h := range hosts {
+		marker, nameFg := "  ", t.Fg
+		if focused && i == cur {
+			marker, nameFg = "▸ ", t.Hi
+		}
+		// Width mirrors the members rows below so the two lists line up.
+		res, known := m.probes[h.ID]
+		label, role := probeStatusText(res, known)
+		out = append(out, stl(t.Hi, t.Panel).Render(marker)+
+			rowSeg(h.Name, detailNameW, nameFg, t.Panel, false)+
+			stl(colorFor(t, role), t.Panel).Render(label))
+	}
+	return out
+}
+
+// projectDetailHints names what the keys do for the ring the cursor is in.
+func (m Model) projectDetailHints(t theme.Theme, p projectItem) string {
+	key := func(k, l string) string {
+		return stl(t.Hi, t.Panel).Render(k) + stl(t.Dim, t.Panel).Render(" "+l)
+	}
+	sep := stl(t.Dim, t.Panel).Render(" · ")
+	switch m.focus {
+	case pfHosts:
+		return key("enter", "connect") + sep + key("esc", "back") + sep + key("f", "in hosts tab")
+	case pfMembers:
+		if isAdmin(p.Role) {
+			return key("d/x", "remove/revoke") + sep + key("i", "invite") + sep + key("esc", "back")
+		}
+		return key("esc", "back")
+	default:
+		hints := key("enter", "open hosts") + sep + key("f", "in hosts tab")
+		if isAdmin(p.Role) {
+			hints += sep + key("i", "invite") + sep + key("tab", "members")
+		}
+		return hints
+	}
+}
+
 // realProjRow renders a project list row: name + "N hosts · N members".
-func realProjRow(t theme.Theme, p projectItem, sel bool, innerW int) string {
+func (m Model) realProjRow(t theme.Theme, p projectItem, sel bool, innerW int) string {
 	bg := t.Panel
 	mark := " "
 	nameFg := t.Fg
@@ -152,7 +220,7 @@ func realProjRow(t theme.Theme, p projectItem, sel bool, innerW int) string {
 	if p.AwaitingKey {
 		meta = "awaiting access"
 	} else {
-		meta = itoa(p.HostCount) + " hosts · " + itoa(p.MemberCount) + " members"
+		meta = itoa(m.projectHostCount(p)) + " hosts · " + itoa(p.MemberCount) + " members"
 	}
 	metaW := avail - (2 + nameW + 1)
 	if metaW < 4 {
@@ -411,4 +479,45 @@ func wrapText(s string, width int) []string {
 		lines = append(lines, cur)
 	}
 	return lines
+}
+
+// moveProjectView renders the move-to-project picker: the destinations a host
+// can live in, with the one it is in now marked so the move is a deliberate
+// change rather than a re-pick of the status quo.
+func (m Model) moveProjectView(t theme.Theme) []string {
+	opts := m.projectFormOptions()
+	cur := clampIdx(m.mvIdx, len(opts))
+	body := []string{
+		stl(t.Dim, t.Panel).Render("Move ") + stl(t.Hi, t.Panel).Render(m.mvName) +
+			stl(t.Dim, t.Panel).Render(" to:"),
+		"",
+	}
+	for i, o := range opts {
+		marker, fg := "  ", t.Fg
+		if i == cur {
+			marker, fg = "▸ ", t.Hi
+		}
+		label := o.ProjectName
+		if o.ProjectID == "" {
+			label = "personal vault"
+		}
+		row := stl(t.Hi, t.Panel).Render(marker) + stl(fg, t.Panel).Render(padTo2(label, 28))
+		if o.ProjectID == m.mvSourceID {
+			row += stl(t.Dim, t.Panel).Render("where it is now")
+		} else if o.ProjectID != "" {
+			row += stl(t.Dim, t.Panel).Render("shared with the project's members")
+		}
+		body = append(body, row)
+	}
+	body = append(body, "",
+		stl(t.Dim, t.Panel).Render("A host in a project is readable by every member."),
+		stl(t.Dim, t.Panel).Render("Saved passwords move with it; private keys never do."))
+	if m.mvErr != "" {
+		body = append(body, "", stl(t.Err, t.Panel).Render(" "+m.mvErr))
+	}
+	body = append(body, "",
+		stl(t.Hi, t.Panel).Render("j/k")+stl(t.Dim, t.Panel).Render(" choose · ")+
+			stl(t.Hi, t.Panel).Render("enter")+stl(t.Dim, t.Panel).Render(" move · ")+
+			stl(t.Hi, t.Panel).Render("esc")+stl(t.Dim, t.Panel).Render(" cancel"))
+	return m.modalBox(t, "move host", "hi", body)
 }

@@ -59,6 +59,8 @@ func (m Model) modalView(t theme.Theme) []string {
 		return m.keyUnsyncView(t)
 	case modalSignOut:
 		return m.signOutView(t)
+	case modalMoveProject:
+		return m.moveProjectView(t)
 	}
 	return m.mainView(t)
 }
@@ -154,13 +156,18 @@ func (m Model) projectSelector(t theme.Theme, focused bool) string {
 
 // passwordField renders the masked host-form password (bullets, like the unlock
 // screen). It is only rendered in password mode (the key-mode field is hidden).
+//
+// The empty-field placeholder says what leaving it empty *does*, not merely
+// that it is allowed: "(optional)" reads as a contradiction next to an auth
+// mode called "password", when the truth is that the password is always
+// required — the choice is only whether to store it now or be asked at connect.
 func (m Model) passwordField(t theme.Theme, focused bool) string {
 	var seg string
 	switch {
 	case m.formVals[fPassword] != "":
 		seg = stl(t.Hi, t.Panel).Render(strings.Repeat("•", len([]rune(m.formVals[fPassword]))))
 	case !focused:
-		seg = stl(t.Dim, t.Panel).Render("(optional)")
+		seg = stl(t.Dim, t.Panel).Render("asked at connect · ctrl+r there saves it")
 	}
 	if focused {
 		seg += m.cur(t.Hi, t.Panel)
@@ -286,8 +293,9 @@ func (m Model) sessionHintView(t theme.Theme) []string {
 		stl(t.Fg, t.Panel).Render("Wharf hands your terminal to the session. To get back:"),
 		"",
 		key("ctrl+\\", "   detach — the session keeps running"),
-		key("alt+1..9", " reattach from the dashboard"),
+		key("S", "        list live sessions: reattach, kill, open another"),
 		key("enter", "    reattach from a host row marked live"),
+		key("alt+1..9", " reattach by number (needs Option-as-Meta)"),
 		"",
 		stl(t.Ok, t.Panel).Render(attachSurvivalNotice),
 		"",
@@ -405,7 +413,9 @@ func (m Model) keygenView(t theme.Theme) []string {
 		}
 		line := stl(t.Dim, t.Panel).Render(padTo2(labels[i], 12)) + stl(t.Hi, t.Panel).Render(val)
 		if i == 2 && m.kgVals[i] == "" && !focused {
-			line = stl(t.Dim, t.Panel).Render(padTo2(labels[i], 12)) + stl(t.Dim, t.Panel).Render("(optional)")
+			// Blank is not "skipped" — it writes an unencrypted private key.
+			line = stl(t.Dim, t.Panel).Render(padTo2(labels[i], 12)) +
+				stl(t.Dim, t.Panel).Render("empty = key stored unencrypted")
 		}
 		if focused {
 			line += m.cur(t.Hi, t.Panel)

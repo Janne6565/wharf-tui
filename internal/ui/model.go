@@ -30,6 +30,7 @@ const (
 const (
 	ulUnlock          = iota // existing vault: master-password entry
 	ulUnlocking              // spinner while vault.Open runs
+	ulChoose                 // first run: local-only vault vs. sign in to an account
 	ulCreate                 // fresh vault: new password + confirm
 	ulCreating               // spinner while vault.Create runs
 	ulRecovery               // recovery-code entry
@@ -38,6 +39,14 @@ const (
 	ulResetting              // spinner while ChangePassword+RegenerateRecovery run
 	ulShowCode               // one-time recovery-code display (after create or reset)
 	ulLocked                 // dedicated "another wharf instance is running" state
+
+	// Account sign-in at the gate: pair in the browser, then install the
+	// account's own vault blob as this machine's vault (see update_signin.go).
+	ulSignInCode     // device-code entry
+	ulSignInPairing  // spinner while the code is exchanged and the vault fetched
+	ulSignInPassword // account master-password entry
+	ulSignInOpening  // spinner while the account vault is opened and installed
+	ulSignInSetup    // dead end: the account has no vault yet (finish in browser)
 )
 
 // modalKind is the active real-mode overlay (mutually exclusive).
@@ -68,6 +77,7 @@ const (
 	modalSignOut         // confirm unpairing this device (settings tab)
 	modalSessionHint     // first-connect primer on detach / reattach keys
 	modalSessionPicker   // choose among a host's open sessions, or start another
+	modalMoveProject     // move the selected host between personal and a project
 )
 
 // syncState is the rendered sync status (header indicator). It is pure
@@ -193,6 +203,16 @@ func (m Model) settingCursor(d int) int {
 	}
 }
 
+// Focus rings on the projects tab. Opening a project keeps you on the tab —
+// it moves the cursor into that project's own host list in the detail pane —
+// so the three rings are the project list, its hosts, and its members.
+const (
+	pfList = iota
+	pfHosts
+	pfMembers
+	pfCount
+)
+
 var tabNames = []string{"hosts", "projects", "keys", "settings"}
 
 // vaultHandle is the slice of *vault.Vault the UI depends on, behind an
@@ -252,6 +272,7 @@ type Model struct {
 	projConflict      *syncx.ProjectConflict       // the one being resolved
 	projFilterID      string                       // hosts-tab filter by project ID ("" = none)
 	projFilterName    string                       // display name for the filter chip
+	projectsLoaded    bool                         // a projects sync has landed this session
 	identityReady     bool                         // identity loaded into the engine this session
 	identityBooting   bool                         // a bootstrap attempt is in flight
 	identityNotice    string                       // cross-device "sync first" notice
@@ -279,9 +300,12 @@ type Model struct {
 	invRespID   string
 	invRespName string
 
-	// member cursor in the projects detail pane (focus == 1): indexes the
-	// combined members-then-invites list for d (remove) / x (revoke).
+	// member cursor in the projects detail pane (focus == pfMembers): indexes
+	// the combined members-then-invites list for d (remove) / x (revoke).
 	memberIdx int
+	// host cursor in the projects detail pane (focus == pfHosts): indexes the
+	// selected project's own hosts.
+	projHostIdx int
 
 	tab   int // active dashboard tab
 	focus int // 0 list pane · 1 detail pane
@@ -312,12 +336,21 @@ type Model struct {
 	settings store.Settings
 	probes   map[string]probe.Result // ephemeral reachability, keyed by host ID
 	keyInfos []keys.KeyInfo          // live ~/.ssh scan
+	// keysScanned marks the ~/.ssh scan as having returned (it runs async at
+	// unlock), so an empty keys tab can tell "none" from "not yet".
+	keysScanned bool
 
 	// vault hooks (injectable for tests; default to the real vault package).
 	vaultExists  func(string) bool
 	openVault    func(string, []byte) (vaultHandle, error)
 	createVault  func(string, []byte) (vaultHandle, string, error)
 	openRecovery func(string, string) (vaultHandle, error)
+	installVault func(path string, blob, password []byte) (vaultHandle, error)
+
+	// boot carries an account sign-in that is mid-flight: the pairing is
+	// established but the account's vault has not been installed yet. Nil
+	// outside the sign-in flow.
+	boot *bootstrapState
 
 	// --- vault gate state ---
 	unlockStep    int
@@ -344,6 +377,14 @@ type Model struct {
 	formVals       [fCount]string // Name, User, Addr, Port, Tags, AuthMethod, KeyPath, Password, ProjectID
 	formFocus      int
 	formErr        string
+
+	// move-to-project picker (hosts tab): the host being moved, where it lives
+	// now, and the cursor over the destination options.
+	mvHostID   string
+	mvSourceID string
+	mvName     string
+	mvIdx      int
+	mvErr      string
 
 	delID     string
 	delName   string

@@ -17,6 +17,14 @@ func (m Model) unlockKey(key string) (tea.Model, tea.Cmd) {
 	switch m.unlockStep {
 	case ulUnlock:
 		return m.unlockEntryKey(key)
+	case ulChoose:
+		return m.chooseKey(key)
+	case ulSignInCode:
+		return m.signInCodeKey(key)
+	case ulSignInPassword:
+		return m.signInPasswordKey(key)
+	case ulSignInSetup:
+		return m.signInSetupKey(key)
 	case ulRecovery:
 		return m.recoveryEntryKey(key)
 	case ulCreate, ulReset:
@@ -38,7 +46,8 @@ func (m Model) unlockKey(key string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	default:
-		// ulUnlocking / ulCreating / ulRecoveryOpening / ulResetting: busy.
+		// ulUnlocking / ulCreating / ulRecoveryOpening / ulResetting /
+		// ulSignInPairing / ulSignInOpening: busy.
 		return m, nil
 	}
 }
@@ -350,10 +359,16 @@ func (m Model) lock() (tea.Model, tea.Cmd) {
 	m.vault = nil
 	m.probes = map[string]probe.Result{}
 	m.keyInfos = nil
+	m.keysScanned = false
+	m.projectsLoaded = false
 	m.screen = scUnlock
 	m.unlockStep = ulUnlock
 	m.pwInput = ""
 	m.unlockErr = ""
+	// A sign-in caught mid-flight is abandoned: its state is keyed to a vault
+	// that is now closed. Re-pairing after unlock picks it up again.
+	m.boot = nil
+	m.code = ""
 	m.query = ""
 	m.searchActive = false
 	m.hostIdx = 0

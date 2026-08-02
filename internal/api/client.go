@@ -47,6 +47,15 @@ func DeviceURL(base string) string {
 	return strings.TrimRight(base, "/") + "/device"
 }
 
+// SetPasswordURL is the browser page where an account created through OAuth
+// chooses its master password, which is what creates the account vault. The
+// TUI cannot do this itself (it would have to re-implement the account's
+// authKey / recoveryAuthKey derivation and upload them atomically), so a
+// sign-in against an account with no vault points here.
+func SetPasswordURL(base string) string {
+	return strings.TrimRight(base, "/") + "/set-password"
+}
+
 var (
 	// ErrSessionExpired means the refresh token was rejected: the session is
 	// dead (expired, or revoked by a recovery reset) and the device must

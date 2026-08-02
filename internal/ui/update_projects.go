@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -460,6 +461,7 @@ func (m Model) handleProjectsSynced(msg projectsSyncedMsg) (tea.Model, tea.Cmd) 
 	case res.NoIdentity:
 		return m.ensureIdentity()
 	}
+	m.projectsLoaded = true
 	// Drop removed projects.
 	for _, id := range res.Removed {
 		delete(m.projectDocs, id)
@@ -664,6 +666,27 @@ func (m Model) ensureAndSyncProjects() tea.Cmd {
 
 // --- projects tab entry -------------------------------------------------------
 
+// bootstrapProjects loads the project list and received invites for a signed-in
+// session, without waiting for the projects tab to be opened. Projects are not
+// a feature of that one tab: the hosts tab merges project hosts into its list,
+// and "move to project" needs to know which projects exist — deferring the load
+// left both quietly wrong, a hosts list missing rows and a move that reported
+// "no projects yet" for an account that had several.
+//
+// It deliberately does NOT create a project identity. Identity generation
+// writes an X25519 keypair into the vault, pushes it and publishes the public
+// key, and it bumps the payload to a schema older builds refuse to open — none
+// of which should happen to someone who signs in and never touches projects.
+// A vault that already carries an identity has it loaded by initSync, and a
+// vault that does not has no keyed projects to show anyway; opening the tab
+// still bootstraps one on demand.
+func (m Model) bootstrapProjects() (Model, tea.Cmd) {
+	if !m.realMode() || m.eng == nil || !m.identityReady {
+		return m, nil
+	}
+	return m, tea.Batch(m.syncProjectsCmd(), m.fetchInvitesCmd())
+}
+
 // enterProjectsTab is called when the user switches to the projects tab in real
 // mode: bootstrap identity (once), fetch invites, and run a projects sync.
 func (m Model) enterProjectsTab() (Model, tea.Cmd) {
@@ -691,14 +714,22 @@ func (m Model) projectsKey(key string) (tea.Model, tea.Cmd) {
 		m.projectsMove(-1)
 		return m, m.onProjectSelectionChanged()
 	case "tab":
-		if m.focus == 0 {
-			m.focus = 1
-		} else {
-			m.focus = 0
+		return m.projectsCycleFocus(1), nil
+	case "shift+tab":
+		return m.projectsCycleFocus(-1), nil
+	case "esc":
+		// Step back out of the detail pane rather than off the tab.
+		if m.focus != pfList {
+			m.focus = pfList
+			return m, nil
 		}
 		return m, nil
 	case "enter", " ":
 		return m.projectsEnter()
+	case "f":
+		// The merged hosts tab, filtered to this project — the old behaviour of
+		// enter, now an explicit choice instead of a surprise tab switch.
+		return m.filterHostsByProject()
 	case "i":
 		if p, ok := m.selectedProject(); ok && !p.AwaitingKey && isAdmin(p.Role) {
 			m.inviteOpen = true
@@ -730,21 +761,82 @@ func (m Model) projectsKey(key string) (tea.Model, tea.Cmd) {
 // projectsMove moves the active cursor: the project/invite list (focus 0) or the
 // member cursor (focus 1).
 func (m *Model) projectsMove(d int) {
-	if m.focus == 1 && m.projDetail != nil {
+	switch {
+	case m.focus == pfHosts:
+		m.projHostIdx = clampIdx(m.projHostIdx+d, len(m.selectedProjectHosts()))
+	case m.focus == pfMembers && m.projDetail != nil:
 		n := len(m.projDetail.Members) + len(m.projDetail.Invites)
 		m.memberIdx = clampIdx(m.memberIdx+d, n)
-		return
+	default:
+		m.projIdx = clampIdx(m.projIdx+d, m.projectRowCount())
 	}
-	m.projIdx = clampIdx(m.projIdx+d, m.projectRowCount())
+}
+
+// projectsCycleFocus advances the detail-pane focus ring, skipping rings that
+// have nothing in them (an invite row has neither hosts nor members, and an
+// awaiting-access project has no readable hosts).
+func (m Model) projectsCycleFocus(d int) Model {
+	p, isProject := m.selectedProject()
+	if !isProject || p.AwaitingKey {
+		m.focus = pfList
+		return m
+	}
+	for i := 0; i < pfCount; i++ {
+		m.focus = (m.focus + d + pfCount) % pfCount
+		switch m.focus {
+		case pfList:
+			return m
+		case pfHosts:
+			if len(m.selectedProjectHosts()) > 0 {
+				m.projHostIdx = clampIdx(m.projHostIdx, len(m.selectedProjectHosts()))
+				return m
+			}
+		case pfMembers:
+			if m.projDetail != nil && len(m.projDetail.Members)+len(m.projDetail.Invites) > 0 {
+				return m
+			}
+		}
+	}
+	m.focus = pfList
+	return m
+}
+
+// selectedProjectHosts returns the hosts of the project under the cursor,
+// stable-sorted the way the hosts tab sorts them. Empty unless a keyed project
+// row is selected.
+func (m Model) selectedProjectHosts() []store.Host {
+	p, ok := m.selectedProject()
+	if !ok || p.AwaitingKey {
+		return nil
+	}
+	doc := m.projectDocs[p.ID]
+	if doc == nil {
+		return nil
+	}
+	hosts := doc.HostList()
+	sort.SliceStable(hosts, func(i, j int) bool {
+		return strings.ToLower(hosts[i].Name) < strings.ToLower(hosts[j].Name)
+	})
+	return hosts
+}
+
+// selectedProjectHost returns the host under the detail-pane host cursor.
+func (m Model) selectedProjectHost() (store.Host, bool) {
+	hosts := m.selectedProjectHosts()
+	if len(hosts) == 0 {
+		return store.Host{}, false
+	}
+	return hosts[clampIdx(m.projHostIdx, len(hosts))], true
 }
 
 // onProjectSelectionChanged fetches detail for a newly selected project.
 func (m Model) onProjectSelectionChanged() tea.Cmd {
-	if m.focus == 1 {
+	if m.focus != pfList {
 		return nil
 	}
 	m.projDetail = nil
 	m.memberIdx = 0
+	m.projHostIdx = 0
 	return m.refreshDetailCmd()
 }
 
@@ -759,14 +851,40 @@ func (m Model) projectsEnter() (tea.Model, tea.Cmd) {
 		if p.AwaitingKey {
 			return m.setToast("awaiting access — an admin needs to grant your key", "err"), nil
 		}
-		// Filter the hosts tab to this project by ID.
-		m.projFilterID = p.ID
-		m.projFilterName = p.Name
-		m.tab, m.focus = 0, 0
-		m.query = ""
-		m.hostIdx = 0
+		// Opening a project stays on this tab: the cursor drops into the
+		// project's own host list in the detail pane. Switching tabs out from
+		// under the user was disorienting — the hosts tab looked like it had
+		// silently lost most of its rows.
+		if m.focus == pfList {
+			if len(m.selectedProjectHosts()) == 0 {
+				return m.setToast("no hosts in "+p.Name+" yet — p on a host moves one in", "err"), nil
+			}
+			m.focus = pfHosts
+			m.projHostIdx = 0
+			return m, nil
+		}
+		if m.focus == pfHosts {
+			if h, ok := m.selectedProjectHost(); ok {
+				return m.startConnect(h)
+			}
+		}
 		return m, nil
 	}
+	return m, nil
+}
+
+// filterHostsByProject shows the merged hosts tab narrowed to the selected
+// project (the filter chip clears with esc).
+func (m Model) filterHostsByProject() (tea.Model, tea.Cmd) {
+	p, ok := m.selectedProject()
+	if !ok || p.AwaitingKey {
+		return m, nil
+	}
+	m.projFilterID = p.ID
+	m.projFilterName = p.Name
+	m.tab, m.focus = 0, 0
+	m.query = ""
+	m.hostIdx = 0
 	return m, nil
 }
 
@@ -908,7 +1026,7 @@ func (m Model) revokeSelectedInvite() (tea.Model, tea.Cmd) {
 	// Only the detail-pane invites are revocable; use the member cursor when it
 	// is over an invite row.
 	invIdx := m.memberIdx - len(m.projDetail.Members)
-	if m.focus != 1 || invIdx < 0 || invIdx >= len(m.projDetail.Invites) {
+	if m.focus != pfMembers || invIdx < 0 || invIdx >= len(m.projDetail.Invites) {
 		return m.setToast("select a pending invite (tab to the detail pane)", "err"), nil
 	}
 	inv := m.projDetail.Invites[invIdx]
@@ -920,7 +1038,7 @@ func (m Model) removeSelectedMember() (tea.Model, tea.Cmd) {
 	if !ok || m.projDetail == nil || !isAdmin(p.Role) {
 		return m, nil
 	}
-	if m.focus != 1 || m.memberIdx >= len(m.projDetail.Members) {
+	if m.focus != pfMembers || m.memberIdx >= len(m.projDetail.Members) {
 		return m.setToast("select a member in the detail pane to remove", "err"), nil
 	}
 	target := m.projDetail.Members[m.memberIdx]

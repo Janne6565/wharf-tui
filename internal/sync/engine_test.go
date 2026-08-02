@@ -630,3 +630,95 @@ func TestSessionFileMode(t *testing.T) {
 		t.Fatal("session file must be encrypted")
 	}
 }
+
+// Attach adopts a pairing established before any vault existed (the first-run
+// sign-in, where there is no DEK yet to seal a session file with) and records
+// agreement with the vault the caller installed — so the very next pass is a
+// no-op rather than a spurious push.
+func TestAttachAdoptsPairingWithoutPushing(t *testing.T) {
+	remote := payloadN(2, "r")
+	f := &fakeAPI{vault: wrap(remote), version: 7}
+	sessionPath := filepath.Join(t.TempDir(), "session.enc")
+	local := append([]byte(nil), remote...)
+	e := New(Config{
+		API:         f,
+		SessionPath: sessionPath,
+		Key:         make([]byte, 32),
+		Password:    []byte("pw"),
+		ReadBlob:    func() ([]byte, error) { return wrap(local), nil },
+		OpenBlob:    fakeOpenBlob,
+	})
+
+	if err := e.Attach(Pairing{
+		RefreshToken: "ref1",
+		Email:        "d@example.com",
+		UserID:       "u1",
+		Version:      7,
+		Payload:      remote,
+	}); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if !e.SignedIn() || e.Email() != "d@example.com" {
+		t.Fatalf("Attach should sign in, got signedIn=%v email=%q", e.SignedIn(), e.Email())
+	}
+
+	res := e.Sync(context.Background(), local)
+	if res.Err != nil || res.Pushed || res.Conflict != nil || res.Adopt != nil {
+		t.Fatalf("the pass after Attach should be a no-op, got %+v", res)
+	}
+	if f.puts != 0 {
+		t.Fatalf("Attach must not leave a push owed, got %d", f.puts)
+	}
+
+	// The session survives a restart: it was persisted, not just held.
+	e2 := New(Config{API: f, SessionPath: sessionPath, Key: make([]byte, 32), OpenBlob: fakeOpenBlob})
+	if email, ok := e2.Resume(); !ok || email != "d@example.com" {
+		t.Fatalf("Resume after Attach = (%q, %v)", email, ok)
+	}
+}
+
+// A local change made after Attach is pushed on the next pass — the merge the
+// sign-in flow folds into the adopted vault relies on exactly this.
+func TestAttachThenLocalChangePushes(t *testing.T) {
+	remote := payloadN(1, "r")
+	f := &fakeAPI{vault: wrap(remote), version: 3}
+	local := append([]byte(nil), remote...)
+	e := New(Config{
+		API:         f,
+		SessionPath: filepath.Join(t.TempDir(), "session.enc"),
+		Key:         make([]byte, 32),
+		Password:    []byte("pw"),
+		ReadBlob:    func() ([]byte, error) { return wrap(local), nil },
+		OpenBlob:    fakeOpenBlob,
+	})
+	if err := e.Attach(Pairing{RefreshToken: "ref1", Email: "d@example.com", Version: 3, Payload: remote}); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	local = payloadN(2, "merged")
+	res := e.Sync(context.Background(), local)
+	if !res.Pushed {
+		t.Fatalf("the merged payload should be pushed, got %+v", res)
+	}
+	if !bytes.Equal(f.vault, wrap(local)) {
+		t.Fatal("the pushed blob should be the merged local vault")
+	}
+}
+
+func TestMasterPasswordIsACopy(t *testing.T) {
+	e := New(Config{API: &fakeAPI{}, SessionPath: filepath.Join(t.TempDir(), "s.enc"), Key: make([]byte, 32), Password: []byte("pw")})
+	got := e.MasterPassword()
+	if string(got) != "pw" {
+		t.Fatalf("MasterPassword = %q", got)
+	}
+	for i := range got {
+		got[i] = 'x'
+	}
+	if string(e.MasterPassword()) != "pw" {
+		t.Fatal("callers must not be able to scribble on the retained password")
+	}
+	e.Close()
+	if e.MasterPassword() != nil {
+		t.Fatal("a closed engine must hand out no password")
+	}
+}

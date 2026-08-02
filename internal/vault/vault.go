@@ -151,6 +151,58 @@ func CreateWithParams(path string, password []byte, params Params) (*Vault, stri
 	return v, code, nil
 }
 
+// InstallBlob writes an account's remote WHARFV blob to path VERBATIM and
+// opens it with password, replacing whatever vault file was there before.
+//
+// Verbatim is the whole point. A blob carries its own password slot and its
+// own recovery slot, and both travel with the bytes: installing the account's
+// blob makes the local file *be* the account vault, so one master password and
+// one recovery code work on the server, in the browser and on this machine.
+// Re-sealing the payload into a locally created file instead would leave the
+// device with a recovery code the server has never heard of — and, once that
+// file is pushed, would replace the account's recovery slot with it, silently
+// breaking the browser's recovery flow (which verifies the code server-side
+// and then decrypts the blob with the same code).
+//
+// The blob is opened before anything is written, so a wrong password
+// (ErrWrongSecret) leaves the existing vault file untouched. Callers holding an
+// open vault at path must Close it first to release the lock.
+func InstallBlob(path string, blob, password []byte) (*Vault, error) {
+	h, body, err := parseHeader(blob)
+	if err != nil {
+		return nil, err
+	}
+	// One KDF pass for both the check and the open: an argon2id derivation at
+	// the pinned cost is the expensive part of this call, and the install path
+	// already runs one to verify the password against the downloaded blob.
+	kek := deriveKEK(password, h.pwSalt[:], h.params)
+	dek, err := unwrapDEK(kek, h.pwNonce[:], h.pwWrap[:])
+	zero(kek)
+	if err != nil {
+		return nil, ErrWrongSecret
+	}
+	payload, err := openBody(dek, h.bodyNonce[:], body, blob[:headerLen])
+	if err != nil {
+		zero(dek)
+		return nil, ErrCorrupt
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		zero(dek)
+		return nil, err
+	}
+	lock, err := acquireLock(path)
+	if err != nil {
+		zero(dek)
+		return nil, err
+	}
+	if err := writeFileAtomic(path, blob); err != nil {
+		zero(dek)
+		lock.Close()
+		return nil, err
+	}
+	return &Vault{path: path, hdr: h, dek: dek, payload: payload, lock: lock}, nil
+}
+
 // Open unlocks the vault at path with the master password.
 func Open(path string, password []byte) (*Vault, error) {
 	return openVault(path, func(h header) ([]byte, error) {

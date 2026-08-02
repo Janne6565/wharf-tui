@@ -149,11 +149,17 @@ Environment: `WHARF_VAULT` (vault file path), `WHARF_API_BASE` (sync backend bas
 
 ## How it works
 
-- **First run** creates your vault: choose a master password, then write down the
-  **40-character recovery code** — it is shown exactly once and is the *only* way back
-  in if you forget the password. Every later run starts at the unlock screen
-  (`r` switches to recovery-code entry, which forces a password reset and issues a
-  *new* code).
+- **First run asks one question:** use wharf on this machine only, or sign in to a
+  Wharf account.
+  - **`1` — local only** creates your vault here: choose a master password, then write
+    down the **40-character recovery code** — it is shown exactly once and is the
+    *only* way back in if you forget the password.
+  - **`2` — sign in** pairs in your browser and then *installs your account's vault*
+    as this machine's vault, so the account's master password and recovery code are
+    the only ones this machine has. Nothing is created locally.
+
+  Every later run starts at the unlock screen (`r` switches to recovery-code entry,
+  which forces a password reset and issues a *new* code).
 - **Sessions are full-fidelity, and they outlive wharf.** Connecting hands your real
   terminal to the remote shell — vim, htop and tmux behave exactly as over plain `ssh`.
   Press **`ctrl+\`** to detach: the session keeps running while you use the dashboard,
@@ -195,6 +201,24 @@ uploaded verbatim); it never sees your master password or plaintext.
 3. Done — the header shows your email plus a live sync indicator:
    `● synced` / `⠋ syncing` / `● offline` / `● conflict`.
 
+**One password, one recovery code.** Signing in does not leave the machine with two
+vaults. A vault blob carries its own password slot *and* its own recovery slot, and an
+account additionally has server-side credentials derived from the same password and
+the same code — so a locally created vault pushed into an account would answer to a
+recovery code the server has never heard of, and the browser's reset flow would break.
+Instead, pairing **adopts the account vault**: it is downloaded, installed verbatim as
+this machine's vault file, and the hosts and keys you already had here are merged into
+it and pushed on the next pass. Afterwards the account's master password and recovery
+code are the ones that work here too.
+
+- If this machine's password already matches the account's, the adoption is silent.
+  If it doesn't, the TUI asks for the *account's* master password once.
+- Merging never overwrites: a local host or key whose name is already taken on the
+  account side is skipped, and the toast says how many were kept and how many clashed.
+- An account created through Google/GitHub that has never set a master password has no
+  vault to adopt. The TUI will not invent one — it points you at
+  `wharf.jannekeipert.de/set-password` and leaves the account untouched.
+
 **Your email must be verified** before the backend hands out a session. If it
 isn't, pairing is refused with "email not verified" — confirm the address in
 the browser (verification is web-only; the TUI never registers or verifies) and
@@ -225,8 +249,26 @@ deletes the session file and keeps the local vault.
 **Master password note:** a remote vault blob is encrypted by whichever client
 wrote it, under *your master password* with its own salts. The TUI keeps the
 password you unlocked with in memory (zeroed on lock/quit) to open pulled
-blobs. If your local vault password differs from your account master password,
-pulls fail with an explicit error — set them to the same password to sync.
+blobs. If it turns out not to open the account's vault, sync does not wedge:
+the TUI offers to adopt the account vault, asking for its master password once
+and merging this machine's hosts into it.
+
+## Projects
+
+A project is a shared host workspace: its hosts live in their own encrypted
+blob, sealed to every member's published key. Private keys are never shared.
+
+- **Opening a project keeps you on the projects tab.** `enter` moves the cursor
+  into that project's hosts in the detail pane — `enter` connects, `esc` goes
+  back. `tab` rings through list → hosts → members. `f` is the old behaviour on
+  purpose: the merged hosts tab, filtered to this project (`esc` clears it).
+- **Moving a host in or out** is `p` on the hosts tab: pick the personal vault
+  or any project you can write to. The host leaves one document and lands in the
+  other, each pushed on its own. A name already taken at the destination is
+  refused *before* anything is removed — the two sides are separate blobs with
+  separate versioned pushes and cannot be made atomic, so the host must never be
+  in flight between them. Saved passwords travel with the host; a host in a
+  project is readable by every member, so move deliberately.
 
 **Backend:** defaults to `https://wharf.jannekeipert.de`; override with
 `WHARF_API_BASE` (e.g. a local `wharf-backend` on `http://localhost:8080`).
@@ -258,9 +300,16 @@ awaiting-access until an admin re-grants).
   as an opaque ciphertext blob (zero-knowledge server).
 - Two unlock slots: master password and the one-time **recovery code**. Regenerating
   the code invalidates the old one. No email reset, no support backdoor.
-- Sign-in is a **browser device-code** pairing — no account password is ever typed
-  into the TUI. The device session lives in an encrypted `session.enc` next to the
-  vault (see [Account sync](#account-sync)).
+- Sign-in is a **browser device-code** pairing: authentication happens in the browser
+  and the TUI never sends a password to the server. It may ask for your account's
+  *master* password — that is the key to your vault ciphertext, needed locally to open
+  the blob it just downloaded, exactly as the unlock screen needs it every run. The
+  device session lives in an encrypted `session.enc` next to the vault (see
+  [Account sync](#account-sync)).
+- **One password and one recovery code per account, on every device.** Signing in
+  installs the account's vault blob verbatim rather than uploading a locally created
+  one, so the recovery slot inside the blob and the recovery credential on the server
+  stay the same secret — which is what the browser's reset flow requires.
 - **The server distributes project public keys, so its copy of yours is checked.**
   Project keys are sealed to each member's published X25519 key; a server that
   swapped in its own key for your account would receive every project key shared
@@ -332,9 +381,11 @@ it, and holds nothing else. `WHARF_RUNTIME_DIR` overrides the location.
 | `j` / `k`, `↑` / `↓` | move selection |
 | `1`–`4` | switch tab (hosts / projects / keys / settings) |
 | `/` | filter hosts (search as you type) |
-| `tab` | cycle list ⇄ detail pane focus |
+| `tab` | cycle pane focus (projects tab: list → hosts → members) |
 | `enter` | connect / open / toggle |
 | `a` / `e` / `d` | add / edit / delete host |
+| `p` | move the selected host into a project (or back to personal) |
+| `f` | show this project's hosts on the hosts tab *(projects tab)* |
 | `m` | import `~/.ssh/config` |
 | `R` | re-probe reachability |
 | `g` | generate an ed25519 key *(keys tab)* |
