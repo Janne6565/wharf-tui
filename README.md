@@ -14,10 +14,9 @@ mobile companion, sync backend, deployment) live in sibling `wharf-*` repos.
 
 **Usable SSH client with real account sync.** Real SSH transport, encrypted vault
 persistence, host management, `~/.ssh/config` import, reachability probes and key
-generation are implemented and tested. Device-code sign-in and cross-machine
-**vault sync** now run against the live `wharf-backend`
-(see [Account sync](#account-sync)); team projects are still simulated. See
-[Roadmap](#roadmap).
+generation are implemented and tested. Device-code sign-in, cross-machine
+**vault sync** and **team projects** all run against the live `wharf-backend`
+(see [Account sync](#account-sync)). See [Roadmap](#roadmap).
 
 ## Install
 
@@ -79,7 +78,7 @@ go build -ldflags "-X main.version=v1.2.3" -o wharf ./cmd/wharf
 go run ./cmd/wharf --demo
 ```
 
-Requires Go 1.24+. Releases are cut with GoReleaser — see
+Requires Go 1.26+. Releases are cut with GoReleaser — see
 [docs/PACKAGING.md](docs/PACKAGING.md).
 
 ## CLI
@@ -429,7 +428,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) +
 - [x] Sync client against `wharf-backend` (device-code auth, ciphertext push/pull)
 - [x] Port forwarding (`-L`/`-R`/`-D`, per host)
 - [x] Sessions that survive quitting wharf (session-host child processes)
-- [ ] Team projects backed by the real backend
+- [x] Team projects backed by the real backend
 - [ ] Hardware keys (YubiKey resident / `-SK`)
 - [ ] Assign a scanned key to a host from the keys tab
 - [ ] mosh fallback
