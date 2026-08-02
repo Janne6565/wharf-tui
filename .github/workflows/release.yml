@@ -64,10 +64,10 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
-          # Feeds NODE_AUTH_TOKEN below. Remove this line when switching to
-          # trusted publishing: with no token it makes npm authenticate as the
-          # empty string rather than using OIDC, reported as a 404 on PUT.
-          registry-url: https://registry.npmjs.org
+          # No registry-url: it writes an .npmrc pinning
+          # _authToken=${NODE_AUTH_TOKEN}, and trusted publishing has no token.
+          # npm would then authenticate as the empty string instead of using
+          # OIDC, and report it as a 404 on PUT.
 
       # npm's trusted publishing reports a missing OIDC identity as a 404 or
       # ENEEDAUTH, which points at the wrong thing entirely. Checking for the
@@ -93,7 +93,6 @@ jobs:
         env:
           TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
           AUR_KEY: ${{ secrets.AUR_KEY }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           SCOOP_DEPLOY_KEY: ${{ secrets.SCOOP_DEPLOY_KEY }}
           WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
           CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
@@ -108,7 +107,9 @@ jobs:
             echo "| channel | credential | status |"
             echo "| --- | --- | --- |"
             echo "| GitHub release (archives, deb/rpm/apk) | GITHUB_TOKEN | publishing |"
-            for pair in "Homebrew cask:TAP_DEPLOY_KEY" "AUR:AUR_KEY" "npm / bun:NPM_TOKEN" \
+            # npm carries no credential — it authenticates per run over OIDC.
+            echo "| npm / bun | OIDC (trusted publishing) | publishing |"
+            for pair in "Homebrew cask:TAP_DEPLOY_KEY" "AUR:AUR_KEY" \
               "Scoop:SCOOP_DEPLOY_KEY" "winget:WINGET_TOKEN" "Chocolatey:CHOCO_API_KEY"; do
               name="${pair%%:*}"; var="${pair##*:}"
               if [ -n "${!var}" ]; then
@@ -181,9 +182,12 @@ jobs:
         # with it — both are gated on this job's result, and they have nothing
         # to do with npm. The outcome is reported in the summary below instead.
         continue-on-error: true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          # Trusted publishing needs npm >= 11.5.1; Node 22 ships 10.x. Pinned
+          # rather than @latest because npm 12's engine check rejects Node 22.
+          npm install -g npm@11.9.0
+          npm --version
+
           # A prerelease tag (v1.2.3-rc.1) must not become `latest`, or
           # `bun i -g wharf-tui` would hand every user the release candidate.
           case "$VERSION_TAG" in
