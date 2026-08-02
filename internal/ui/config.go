@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/Janne6565/wharf-tui/internal/api"
+	"github.com/Janne6565/wharf-tui/internal/browser"
 	"github.com/Janne6565/wharf-tui/internal/data"
 	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
@@ -82,6 +83,12 @@ type Config struct {
 	// GenIdentity generates a fresh X25519 identity keypair (base64 pub, priv).
 	// Nil defaults to vault.GenerateIdentity; tests inject a deterministic fake.
 	GenIdentity func() (pub, priv []byte, err error)
+
+	// OpenBrowser opens the device-pairing page when the user reaches the
+	// code-entry screen. Nil defaults to browser.Open, except in demo mode or
+	// where there is no display to open into (browser.Available), which leaves
+	// it disabled. Tests inject a recorder so no real browser is launched.
+	OpenBrowser func(string) error
 }
 
 // New builds the initial model. Demo mode opens on the simulated account
@@ -108,6 +115,13 @@ func New(cfg Config) Model {
 		genIdentity:       cfg.GenIdentity,
 		projectDocs:       map[string]*store.ProjectDoc{},
 		deviceURL:         api.DeviceURL(api.BaseURL()),
+		openBrowser:       cfg.OpenBrowser,
+	}
+	// cfg.Demo, not m.demo: the demo/real branches below are what set m.demo,
+	// so reading it here would always see false and hand a demo run a real
+	// browser.
+	if m.openBrowser == nil && !cfg.Demo && browser.Available() {
+		m.openBrowser = browser.Open
 	}
 	if m.syncProjectCrypto == nil {
 		m.syncProjectCrypto = vaultProjectCrypto{}

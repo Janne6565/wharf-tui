@@ -84,6 +84,21 @@ type vaultInstalledMsg struct {
 	err  error
 }
 
+// openDeviceURLCmd hands the pairing page to the user's browser so they do not
+// have to retype a URL to reach a code they then retype anyway. It is a
+// convenience, not a step: the URL stays on screen, so nothing here is load
+// bearing and a failure is swallowed rather than shown as an error.
+//
+// Returns nil when there is no sensible browser to open — demo mode, an SSH
+// session, a display-less box — leaving the manual instructions as they were.
+func (m Model) openDeviceURLCmd() tea.Cmd {
+	if m.openBrowser == nil {
+		return nil
+	}
+	open, url := m.openBrowser, m.deviceURL
+	return func() tea.Msg { return browserOpenedMsg{err: open(url)} }
+}
+
 // --- gate: the first-run choice -------------------------------------------------
 
 // chooseKey drives the first-run "local vault or account?" screen. It is shown
@@ -99,6 +114,8 @@ func (m Model) chooseKey(key string) (tea.Model, tea.Cmd) {
 		m.unlockStep = ulSignInCode
 		m.unlockErr = ""
 		m.code = ""
+		m.browserOpened = false
+		return m, m.openDeviceURLCmd()
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	}
@@ -357,6 +374,14 @@ func (m Model) handleAccountFetched(msg accountFetchedMsg) (tea.Model, tea.Cmd) 
 		m.unlockErr = ""
 		return m, nil
 	}
+}
+
+// handleBrowserOpened records whether the pairing page actually made it to a
+// browser, so the screen can say "opened" instead of "open this" — and keep
+// saying "open this" when it did not.
+func (m Model) handleBrowserOpened(msg browserOpenedMsg) (tea.Model, tea.Cmd) {
+	m.browserOpened = msg.err == nil
+	return m, nil
 }
 
 // signInFailed reports a pairing/fetch failure on whichever screen the user is

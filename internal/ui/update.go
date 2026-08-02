@@ -43,6 +43,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case browserOpenedMsg:
+		return m.handleBrowserOpened(msg)
+
 	// vault gate results.
 	case vaultCreatedMsg, vaultOpenedMsg, vaultRecoveredMsg, vaultResetMsg:
 		return m.handleVaultMsg(msg)
@@ -208,6 +211,8 @@ func (m Model) authKey(key string) (tea.Model, tea.Cmd) {
 			m.authStep = 1
 			m.code = ""
 			m.authErr = ""
+			m.browserOpened = false
+			return m, m.openDeviceURLCmd()
 		case "l", "L": // demo: skip login — use the local sample vault
 			if m.demo {
 				m.screen = scMain

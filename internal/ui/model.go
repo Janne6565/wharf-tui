@@ -256,6 +256,12 @@ type Model struct {
 	syncGen   int    // debounce generation for post-save pushes
 	deviceURL string // pairing page shown on the sign-in screen
 
+	// Auto-opening the pairing page. openBrowser is injectable for tests and
+	// nil when opening would be pointless (demo mode, or no reachable
+	// display — see internal/browser.Available).
+	openBrowser   func(string) error
+	browserOpened bool // the pairing page was handed to a browser
+
 	// sync hooks (injectable for tests; defaults wired in initSync).
 	syncAPI           syncx.API
 	syncReadBlob      func() ([]byte, error)

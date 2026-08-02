@@ -196,7 +196,7 @@ func (m Model) authView(t theme.Theme) []string {
 			}
 		} else {
 			body = []string{
-				stl(t.Dim, t.Panel).Render("In your browser, open"),
+				stl(t.Dim, t.Panel).Render(m.deviceURLLead()),
 				stl(t.Hi, t.Panel).Render(stripScheme(m.deviceURL)),
 				"",
 				stl(t.Dim, t.Panel).Render("Sign in there, then type the pairing code it shows:"),

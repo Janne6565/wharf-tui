@@ -12,6 +12,13 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// browserOpenedMsg reports the result of auto-opening the device-pairing page.
+// A failure is not surfaced as an error: the URL is on screen regardless, so
+// the user simply does by hand what would have happened for them.
+type browserOpenedMsg struct {
+	err error
+}
+
 // --- vault gate messages ----------------------------------------------------
 
 // The gate messages carry the master password onward: the sync engine

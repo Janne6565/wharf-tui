@@ -145,7 +145,8 @@ version and platform, the resolved vault / session / `known_hosts` paths (with a
 present/missing marker each), and the API base and device URL. It is what to paste into
 a bug report.
 
-Environment: `WHARF_VAULT` (vault file path), `WHARF_API_BASE` (sync backend base URL).
+Environment: `WHARF_VAULT` (vault file path), `WHARF_API_BASE` (sync backend base URL),
+`WHARF_NO_BROWSER` (set to anything to stop sign-in opening the pairing page for you).
 
 ## How it works
 
@@ -154,7 +155,8 @@ Environment: `WHARF_VAULT` (vault file path), `WHARF_API_BASE` (sync backend bas
   - **`1` — local only** creates your vault here: choose a master password, then write
     down the **40-character recovery code** — it is shown exactly once and is the
     *only* way back in if you forget the password.
-  - **`2` — sign in** pairs in your browser and then *installs your account's vault*
+  - **`2` — sign in** opens the pairing page in your browser, pairs there, and then
+    *installs your account's vault*
     as this machine's vault, so the account's master password and recovery code are
     the only ones this machine has. Nothing is created locally.
 

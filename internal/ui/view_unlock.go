@@ -83,7 +83,7 @@ func (m Model) unlockBody(t theme.Theme) (string, string, []string) {
 
 	case ulSignInCode:
 		body := []string{
-			stl(t.Dim, t.Panel).Render("In your browser, open"),
+			stl(t.Dim, t.Panel).Render(m.deviceURLLead()),
 			stl(t.Hi, t.Panel).Render(stripScheme(m.deviceURL)),
 			"",
 			stl(t.Dim, t.Panel).Render("Sign in there, then type the pairing code it shows:"),
@@ -257,4 +257,16 @@ func panelInner(w int) int {
 		pw = w - 6
 	}
 	return boxContentW(pw)
+}
+
+// deviceURLLead introduces the pairing URL on the code-entry screens. It only
+// claims a browser was opened when one actually was: if the open failed, or was
+// skipped because there is nowhere to open into, the screen keeps asking the
+// user to do it themselves rather than leaving them waiting for a window that
+// is never coming.
+func (m Model) deviceURLLead() string {
+	if m.browserOpened {
+		return "Opened in your browser:"
+	}
+	return "In your browser, open"
 }
