@@ -226,8 +226,15 @@ func TestPrecedence(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Clear every spelling first, then set what the case wants. Windows
+			// environment names are case-insensitive, so "all_proxy" and
+			// "ALL_PROXY" are one variable there: a single pass that assigns
+			// both would blank the value it had just set.
 			for _, k := range []string{"WHARF_PROXY", "ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy"} {
-				t.Setenv(k, tc.env[k])
+				t.Setenv(k, "")
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
 			}
 			d, err := Resolve(tc.flag, tc.conf)
 			if err != nil {

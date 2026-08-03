@@ -3,6 +3,7 @@ package localcfg
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -38,6 +39,16 @@ func TestSaveRoundTrip(t *testing.T) {
 	}
 	if c.Proxy != "socks5://proxy.corp:1080" {
 		t.Fatalf("Proxy = %q, want the saved value", c.Proxy)
+	}
+}
+
+func TestSaveFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix file modes")
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Save(path, Config{Proxy: "socks5://proxy.corp:1080"}); err != nil {
+		t.Fatalf("Save: %v", err)
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
