@@ -427,9 +427,11 @@ func (c *conn) dial(req dialRequest) {
 	}
 	mgr := sshx.NewManager(req.KnownHosts, req.Keepalive)
 	// New, not Resolve: the parent already decided, and the child's own
-	// environment must not get a second vote.
+	// environment must not get a second vote. The child holds a setting of its
+	// own rather than sharing one — it serves a single session, whose proxy is
+	// fixed for the life of the connection it already dialled.
 	if d, err := proxydial.New(req.Proxy); err == nil {
-		mgr.SetProxy(d)
+		mgr.SetProxy(proxydial.NewSetting(d))
 	}
 	mgr.SetNotify(h.notify)
 

@@ -33,8 +33,8 @@ func (m Model) proxyView(t theme.Theme) []string {
 
 	if m.proxyOverridden() {
 		body = append(body, "",
-			stl(t.Warn, t.Panel).Render("In effect: "+m.proxyDialer.String()),
-			stl(t.Warn, t.Panel).Render("from "+m.proxyDialer.Source().String()+", which outranks this setting."))
+			stl(t.Warn, t.Panel).Render("In effect: "+m.proxy.Dialer().String()),
+			stl(t.Warn, t.Panel).Render("from "+m.proxy.Dialer().Source().String()+", which outranks this setting."))
 	}
 
 	body = append(body, "",

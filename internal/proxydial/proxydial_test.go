@@ -310,3 +310,44 @@ func TestNilDialerDialsDirect(t *testing.T) {
 	defer conn.Close()
 	expectGreeting(t, conn)
 }
+
+func TestSettingIsSharedByReference(t *testing.T) {
+	s := NewSetting(Direct())
+	// Two components wired to the same setting, as the engine and the session
+	// pool are.
+	a, b := s, s
+
+	if a.Dialer().Enabled() || b.Dialer().Enabled() {
+		t.Fatal("a setting built from Direct should not be enabled")
+	}
+
+	d, err := New("socks5://proxy.corp:1080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Set(d)
+
+	if got := a.Dialer().String(); got != "socks5://proxy.corp:1080" {
+		t.Fatalf("first reader sees %s, want the updated proxy", got)
+	}
+	if got := b.Dialer().String(); got != "socks5://proxy.corp:1080" {
+		t.Fatalf("second reader sees %s, want the updated proxy", got)
+	}
+}
+
+// Components that were never wired to a setting must still dial.
+func TestNilSettingDialsDirect(t *testing.T) {
+	var s *Setting
+	if s.Dialer() != nil {
+		t.Fatal("a nil setting should report no dialer")
+	}
+	s.Set(Direct()) // must not panic
+
+	srv := echoServer(t)
+	conn, err := s.DialContext(context.Background(), "tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("nil setting: %v", err)
+	}
+	defer conn.Close()
+	expectGreeting(t, conn)
+}

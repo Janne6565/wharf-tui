@@ -47,7 +47,7 @@ type Pool struct {
 	// Sessions are keyed by session ID, not host ID: a host can have several
 	// shells open at once, each in its own child process.
 	mu      sync.Mutex
-	proxy   *proxydial.Dialer // egress proxy for sessions spawned from now on
+	proxy   *proxydial.Setting // shared egress-proxy holder, read per spawn
 	remotes map[string]*Remote
 	order   []string
 
@@ -88,17 +88,20 @@ func (p *Pool) Keepalive() bool {
 	return p.keepalive
 }
 
-// SetProxy sets the egress proxy handed to session hosts spawned from now on.
+// SetProxy points the pool at the shared proxy setting, which it reads at each
+// spawn. Wiring only: changing the proxy goes through the setting itself, so
+// the pool and the engine cannot drift apart.
+//
 // Children already running keep the proxy they were dialed through: their TCP
 // connection is established and cannot be re-routed under a live SSH transport.
-func (p *Pool) SetProxy(d *proxydial.Dialer) {
+func (p *Pool) SetProxy(s *proxydial.Setting) {
 	p.mu.Lock()
-	p.proxy = d
+	p.proxy = s
 	p.mu.Unlock()
 }
 
-// Proxy reports the dialer new sessions will be spawned with.
-func (p *Pool) Proxy() *proxydial.Dialer {
+// Proxy returns the shared setting new sessions will be spawned with.
+func (p *Pool) Proxy() *proxydial.Setting {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.proxy
@@ -308,7 +311,7 @@ func (p *Pool) Dial(ctx context.Context, spec sshx.HostSpec, cols, rows int) (*R
 	r := newRemote(p, sock, conn)
 	r.spec = spec
 	r.startedAt = time.Now()
-	if err := r.dial(ctx, spec, cols, rows, p.knownHosts, p.Keepalive(), p.Proxy().RawURL()); err != nil {
+	if err := r.dial(ctx, spec, cols, rows, p.knownHosts, p.Keepalive(), p.Proxy().Dialer().RawURL()); err != nil {
 		r.closeConn()
 		return nil, err
 	}

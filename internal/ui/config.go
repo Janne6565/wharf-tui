@@ -93,14 +93,16 @@ type Config struct {
 
 	// Proxy is the machine-local egress proxy setting as stored on disk — what
 	// the settings screen edits. It is not necessarily what is in effect:
-	// --proxy and $WHARF_PROXY outrank it, which is what ProxyDialer reflects.
+	// --proxy and $WHARF_PROXY outrank it.
 	Proxy string
-	// ProxyDialer is the proxy actually in effect, for display. Nil is direct.
-	ProxyDialer *proxydial.Dialer
-	// ApplyProxy persists an edited setting and returns the dialer now in
-	// effect. The UI deliberately does not resolve precedence or write the file
-	// itself; nil disables editing (demo mode, tests).
-	ApplyProxy func(setting string) (*proxydial.Dialer, error)
+	// ProxySetting is the shared holder of the proxy in effect — the same one
+	// the engine and the session pool dial through. The UI reads it for display
+	// and for probes; nil is direct.
+	ProxySetting *proxydial.Setting
+	// ApplyProxy validates and persists an edited setting, then updates
+	// ProxySetting. The UI deliberately does not resolve precedence or write the
+	// file itself; nil disables editing (demo mode, tests).
+	ApplyProxy func(setting string) error
 }
 
 // New builds the initial model. Demo mode opens on the simulated account
@@ -128,8 +130,8 @@ func New(cfg Config) Model {
 		projectDocs:       map[string]*store.ProjectDoc{},
 		deviceURL:         api.DeviceURL(api.BaseURL()),
 		openBrowser:       cfg.OpenBrowser,
-		proxySetting:      cfg.Proxy,
-		proxyDialer:       cfg.ProxyDialer,
+		proxyStored:       cfg.Proxy,
+		proxy:             cfg.ProxySetting,
 		applyProxy:        cfg.ApplyProxy,
 	}
 	// cfg.Demo, not m.demo: the demo/real branches below are what set m.demo,

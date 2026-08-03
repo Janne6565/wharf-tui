@@ -18,16 +18,24 @@ func proxyModel(t *testing.T, start string, applyErr error) (tea.Model, *[]strin
 
 	tm, _ := openedModel(t)
 	mm := tm.(Model)
-	mm.proxySetting = start
-	mm.proxyDialer = proxydial.Direct()
-	mm.applyProxy = func(setting string) (*proxydial.Dialer, error) {
+	mm.proxyStored = start
+	// The same holder the engine would read: the hook publishes to it, and the
+	// screen reads it back, which is the coupling under test.
+	mm.proxy = proxydial.NewSetting(proxydial.Direct())
+	holder := mm.proxy
+	mm.applyProxy = func(setting string) error {
 		*saved = append(*saved, setting)
 		if applyErr != nil {
-			return nil, applyErr
+			return applyErr
 		}
 		// The real hook resolves against the flag and environment; here the
 		// stored value is the only input, which is the case under test.
-		return proxydial.New(setting)
+		d, err := proxydial.New(setting)
+		if err != nil {
+			return err
+		}
+		holder.Set(d)
+		return nil
 	}
 	tm = mm
 
@@ -153,7 +161,7 @@ func TestProxyEditorSeedsStoredValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mm.proxyDialer = amb
+	mm.proxy.Set(amb)
 	tm = mm
 
 	tm = send(tm, special(tea.KeyEnter))

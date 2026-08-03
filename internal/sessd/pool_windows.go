@@ -27,7 +27,7 @@ type Pool struct {
 
 	mu        sync.Mutex
 	keepalive bool
-	proxy     *proxydial.Dialer // egress proxy for sessions dialed from now on
+	proxy     *proxydial.Setting // shared egress-proxy holder, read per dial
 	// Keyed by session ID rather than host ID: a host can have several shells
 	// open at once, which is also why each session gets its own sshx.Manager —
 	// a Manager indexes sessions by host and would collide on the second one.
@@ -68,16 +68,17 @@ func (p *Pool) Keepalive() bool {
 	return p.keepalive
 }
 
-// SetProxy sets the egress proxy used for sessions dialed from now on. Live
-// sessions keep the proxy they were dialed through, matching the unix pool.
-func (p *Pool) SetProxy(d *proxydial.Dialer) {
+// SetProxy points the pool at the shared proxy setting, read at each dial.
+// Wiring only, as on unix: the setting itself is what changes. Live sessions
+// keep the proxy they were dialed through.
+func (p *Pool) SetProxy(s *proxydial.Setting) {
 	p.mu.Lock()
-	p.proxy = d
+	p.proxy = s
 	p.mu.Unlock()
 }
 
-// Proxy reports the dialer new sessions will be dialed with.
-func (p *Pool) Proxy() *proxydial.Dialer {
+// Proxy returns the shared setting new sessions will be dialed with.
+func (p *Pool) Proxy() *proxydial.Setting {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.proxy

@@ -37,7 +37,7 @@ func dialThroughProxy(t *testing.T, ts *testServer, rawProxy string) *Session {
 	}
 	m := NewManager(khPath, false)
 	m.SetNotify(rec.notify)
-	m.SetProxy(d)
+	m.SetProxy(proxydial.NewSetting(d))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -104,7 +104,7 @@ func TestForwardDialsThroughProxy(t *testing.T) {
 	}
 	m := NewManager(khPath, false)
 	m.SetNotify(rec.notify)
-	m.SetProxy(d)
+	m.SetProxy(proxydial.NewSetting(d))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -140,12 +140,51 @@ func TestUnreachableProxyFailsRatherThanBypassing(t *testing.T) {
 	}
 	m := NewManager(filepath.Join(t.TempDir(), "known_hosts"), false)
 	m.SetNotify(newRecorder().notify)
-	m.SetProxy(d)
+	m.SetProxy(proxydial.NewSetting(d))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if _, err := m.Dial(ctx, proxiedSpec(), 80, 24); err == nil {
 		t.Fatal("dial succeeded with an unreachable proxy, want an error")
+	}
+}
+
+// The manager reads the shared setting at each dial rather than snapshotting it
+// at wiring time. This is what lets one Set reach the engine, the session pool
+// and the probes at once, instead of a setter per component that has to be kept
+// in lockstep.
+func TestProxySettingChangeAppliesToNextDial(t *testing.T) {
+	clearProxyEnv(t)
+	ts := startServer(t, testPassword, echoHandler(nil, nil))
+	px := proxytest.StartSOCKS5(t, ts.addr(), "", "")
+
+	rec := newRecorder()
+	t.Setenv("SSH_AUTH_SOCK", "")
+	setting := proxydial.NewSetting(proxydial.Direct())
+
+	m := NewManager(filepath.Join(t.TempDir(), "known_hosts"), false)
+	m.SetNotify(rec.notify)
+	m.SetProxy(setting)
+
+	// Wired direct; the proxy is chosen only afterwards, as it is when someone
+	// edits the setting mid-session.
+	d, err := proxydial.Resolve("socks5://"+px.Addr, "")
+	if err != nil {
+		t.Fatalf("resolve proxy: %v", err)
+	}
+	setting.Set(d)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	sess, err := m.Dial(ctx, proxiedSpec(), 80, 24)
+	if err != nil {
+		t.Fatalf("dial after the setting changed: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	if px.Dials() != 1 {
+		t.Fatalf("proxy saw %d dials, want 1 — the manager snapshotted the old value", px.Dials())
 	}
 }

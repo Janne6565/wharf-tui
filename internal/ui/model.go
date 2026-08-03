@@ -266,15 +266,17 @@ type Model struct {
 	browserOpened bool // the pairing page was handed to a browser
 
 	// --- egress proxy (machine-local, never synced) ---
-	// proxySetting is the stored value the settings row edits; proxyDialer is
-	// what is actually in effect, which differs whenever --proxy or
-	// $WHARF_PROXY overrides the stored one. applyProxy persists an edit and
-	// hands back the new effective dialer; nil disables editing.
-	proxySetting string
-	proxyDialer  *proxydial.Dialer
-	applyProxy   func(setting string) (*proxydial.Dialer, error)
-	pxVal        string // proxy-edit modal buffer
-	pxErr        string // inline validation error in that modal
+	// proxyStored is the value the settings row edits, as saved on this
+	// machine. What is actually in effect lives in the shared proxydial.Setting
+	// that the engine, the session pool and the probes all read — the Model
+	// holds the same pointer rather than a copy, so the screen cannot disagree
+	// with what the next dial will do. applyProxy persists an edit and updates
+	// that setting; nil disables editing.
+	proxyStored string
+	proxy       *proxydial.Setting
+	applyProxy  func(setting string) error
+	pxVal       string // proxy-edit modal buffer
+	pxErr       string // inline validation error in that modal
 
 	// sync hooks (injectable for tests; defaults wired in initSync).
 	syncAPI           syncx.API

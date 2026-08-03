@@ -93,14 +93,18 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "wharf:", err)
 	}
-	proxy, err := proxydial.Resolve(*proxyFlag, cfg.Proxy)
+	resolved, err := proxydial.Resolve(*proxyFlag, cfg.Proxy)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "wharf: proxy:", err)
 		os.Exit(2)
 	}
+	// One holder, shared by the engine, the session pool, the probes and the
+	// settings screen. Everything that dials reads it, so changing the proxy is
+	// one Set rather than a call per component that must not be forgotten.
+	proxy := proxydial.NewSetting(resolved)
 
 	if *doctor {
-		printDoctor(vaultPath, cfgPath, proxy)
+		printDoctor(vaultPath, cfgPath, resolved)
 		return
 	}
 
@@ -146,30 +150,32 @@ func main() {
 		pool.SetProxy(proxy)
 	}
 	model := ui.New(ui.Config{
-		VaultPath:   vaultPath,
-		Manager:     mgr,
-		Sessions:    pool,
-		ConnectHost: connectTo,
-		Proxy:       cfg.Proxy,
-		ProxyDialer: proxy,
-		ApplyProxy:  applyProxyFn(cfgPath, *proxyFlag, mgr, pool),
+		VaultPath:    vaultPath,
+		Manager:      mgr,
+		Sessions:     pool,
+		ConnectHost:  connectTo,
+		Proxy:        cfg.Proxy,
+		ProxySetting: proxy,
+		ApplyProxy:   applyProxyFn(cfgPath, *proxyFlag, proxy),
 	})
 	run(model, mgr, pool)
 }
 
 // applyProxyFn returns the hook the settings screen calls when the proxy is
 // edited: persist the machine-local setting, re-resolve it against the flag and
-// environment that still outrank it, and point the engine at the result.
+// environment that still outrank it, and publish the result to the shared
+// setting every dialler reads.
 //
 // Resolution stays here rather than in the UI so there is exactly one place
-// that knows the precedence order. Live sessions and forwards are untouched —
-// they keep the path they were dialled through.
-func applyProxyFn(cfgPath, flagOverride string, mgr *sshx.Manager, pool *sessd.Pool) func(string) (*proxydial.Dialer, error) {
-	return func(setting string) (*proxydial.Dialer, error) {
+// that knows the precedence order, and the update is a single Set rather than
+// one call per component. Live sessions and forwards are untouched — they keep
+// the path they were dialled through.
+func applyProxyFn(cfgPath, flagOverride string, proxy *proxydial.Setting) func(string) error {
+	return func(setting string) error {
 		// Validate before writing, so a typo never lands in the file.
 		d, err := proxydial.Resolve(flagOverride, setting)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		cfg, err := localcfg.Load(cfgPath)
 		if err != nil {
@@ -177,13 +183,10 @@ func applyProxyFn(cfgPath, flagOverride string, mgr *sshx.Manager, pool *sessd.P
 		}
 		cfg.Proxy = setting
 		if err := localcfg.Save(cfgPath, cfg); err != nil {
-			return nil, err
+			return err
 		}
-		mgr.SetProxy(d)
-		if pool != nil {
-			pool.SetProxy(d)
-		}
-		return d, nil
+		proxy.Set(d)
+		return nil
 	}
 }
 

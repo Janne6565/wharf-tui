@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/http/httpproxy"
 	"golang.org/x/net/proxy"
@@ -113,6 +114,53 @@ func Resolve(flag, configured string) (*Dialer, error) {
 		return newDialer(v, layer.src)
 	}
 	return Direct(), nil
+}
+
+// Setting is the live proxy: one holder shared by everything that dials, so a
+// change is made in a single place rather than pushed into each component.
+//
+// The engine (interactive sessions and port forwards), the session-host pool
+// and the reachability probes all read the same Setting. They used to keep a
+// copy each, which worked only as long as every setter was called in lockstep —
+// a probe that kept dialling direct after the proxy changed would paint dots
+// for hosts the user could no longer open.
+//
+// A nil *Setting is usable and means direct, so a component that was never
+// given one still dials.
+type Setting struct {
+	mu sync.Mutex
+	d  *Dialer
+}
+
+// NewSetting holds d.
+func NewSetting(d *Dialer) *Setting { return &Setting{d: d} }
+
+// Set replaces the proxy for connections opened from now on. Connections
+// already established keep the path they were dialled through: a TCP
+// connection cannot be re-routed under a live SSH transport.
+func (s *Setting) Set(d *Dialer) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.d = d
+	s.mu.Unlock()
+}
+
+// Dialer returns the proxy in effect. Nil means direct, and is safe to use.
+func (s *Setting) Dialer() *Dialer {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.d
+}
+
+// DialContext dials through whatever the setting currently holds, so a Setting
+// can stand in wherever a dialer is expected.
+func (s *Setting) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return s.Dialer().DialContext(ctx, network, addr)
 }
 
 // New builds a dialer for an explicit proxy URL, ignoring the environment

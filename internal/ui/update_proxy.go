@@ -13,7 +13,7 @@ import (
 // and a value inherited from $ALL_PROXY is not something the user typed here.
 func (m Model) openProxyForm() Model {
 	m.modal = modalProxy
-	m.pxVal = m.proxySetting
+	m.pxVal = m.proxyStored
 	m.pxErr = ""
 	return m
 }
@@ -62,19 +62,21 @@ func (m Model) saveProxy() (tea.Model, tea.Cmd) {
 		}
 	}
 
-	d, err := m.applyProxy(val)
-	if err != nil {
+	if err := m.applyProxy(val); err != nil {
 		m.pxErr = err.Error()
 		return m, nil
 	}
 
 	// What gets stored is what the file will hold: the password is stripped on
 	// the way to disk, so keeping the typed value in memory would leave the
-	// screen disagreeing with the file after the next restart.
-	m.proxySetting = localcfg.StripPassword(val)
-	m.proxyDialer = d
+	// screen disagreeing with the file after the next restart. What is in
+	// effect is not copied at all — applyProxy has already updated the shared
+	// setting, and every reader takes it from there.
+	m.proxyStored = localcfg.StripPassword(val)
 	m.modal = modalNone
 	m.pxErr = ""
+
+	d := m.proxy.Dialer()
 
 	switch {
 	case !d.Enabled():
@@ -93,12 +95,12 @@ func (m Model) proxyLabel() string {
 	if m.demo {
 		return "—"
 	}
-	return m.proxyDialer.String()
+	return m.proxy.Dialer().String()
 }
 
 // proxyOverridden reports whether something outranks the stored setting, which
 // the editor calls out so a saved value that does not apply is not a mystery.
 func (m Model) proxyOverridden() bool {
-	src := m.proxyDialer.Source()
+	src := m.proxy.Dialer().Source()
 	return src == proxydial.SourceFlag || src == proxydial.SourceEnv
 }

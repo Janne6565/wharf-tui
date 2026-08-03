@@ -926,7 +926,7 @@ func (m Model) settingsTab(t theme.Theme, contentH int) []string {
 			val, vc = "change ›", t.Hi
 		case "proxy":
 			val, vc = m.proxyLabel(), t.Hi
-			if !m.proxyDialer.Enabled() {
+			if !m.proxy.Dialer().Enabled() {
 				vc = t.Dim
 			}
 		default:
