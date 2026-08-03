@@ -61,6 +61,8 @@ func (m Model) modalView(t theme.Theme) []string {
 		return m.signOutView(t)
 	case modalMoveProject:
 		return m.moveProjectView(t)
+	case modalProxy:
+		return m.proxyView(t)
 	}
 	return m.mainView(t)
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/Janne6565/wharf-tui/internal/data"
 	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
+	"github.com/Janne6565/wharf-tui/internal/proxydial"
 	"github.com/Janne6565/wharf-tui/internal/sessd"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
@@ -89,6 +90,17 @@ type Config struct {
 	// where there is no display to open into (browser.Available), which leaves
 	// it disabled. Tests inject a recorder so no real browser is launched.
 	OpenBrowser func(string) error
+
+	// Proxy is the machine-local egress proxy setting as stored on disk — what
+	// the settings screen edits. It is not necessarily what is in effect:
+	// --proxy and $WHARF_PROXY outrank it, which is what ProxyDialer reflects.
+	Proxy string
+	// ProxyDialer is the proxy actually in effect, for display. Nil is direct.
+	ProxyDialer *proxydial.Dialer
+	// ApplyProxy persists an edited setting and returns the dialer now in
+	// effect. The UI deliberately does not resolve precedence or write the file
+	// itself; nil disables editing (demo mode, tests).
+	ApplyProxy func(setting string) (*proxydial.Dialer, error)
 }
 
 // New builds the initial model. Demo mode opens on the simulated account
@@ -116,6 +128,9 @@ func New(cfg Config) Model {
 		projectDocs:       map[string]*store.ProjectDoc{},
 		deviceURL:         api.DeviceURL(api.BaseURL()),
 		openBrowser:       cfg.OpenBrowser,
+		proxySetting:      cfg.Proxy,
+		proxyDialer:       cfg.ProxyDialer,
+		applyProxy:        cfg.ApplyProxy,
 	}
 	// cfg.Demo, not m.demo: the demo/real branches below are what set m.demo,
 	// so reading it here would always see false and hand a demo run a real

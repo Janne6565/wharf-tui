@@ -623,6 +623,11 @@ func (m Model) toggleSetting() (tea.Model, tea.Cmd) {
 			return m.setToast("changing the master password needs a real vault", "err"), nil
 		}
 		return m.openChangePassword(), nil
+	case "proxy":
+		if m.applyProxy == nil {
+			return m.setToast("the proxy setting needs a real vault", "err"), nil
+		}
+		return m.openProxyForm(), nil
 	case "agent":
 		m.settings.Agent = !m.settings.Agent
 		m.applySSHSettings()

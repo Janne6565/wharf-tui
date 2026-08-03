@@ -3,6 +3,7 @@ package sshx
 import (
 	"sync"
 
+	"github.com/Janne6565/wharf-tui/internal/proxydial"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -13,6 +14,7 @@ type Manager struct {
 	knownHostsPath string
 	keepalive      bool
 	useAgent       bool
+	proxy          *proxydial.Dialer // nil dials direct
 
 	mu           sync.Mutex
 	sessions     map[string]*Session
@@ -68,6 +70,25 @@ func (m *Manager) Keepalive() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.keepalive
+}
+
+// SetProxy routes connections opened from now on through d (nil = direct).
+// Settable for the same reason as SetKeepalive: the manager is built before the
+// setting it reads is available. Live sessions and forwards keep the proxy they
+// were dialled through — a TCP connection cannot be re-routed under a running
+// SSH transport, and tearing them down to apply a preference would cost the
+// user their shells.
+func (m *Manager) SetProxy(d *proxydial.Dialer) {
+	m.mu.Lock()
+	m.proxy = d
+	m.mu.Unlock()
+}
+
+// Proxy reports the dialer new connections will use.
+func (m *Manager) Proxy() *proxydial.Dialer {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.proxy
 }
 
 // SetNotify wires prompt/lifecycle messages into the UI event loop

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Janne6565/wharf-tui/internal/proxydial"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -425,6 +426,11 @@ func (c *conn) dial(req dialRequest) {
 		_ = os.Setenv("TERM", req.Term)
 	}
 	mgr := sshx.NewManager(req.KnownHosts, req.Keepalive)
+	// New, not Resolve: the parent already decided, and the child's own
+	// environment must not get a second vote.
+	if d, err := proxydial.New(req.Proxy); err == nil {
+		mgr.SetProxy(d)
+	}
 	mgr.SetNotify(h.notify)
 
 	cols, rows := req.Cols, req.Rows

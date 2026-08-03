@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Janne6565/wharf-tui/internal/proxydial"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -26,6 +27,7 @@ type Pool struct {
 
 	mu        sync.Mutex
 	keepalive bool
+	proxy     *proxydial.Dialer // egress proxy for sessions dialed from now on
 	// Keyed by session ID rather than host ID: a host can have several shells
 	// open at once, which is also why each session gets its own sshx.Manager —
 	// a Manager indexes sessions by host and would collide on the second one.
@@ -64,6 +66,21 @@ func (p *Pool) Keepalive() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.keepalive
+}
+
+// SetProxy sets the egress proxy used for sessions dialed from now on. Live
+// sessions keep the proxy they were dialed through, matching the unix pool.
+func (p *Pool) SetProxy(d *proxydial.Dialer) {
+	p.mu.Lock()
+	p.proxy = d
+	p.mu.Unlock()
+}
+
+// Proxy reports the dialer new sessions will be dialed with.
+func (p *Pool) Proxy() *proxydial.Dialer {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.proxy
 }
 
 // SetNotify wires prompt and lifecycle messages into the UI event loop.
@@ -154,6 +171,7 @@ func (p *Pool) Dial(ctx context.Context, spec sshx.HostSpec, cols, rows int) (*R
 	// twice — the exact case the pool exists to support.
 	mgr := sshx.NewManager(p.knownHosts, p.Keepalive())
 	mgr.SetNotify(p.notify)
+	mgr.SetProxy(p.Proxy())
 
 	sess, err := mgr.Dial(ctx, spec, cols, rows)
 	if err != nil {

@@ -36,8 +36,10 @@ func (m *Manager) connect(ctx context.Context, hs HostSpec) (*ssh.Client, error)
 		HostKeyAlgorithms: db.HostKeyAlgorithms(addr),
 	}
 
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	// The single outbound TCP dial for SSH: interactive sessions and standalone
+	// port forwards both land here, so this is the one place an egress proxy has
+	// to be applied. A nil proxy dials direct.
+	conn, err := m.Proxy().DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}

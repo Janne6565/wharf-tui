@@ -266,6 +266,9 @@ func (f *Forward) handleLocal(local net.Conn) {
 // local target for it, then pipe.
 func (f *Forward) handleRemote(remote net.Conn) {
 	target := net.JoinHostPort(f.spec.TargetAddr, strconv.Itoa(f.spec.TargetPort))
+	// Deliberately direct, never through the egress proxy: this is the local
+	// end of a -R forward, a dial from this machine to something this machine
+	// can already reach. Sending it out to a proxy would break the forward.
 	local, err := net.Dial("tcp", target)
 	if err != nil {
 		_ = remote.Close()

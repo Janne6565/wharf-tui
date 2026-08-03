@@ -80,6 +80,13 @@ type dialRequest struct {
 	KnownHosts string       `json:"knownHosts"`
 	Keepalive  bool         `json:"keepalive"`
 	Term       string       `json:"term"`
+	// Proxy is the egress proxy URL resolved by the parent, credentials and
+	// all — which is exactly why it travels here and not in the child's
+	// environment, where any process on the machine could read it. Empty means
+	// a direct connection: the child must not consult $ALL_PROXY itself, or an
+	// adopted session would silently use a different network path than the run
+	// that spawned it.
+	Proxy string `json:"proxy,omitempty"`
 }
 
 // hostSpecWire mirrors sshx.HostSpec on the wire. It is spelled out here rather

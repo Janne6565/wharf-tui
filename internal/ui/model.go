@@ -9,6 +9,7 @@ import (
 	"github.com/Janne6565/wharf-tui/internal/data"
 	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
+	"github.com/Janne6565/wharf-tui/internal/proxydial"
 	"github.com/Janne6565/wharf-tui/internal/sessd"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
@@ -78,6 +79,7 @@ const (
 	modalSessionHint     // first-connect primer on detach / reattach keys
 	modalSessionPicker   // choose among a host's open sessions, or start another
 	modalMoveProject     // move the selected host between personal and a project
+	modalProxy           // edit the machine-local egress proxy (settings tab)
 )
 
 // syncState is the rendered sync status (header indicator). It is pure
@@ -161,6 +163,7 @@ func (m Model) settingRows() []settingDef {
 	rows := []settingDef{
 		{key: "agent", label: "Use SSH agent keys", act: true},
 		{key: "keepalive", label: "Keep-alive packets (30s)", act: true},
+		{key: "proxy", label: "Egress proxy", act: true},
 	}
 	if m.signedIn {
 		rows = append(rows,
@@ -261,6 +264,17 @@ type Model struct {
 	// display — see internal/browser.Available).
 	openBrowser   func(string) error
 	browserOpened bool // the pairing page was handed to a browser
+
+	// --- egress proxy (machine-local, never synced) ---
+	// proxySetting is the stored value the settings row edits; proxyDialer is
+	// what is actually in effect, which differs whenever --proxy or
+	// $WHARF_PROXY overrides the stored one. applyProxy persists an edit and
+	// hands back the new effective dialer; nil disables editing.
+	proxySetting string
+	proxyDialer  *proxydial.Dialer
+	applyProxy   func(setting string) (*proxydial.Dialer, error)
+	pxVal        string // proxy-edit modal buffer
+	pxErr        string // inline validation error in that modal
 
 	// sync hooks (injectable for tests; defaults wired in initSync).
 	syncAPI           syncx.API

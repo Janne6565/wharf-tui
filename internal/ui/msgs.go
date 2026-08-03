@@ -5,6 +5,7 @@ import (
 
 	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
+	"github.com/Janne6565/wharf-tui/internal/proxydial"
 	"github.com/Janne6565/wharf-tui/internal/sessd"
 	"github.com/Janne6565/wharf-tui/internal/sshcfg"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
@@ -97,11 +98,17 @@ func (m Model) probeCmds() tea.Cmd {
 		return nil
 	}
 	hosts := m.st.Hosts()
+	// Probes take the same network path as a real connection would; a proxied
+	// wharf that probed direct would show dots for hosts it cannot open.
+	var dialer *proxydial.Dialer
+	if m.mgr != nil {
+		dialer = m.mgr.Proxy()
+	}
 	cmds := make([]tea.Cmd, 0, len(hosts))
 	for _, h := range hosts {
 		h := h
 		cmds = append(cmds, func() tea.Msg {
-			res := probe.Dial(h.Addr, h.Port, probe.DefaultTimeout)
+			res := probe.Dial(dialer, h.Addr, h.Port, probe.DefaultTimeout)
 			return probeResultMsg{HostID: h.ID, Result: res}
 		})
 	}

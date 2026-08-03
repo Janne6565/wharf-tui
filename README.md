@@ -103,6 +103,7 @@ Verbs are spelled as **flags** precisely so they never claim a name a host could
 | `--doctor` | print resolved paths and environment, then exit |
 | `--reset` | **destructive:** erase this device's vault, session and caches |
 | `--vault <path>` | vault file path, overriding `$WHARF_VAULT` |
+| `--proxy <url>` | egress proxy for outbound SSH, overriding `$WHARF_PROXY` and the saved setting |
 | `--demo` | sample data and a simulated session — no disk I/O, no real SSH |
 
 `--logout` deliberately needs no master password. The session file is sealed under the
@@ -140,12 +141,48 @@ satisfy the prompt, and it refuses while **another wharf instance holds the vaul
 whose next save would otherwise write the vault straight back.
 
 `--doctor` reads no secrets and never unlocks the vault; it prints the version, Go
-version and platform, the resolved vault / session / `known_hosts` paths (with a
-present/missing marker each), and the API base and device URL. It is what to paste into
-a bug report.
+version and platform, the resolved vault / config / session / `known_hosts` paths (with
+a present/missing marker each), the API base and device URL, and the proxy in effect
+with any password redacted. It is what to paste into a bug report.
 
-Environment: `WHARF_VAULT` (vault file path), `WHARF_API_BASE` (sync backend base URL),
-`WHARF_NO_BROWSER` (set to anything to stop sign-in opening the pairing page for you).
+Environment: `WHARF_VAULT` (vault file path), `WHARF_CONFIG` (machine-local config file),
+`WHARF_API_BASE` (sync backend base URL), `WHARF_NO_BROWSER` (set to anything to stop
+sign-in opening the pairing page for you), and the proxy variables below.
+
+### Egress proxy
+
+On a network that only reaches the outside world through a proxy, point wharf at it —
+settings tab → **Egress proxy**, or `--proxy`, or `$WHARF_PROXY`:
+
+```
+socks5://proxy.corp:1080          SOCKS5 (socks5h:// is accepted and identical)
+http://proxy.corp:3128            HTTP CONNECT — what most corporate proxies speak
+https://proxy.corp:3129           the same, with TLS to the proxy itself
+proxy.corp:1080                   no scheme: read as socks5://
+off                               force direct, ignoring $ALL_PROXY
+```
+
+Interactive sessions, port forwards and the reachability probes all take this path; the
+local end of a `-R` forward does not, since that is a dial from this machine to something
+this machine can already reach. `$NO_PROXY` is honoured with its usual grammar (suffixes,
+CIDRs, bare IPs, `*`), and loopback is always dialled directly.
+
+Precedence, highest first: `--proxy`, `$WHARF_PROXY`, the saved setting, then
+`$ALL_PROXY` / `$HTTPS_PROXY`. The saved setting deliberately outranks the last pair:
+those are ambient defaults exported for whatever tooling reads them, while a value typed
+into wharf's settings screen means wharf. Setting it to `off` at any level forces a
+direct connection and stops the search.
+
+The setting is **not synced**. It describes the network the machine is on, not the
+account — syncing an office proxy onto a laptop at home would break every connection
+there. It lives in `${XDG_CONFIG_HOME:-~/.config}/wharf/config.json`, which is plaintext:
+a password in the URL is **stripped before writing**, so proxies that need credentials
+want `$WHARF_PROXY` instead, which lives no longer than the process you set it on.
+
+Behind a proxy the status dots read `? unknown` rather than `offline` when a probe fails:
+a proxy declining CONNECT to port 22 on policy and a host that is genuinely down look
+identical from here, and calling a reachable host offline is the mistake that stops
+someone trying.
 
 ## How it works
 

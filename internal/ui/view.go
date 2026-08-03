@@ -72,6 +72,10 @@ func probeStatusText(res probe.Result, known bool) (string, string) {
 		return "● online", "ok"
 	case probe.StatusDegraded:
 		return "● degraded", "warn"
+	case probe.StatusUnknown:
+		// Probed through a proxy and it did not get through; that says nothing
+		// about the host, so it reads the same as never having been probed.
+		return "? unknown", "dim"
 	default:
 		return "● offline", "err"
 	}
@@ -920,6 +924,11 @@ func (m Model) settingsTab(t theme.Theme, contentH int) []string {
 			val, vc = "sign out ›", t.Warn
 		case "password":
 			val, vc = "change ›", t.Hi
+		case "proxy":
+			val, vc = m.proxyLabel(), t.Hi
+			if !m.proxyDialer.Enabled() {
+				vc = t.Dim
+			}
 		default:
 			if m.settingOn(d.key) {
 				val, vc = "[on]", t.Ok
@@ -931,7 +940,9 @@ func (m Model) settingsTab(t theme.Theme, contentH int) []string {
 		// gets a wider value column — "deniz@example.c…" defeats the point of
 		// showing which account is paired.
 		vw := valW
-		if d.key == "account" && m.signedIn {
+		if (d.key == "account" && m.signedIn) || d.key == "proxy" {
+			// A proxy URL is an address, not a short value: the same reason the
+			// account row gets a wider column.
 			vw = 2 * valW
 		}
 		mid := stl(t.Hi, bg).Render(mark+" ") +
@@ -1099,6 +1110,8 @@ func (m Model) hintBar(t theme.Theme) []string {
 			hints = append(hints, hk{"enter", "sign in"})
 		case "theme":
 			hints = append(hints, hk{"←/→", "theme"}, hk{"enter", "cycle"})
+		case "proxy":
+			hints = append(hints, hk{"enter", "edit"})
 		default:
 			hints = append(hints, hk{"enter", "toggle"})
 		}

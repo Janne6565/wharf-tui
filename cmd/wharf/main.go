@@ -25,6 +25,8 @@ import (
 	"strings"
 
 	"github.com/Janne6565/wharf-tui/internal/api"
+	"github.com/Janne6565/wharf-tui/internal/localcfg"
+	"github.com/Janne6565/wharf-tui/internal/proxydial"
 	"github.com/Janne6565/wharf-tui/internal/sessd"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	syncx "github.com/Janne6565/wharf-tui/internal/sync"
@@ -56,6 +58,7 @@ func main() {
 	doctor := flag.Bool("doctor", false, "print resolved paths and environment, then exit")
 	reset := flag.Bool("reset", false, "DESTRUCTIVE: erase the local vault, session and caches after a typed confirmation")
 	vaultFlag := flag.String("vault", "", "path to the vault file (overrides $WHARF_VAULT)")
+	proxyFlag := flag.String("proxy", "", "egress proxy for outbound SSH (socks5://…, http://…, or \"off\"); overrides $WHARF_PROXY and the saved setting")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -79,8 +82,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	cfgPath, err := localcfg.DefaultPath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "wharf: resolving config path:", err)
+		os.Exit(1)
+	}
+	// A broken config file is reported and then ignored: it holds preferences,
+	// and refusing to start over a stray character would be a poor trade.
+	cfg, err := localcfg.Load(cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "wharf:", err)
+	}
+	proxy, err := proxydial.Resolve(*proxyFlag, cfg.Proxy)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "wharf: proxy:", err)
+		os.Exit(2)
+	}
+
 	if *doctor {
-		printDoctor(vaultPath)
+		printDoctor(vaultPath, cfgPath, proxy)
 		return
 	}
 
@@ -115,14 +135,56 @@ func main() {
 	}
 
 	mgr := sshx.NewManager(knownHostsPath(), true)
+	mgr.SetProxy(proxy)
 	pool, err := newSessionPool()
 	if err != nil {
 		// Without a pool wharf still runs; it just cannot open new sessions.
 		// Better a usable dashboard with a clear error than no wharf at all.
 		fmt.Fprintln(os.Stderr, "wharf: sessions unavailable:", err)
 	}
-	model := ui.New(ui.Config{VaultPath: vaultPath, Manager: mgr, Sessions: pool, ConnectHost: connectTo})
+	if pool != nil {
+		pool.SetProxy(proxy)
+	}
+	model := ui.New(ui.Config{
+		VaultPath:   vaultPath,
+		Manager:     mgr,
+		Sessions:    pool,
+		ConnectHost: connectTo,
+		Proxy:       cfg.Proxy,
+		ProxyDialer: proxy,
+		ApplyProxy:  applyProxyFn(cfgPath, *proxyFlag, mgr, pool),
+	})
 	run(model, mgr, pool)
+}
+
+// applyProxyFn returns the hook the settings screen calls when the proxy is
+// edited: persist the machine-local setting, re-resolve it against the flag and
+// environment that still outrank it, and point the engine at the result.
+//
+// Resolution stays here rather than in the UI so there is exactly one place
+// that knows the precedence order. Live sessions and forwards are untouched —
+// they keep the path they were dialled through.
+func applyProxyFn(cfgPath, flagOverride string, mgr *sshx.Manager, pool *sessd.Pool) func(string) (*proxydial.Dialer, error) {
+	return func(setting string) (*proxydial.Dialer, error) {
+		// Validate before writing, so a typo never lands in the file.
+		d, err := proxydial.Resolve(flagOverride, setting)
+		if err != nil {
+			return nil, err
+		}
+		cfg, err := localcfg.Load(cfgPath)
+		if err != nil {
+			cfg = localcfg.Config{} // unreadable: replace rather than refuse
+		}
+		cfg.Proxy = setting
+		if err := localcfg.Save(cfgPath, cfg); err != nil {
+			return nil, err
+		}
+		mgr.SetProxy(d)
+		if pool != nil {
+			pool.SetProxy(d)
+		}
+		return d, nil
+	}
 }
 
 // newSessionPool prepares the session-host pool and adopts any sessions left
@@ -157,7 +219,12 @@ func usage() {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Environment:")
 	fmt.Fprintln(out, "  WHARF_VAULT      vault file path (default: per-user data dir)")
+	fmt.Fprintln(out, "  WHARF_CONFIG     machine-local config file (default: per-user config dir)")
 	fmt.Fprintln(out, "  WHARF_API_BASE   sync backend base URL (default: production)")
+	fmt.Fprintln(out, "  WHARF_PROXY      egress proxy for outbound SSH; overrides the saved setting")
+	fmt.Fprintln(out, "  ALL_PROXY        egress proxy, if neither of the above is set")
+	fmt.Fprintln(out, "  HTTPS_PROXY      same, checked after ALL_PROXY")
+	fmt.Fprintln(out, "  NO_PROXY         comma-separated hosts, domains and CIDRs to reach directly")
 }
 
 // versionString renders the stamped version, falling back to the VCS revision
@@ -390,17 +457,24 @@ func plural(n int, noun string) string {
 
 // printDoctor dumps the resolved environment: what to paste into a bug report.
 // It reads no secrets and never unlocks the vault.
-func printDoctor(vaultPath string) {
+func printDoctor(vaultPath, cfgPath string, proxy *proxydial.Dialer) {
 	base := api.BaseURL()
 	knownHosts := knownHostsPath()
 	sessionPath := syncx.SessionPath(vaultPath)
 	fmt.Println("wharf", versionString())
 	fmt.Println("go          ", runtime.Version(), runtime.GOOS+"/"+runtime.GOARCH)
 	fmt.Println("vault       ", vaultPath, presence(vault.Exists(vaultPath)))
+	fmt.Println("config      ", cfgPath, presence(fileExists(cfgPath)))
 	fmt.Println("session     ", sessionPath, presence(fileExists(sessionPath)))
 	fmt.Println("known_hosts ", knownHosts, presence(fileExists(knownHosts)))
 	fmt.Println("api base    ", base, envNote("WHARF_API_BASE"))
 	fmt.Println("device url  ", api.DeviceURL(base))
+	// String redacts any password; this output is meant to be pasted into bug
+	// reports.
+	fmt.Println("proxy       ", proxy.String(), "(from "+proxy.Source().String()+")")
+	if v := strings.TrimSpace(os.Getenv("NO_PROXY")); v != "" {
+		fmt.Println("no_proxy    ", v)
+	}
 }
 
 func presence(ok bool) string {

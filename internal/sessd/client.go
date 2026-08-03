@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Janne6565/wharf-tui/internal/proxydial"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -46,6 +47,7 @@ type Pool struct {
 	// Sessions are keyed by session ID, not host ID: a host can have several
 	// shells open at once, each in its own child process.
 	mu      sync.Mutex
+	proxy   *proxydial.Dialer // egress proxy for sessions spawned from now on
 	remotes map[string]*Remote
 	order   []string
 
@@ -84,6 +86,22 @@ func (p *Pool) Keepalive() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.keepalive
+}
+
+// SetProxy sets the egress proxy handed to session hosts spawned from now on.
+// Children already running keep the proxy they were dialed through: their TCP
+// connection is established and cannot be re-routed under a live SSH transport.
+func (p *Pool) SetProxy(d *proxydial.Dialer) {
+	p.mu.Lock()
+	p.proxy = d
+	p.mu.Unlock()
+}
+
+// Proxy reports the dialer new sessions will be spawned with.
+func (p *Pool) Proxy() *proxydial.Dialer {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.proxy
 }
 
 // SetNotify wires prompt and lifecycle messages into the UI event loop, exactly
@@ -290,7 +308,7 @@ func (p *Pool) Dial(ctx context.Context, spec sshx.HostSpec, cols, rows int) (*R
 	r := newRemote(p, sock, conn)
 	r.spec = spec
 	r.startedAt = time.Now()
-	if err := r.dial(ctx, spec, cols, rows, p.knownHosts, p.Keepalive()); err != nil {
+	if err := r.dial(ctx, spec, cols, rows, p.knownHosts, p.Keepalive(), p.Proxy().RawURL()); err != nil {
 		r.closeConn()
 		return nil, err
 	}
@@ -537,7 +555,7 @@ func (r *Remote) awaitCtl(ctx context.Context) (ctlFrame, error) {
 	}
 }
 
-func (r *Remote) dial(ctx context.Context, spec sshx.HostSpec, cols, rows int, knownHosts string, keepalive bool) error {
+func (r *Remote) dial(ctx context.Context, spec sshx.HostSpec, cols, rows int, knownHosts string, keepalive bool, proxy string) error {
 	req := dialRequest{
 		Spec:       specToWire(spec),
 		Cols:       cols,
@@ -545,6 +563,7 @@ func (r *Remote) dial(ctx context.Context, spec sshx.HostSpec, cols, rows int, k
 		KnownHosts: knownHosts,
 		Keepalive:  keepalive,
 		Term:       os.Getenv("TERM"),
+		Proxy:      proxy,
 	}
 	if err := r.writeJSON(kindDial, req); err != nil {
 		return err
