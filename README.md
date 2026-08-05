@@ -328,12 +328,23 @@ blob, sealed to every member's published key. Private keys are never shared.
 
 ## Upgrading
 
-Projects add a **v2 vault payload** carrying your X25519 project identity. By
-design, a pre-projects (v1) build **hard-errors** on a v2 payload rather than
-silently dropping the identity — so once any device writes v2, **upgrade all of
-your devices** before opening the vault on them. Your master password and
-recovery code are unaffected by the bump; the vault DEK and both unlock slots are
-unchanged. If a device that first created your identity is lost for good, open
+Projects add a **v2 vault payload** carrying your project identity. By design, a
+pre-projects (v1) build **hard-errors** on a v2 payload rather than silently
+dropping the identity — so once any device writes v2, **upgrade all of your
+devices** before opening the vault on them. The same applies to every later bump:
+v3 added synced SSH keys, and **v4** added the ML-KEM-768 half of your project
+identity (see below). Your master password and recovery code are unaffected by
+any of them; the vault DEK and both unlock slots are unchanged.
+
+**Post-quantum project keys (v4).** Project keys used to be sealed to a bare
+X25519 key — classical, and the server keeps every sealed key indefinitely, so a
+copy taken today could be decrypted by a future quantum computer. wharf now seals
+them with a hybrid **ML-KEM-768 + X25519** wrap, which needs both to be broken.
+The first time you open the projects tab after upgrading, wharf adds the ML-KEM
+half to your existing identity and republishes it. **Nothing is re-granted and no
+project loses access:** the upgraded key keeps your X25519 key, so everything
+already sealed to you still opens. Other members seal to you in whichever version
+your published key is, so a device still on an older build keeps working. If a device that first created your identity is lost for good, open
 the projects tab and press **`R`** on the "sync first" notice to reset your
 project identity (rotates your published key; every project re-enters
 awaiting-access until an admin re-grants).
@@ -364,7 +375,7 @@ awaiting-access until an admin re-grants).
   one, so the recovery slot inside the blob and the recovery credential on the server
   stay the same secret — which is what the browser's reset flow requires.
 - **The server distributes project public keys, so its copy of yours is checked.**
-  Project keys are sealed to each member's published X25519 key; a server that
+  Project keys are sealed to each member's published key; a server that
   swapped in its own key for your account would receive every project key shared
   with you, and the only symptom would be projects stuck in awaiting-access. On
   every visit to the projects tab wharf compares the key the server publishes for

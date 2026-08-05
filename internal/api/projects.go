@@ -103,13 +103,27 @@ func b64(s string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(s)
 }
 
-// PublishPublicKey uploads the account's public key. rotate must be set to
-// replace an already-published key; otherwise a second publish is
-// ErrPublicKeyExists (409).
-func (c *Client) PublishPublicKey(ctx context.Context, pub []byte, rotate bool) error {
+// PublishMode selects what a publish does to an already-published key.
+type PublishMode int
+
+const (
+	// PublishNew publishes a first key; a second publish is ErrPublicKeyExists (409).
+	PublishNew PublishMode = iota
+	// PublishRotate replaces the key and nulls every wrapped DEK the account holds,
+	// so each project re-enters awaiting-access until an admin re-seals it.
+	PublishRotate
+	// PublishUpgrade replaces the key but keeps the wrapped DEKs. Valid only for the
+	// v1 -> v2 hybrid upgrade, where the new key embeds the old X25519 key and the
+	// existing sealed boxes therefore still open.
+	PublishUpgrade
+)
+
+// PublishPublicKey uploads the account's public key under the given mode.
+func (c *Client) PublishPublicKey(ctx context.Context, pub []byte, mode PublishMode) error {
 	body := map[string]any{
 		"publicKey": base64.StdEncoding.EncodeToString(pub),
-		"rotate":    rotate,
+		"rotate":    mode == PublishRotate,
+		"upgrade":   mode == PublishUpgrade,
 	}
 	if err := c.doJSON(ctx, http.MethodPut, "/api/v1/users/me/public-key", body, nil, true); err != nil {
 		var ae *Error

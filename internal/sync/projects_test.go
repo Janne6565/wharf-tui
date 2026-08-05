@@ -74,10 +74,10 @@ func (f *fakeAPI) Me(context.Context) (api.Profile, error) {
 	return p, nil
 }
 
-func (f *fakeAPI) PublishPublicKey(_ context.Context, pub []byte, rotate bool) error {
+func (f *fakeAPI) PublishPublicKey(_ context.Context, pub []byte, mode api.PublishMode) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.publicKey) > 0 && !rotate {
+	if len(f.publicKey) > 0 && mode == api.PublishNew {
 		return api.ErrPublicKeyExists
 	}
 	f.publicKey = append([]byte(nil), pub...)

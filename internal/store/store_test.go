@@ -334,8 +334,11 @@ func TestSchemaGuard(t *testing.T) {
 	if _, err := Open(&fakeBackend{payload: []byte(`{"schema":3,"hosts":[],"settings":{}}`)}); err != nil {
 		t.Fatalf("schema 3 should open, got %v", err)
 	}
-	if _, err := Open(&fakeBackend{payload: []byte(`{"schema":4,"hosts":[],"settings":{}}`)}); err == nil {
-		t.Fatalf("schema 4 should error")
+	if _, err := Open(&fakeBackend{payload: []byte(`{"schema":4,"hosts":[],"settings":{}}`)}); err != nil {
+		t.Fatalf("schema 4 should open, got %v", err)
+	}
+	if _, err := Open(&fakeBackend{payload: []byte(`{"schema":5,"hosts":[],"settings":{}}`)}); err == nil {
+		t.Fatalf("schema 5 should error")
 	}
 	if _, err := Open(&fakeBackend{payload: []byte(`{not valid json`)}); err == nil {
 		t.Fatalf("garbage JSON should error")
@@ -365,8 +368,8 @@ func TestKeysRoundtrip(t *testing.T) {
 	if err := s.Save(); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	if !bytes.Contains(be.saves[0], []byte(`"schema":3`)) {
-		t.Fatalf("saved payload does not contain schema 3: %s", be.saves[0])
+	if !bytes.Contains(be.saves[0], []byte(`"schema":4`)) {
+		t.Fatalf("saved payload does not contain schema 4: %s", be.saves[0])
 	}
 
 	s2, err := Open(be)
@@ -409,8 +412,8 @@ func TestSchemaTwoUpgradesToThreeOnSave(t *testing.T) {
 	if err := s.Save(); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	if !bytes.Contains(be.saves[0], []byte(`"schema":3`)) {
-		t.Fatalf("upgraded payload does not contain schema 3: %s", be.saves[0])
+	if !bytes.Contains(be.saves[0], []byte(`"schema":4`)) {
+		t.Fatalf("upgraded payload does not contain schema 4: %s", be.saves[0])
 	}
 }
 
@@ -532,8 +535,8 @@ func TestSchemaOneUpgrade(t *testing.T) {
 	if len(be.saves) != 1 {
 		t.Fatalf("expected one recorded Save, got %d", len(be.saves))
 	}
-	if !bytes.Contains(be.saves[0], []byte(`"schema":3`)) {
-		t.Fatalf("upgraded payload does not contain schema 3: %s", be.saves[0])
+	if !bytes.Contains(be.saves[0], []byte(`"schema":4`)) {
+		t.Fatalf("upgraded payload does not contain schema 4: %s", be.saves[0])
 	}
 }
 

@@ -12,6 +12,27 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// preferredKexAlgos pins the key-exchange preference order for every outbound
+// connection. mlkem768x25519-sha256 leads: it is a hybrid ML-KEM-768 + X25519
+// exchange, so a recorded session cannot be decrypted later by a quantum
+// attacker (OpenSSH 9.9+ / 10 negotiate it; older servers fall through to
+// classical X25519 as before).
+//
+// This list is deliberately identical to x/crypto/ssh's own default, including
+// the SHA-1 Diffie-Hellman tail — the point is to *pin* what we would otherwise
+// inherit, so a dependency bump that reorders the default cannot silently drop
+// the post-quantum exchange. Compatibility is unchanged; only the guarantee is
+// new. TestKexIsPostQuantum asserts the negotiated result.
+var preferredKexAlgos = []string{
+	ssh.KeyExchangeMLKEM768X25519,
+	ssh.KeyExchangeCurve25519,
+	ssh.KeyExchangeECDHP256,
+	ssh.KeyExchangeECDHP384,
+	ssh.KeyExchangeECDHP521,
+	ssh.KeyExchangeDH14SHA256,
+	ssh.InsecureKeyExchangeDH14SHA1,
+}
+
 // connect performs the shared prefix of every outbound connection: default
 // port, known-hosts lookup, auth chain, TOFU host-key verification, TCP dial
 // under ctx, and the SSH handshake. Both interactive shells (Dial) and
@@ -34,6 +55,7 @@ func (m *Manager) connect(ctx context.Context, hs HostSpec) (*ssh.Client, error)
 		Auth:              m.authMethods(ctx, hs),
 		HostKeyCallback:   m.hostKeyCallback(ctx, hs, db),
 		HostKeyAlgorithms: db.HostKeyAlgorithms(addr),
+		Config:            ssh.Config{KeyExchanges: preferredKexAlgos},
 	}
 
 	// The single outbound TCP dial for SSH: interactive sessions and standalone

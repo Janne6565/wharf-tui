@@ -295,6 +295,10 @@ type Model struct {
 	syncOpenBlob      func(blob, password []byte) ([]byte, error)
 	syncProjectCrypto syncx.ProjectCrypto
 	genIdentity       func() (pub, priv []byte, err error)
+	// identityHybridUpgraded records that this session added the ML-KEM half to a
+	// pre-existing classical identity, so the publish that follows must replace
+	// the server's copy (PublishUpgrade) instead of no-opping on 409.
+	identityHybridUpgraded bool
 
 	// --- real projects (real signed-in mode; demo keeps m.projects fixtures) ---
 	realProjects      []projectItem                // ordered, from the engine's sync pass
