@@ -361,7 +361,7 @@ func TestAttachStreamsThroughTheChild(t *testing.T) {
 	// socket. ctrl+\ ends the attach with the session still running.
 	in := io.MultiReader(strings.NewReader("hello over the socket\n"), blockUntil(r.Done()))
 	out := &safeBuffer{}
-	cmd := r.Attach()
+	cmd := r.Attach(0) // 0 => the default detach byte
 	cmd.SetStdin(in)
 	cmd.SetStdout(out)
 
@@ -380,7 +380,7 @@ func TestAttachStreamsThroughTheChild(t *testing.T) {
 
 	// Reattaching replays the ring the child kept while we were away.
 	out2 := &safeBuffer{}
-	cmd2 := r.Attach()
+	cmd2 := r.Attach(0)
 	cmd2.SetStdin(blockUntil(r.Done()))
 	cmd2.SetStdout(out2)
 	go func() { _ = cmd2.Run() }()

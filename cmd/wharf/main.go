@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/Janne6565/wharf-tui/internal/api"
+	"github.com/Janne6565/wharf-tui/internal/detachkey"
 	"github.com/Janne6565/wharf-tui/internal/localcfg"
 	"github.com/Janne6565/wharf-tui/internal/proxydial"
 	"github.com/Janne6565/wharf-tui/internal/sessd"
@@ -93,6 +94,9 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "wharf:", err)
 	}
+	if _, err := detachkey.Parse(cfg.DetachKey); err != nil {
+		fmt.Fprintln(os.Stderr, "wharf: detach key:", err, "— using", detachkey.DefaultName)
+	}
 	resolved, err := proxydial.Resolve(*proxyFlag, cfg.Proxy)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "wharf: proxy:", err)
@@ -104,7 +108,7 @@ func main() {
 	proxy := proxydial.NewSetting(resolved)
 
 	if *doctor {
-		printDoctor(vaultPath, cfgPath, resolved)
+		printDoctor(vaultPath, cfgPath, resolved, cfg.DetachKey)
 		return
 	}
 
@@ -157,6 +161,11 @@ func main() {
 		Proxy:        cfg.Proxy,
 		ProxySetting: proxy,
 		ApplyProxy:   applyProxyFn(cfgPath, *proxyFlag, proxy),
+		// A detach key the current build no longer accepts is reported and
+		// then ignored: ui.New falls back to ctrl+\, which is better than
+		// booting into sessions nobody can get out of.
+		DetachKey:      cfg.DetachKey,
+		ApplyDetachKey: applyDetachKeyFn(cfgPath),
 	})
 	run(model, mgr, pool)
 }
@@ -187,6 +196,24 @@ func applyProxyFn(cfgPath, flagOverride string, proxy *proxydial.Setting) func(s
 		}
 		proxy.Set(d)
 		return nil
+	}
+}
+
+// applyDetachKeyFn returns the hook the settings screen calls when the detach
+// key is changed: validate, then persist it to the machine-local config. The
+// value in effect is the model's own field, so there is nothing to publish —
+// unlike the proxy, only the UI reads this, and only at attach time.
+func applyDetachKeyFn(cfgPath string) func(string) error {
+	return func(name string) error {
+		if _, err := detachkey.Parse(name); err != nil {
+			return err
+		}
+		cfg, err := localcfg.Load(cfgPath)
+		if err != nil {
+			cfg = localcfg.Config{} // unreadable: replace rather than refuse
+		}
+		cfg.DetachKey = name
+		return localcfg.Save(cfgPath, cfg)
 	}
 }
 
@@ -460,7 +487,7 @@ func plural(n int, noun string) string {
 
 // printDoctor dumps the resolved environment: what to paste into a bug report.
 // It reads no secrets and never unlocks the vault.
-func printDoctor(vaultPath, cfgPath string, proxy *proxydial.Dialer) {
+func printDoctor(vaultPath, cfgPath string, proxy *proxydial.Dialer, detach string) {
 	base := api.BaseURL()
 	knownHosts := knownHostsPath()
 	sessionPath := syncx.SessionPath(vaultPath)
@@ -472,6 +499,9 @@ func printDoctor(vaultPath, cfgPath string, proxy *proxydial.Dialer) {
 	fmt.Println("known_hosts ", knownHosts, presence(fileExists(knownHosts)))
 	fmt.Println("api base    ", base, envNote("WHARF_API_BASE"))
 	fmt.Println("device url  ", api.DeviceURL(base))
+	// The resolved name, not the stored one: an unusable value falls back, and
+	// a bug report should say which key actually detaches.
+	fmt.Println("detach key  ", detachkey.Name(detachkey.Byte(detach)))
 	// String redacts any password; this output is meant to be pasted into bug
 	// reports.
 	fmt.Println("proxy       ", proxy.String(), "(from "+proxy.Source().String()+")")

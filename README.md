@@ -184,6 +184,20 @@ a proxy declining CONNECT to port 22 on policy and a host that is genuinely down
 identical from here, and calling a reachable host offline is the mistake that stops
 someone trying.
 
+### Detach key
+
+`ctrl+\` leaves an attached session running. Some terminals and multiplexers claim that
+combination before wharf ever sees it, so it is rebindable: **settings → Detach key**,
+then press the key you want. It is stored beside the proxy in the same machine-local
+`config.json` (`"detachKey": "ctrl+]"`), and for the same reason — which control keys
+survive the trip depends on the terminal in front of you, not on the account.
+
+An attached terminal is in raw mode: wharf sees a byte stream on its way to the remote,
+not keypresses. So the binding has to be a `ctrl` combination, and the ones the remote
+shell cannot do without — `ctrl+c`, `ctrl+d`, `ctrl+z`, escape, tab, enter, backspace,
+flow control — are refused with the reason why. A change takes effect immediately,
+including for sessions that are already running.
+
 ## How it works
 
 - **First run asks one question:** use wharf on this machine only, or sign in to a
@@ -200,7 +214,8 @@ someone trying.
   which forces a password reset and issues a *new* code).
 - **Sessions are full-fidelity, and they outlive wharf.** Connecting hands your real
   terminal to the remote shell — vim, htop and tmux behave exactly as over plain `ssh`.
-  Press **`ctrl+\`** to detach: the session keeps running while you use the dashboard,
+  Press **`ctrl+\`** (rebindable — see [Detach key](#detach-key)) to detach: the
+  session keeps running while you use the dashboard,
   and reattaching replays recent output. Press **`S`** for the live-sessions overlay.
   Quitting wharf does **not** kill them (on macOS and Linux) — see
   [Sessions that outlive wharf](#sessions-that-outlive-wharf).
@@ -429,7 +444,7 @@ it, and holds nothing else. `WHARF_RUNTIME_DIR` overrides the location.
 | `g` | generate an ed25519 key *(keys tab)* |
 | `s` | sync now *(settings tab, signed in)* |
 | `ctrl+r` | remember the typed password *(password prompt)* |
-| `ctrl+\` | **detach** the attached session |
+| `ctrl+\` | **detach** the attached session *(rebindable in settings)* |
 | `S` | live sessions: reattach, kill, or open another |
 | `alt`+`1..9` | reattach a live session *(needs Option-as-Meta — see below)* |
 | `q` | lock the vault |

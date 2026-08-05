@@ -924,6 +924,8 @@ func (m Model) settingsTab(t theme.Theme, contentH int) []string {
 			val, vc = "sign out ›", t.Warn
 		case "password":
 			val, vc = "change ›", t.Hi
+		case "detachkey":
+			val, vc = m.detachName, t.Hi
 		case "proxy":
 			val, vc = m.proxyLabel(), t.Hi
 			if !m.proxy.Dialer().Enabled() {
@@ -1110,7 +1112,7 @@ func (m Model) hintBar(t theme.Theme) []string {
 			hints = append(hints, hk{"enter", "sign in"})
 		case "theme":
 			hints = append(hints, hk{"←/→", "theme"}, hk{"enter", "cycle"})
-		case "proxy":
+		case "proxy", "detachkey":
 			hints = append(hints, hk{"enter", "edit"})
 		default:
 			hints = append(hints, hk{"enter", "toggle"})
@@ -1184,7 +1186,7 @@ func (m Model) helpView(t theme.Theme) []string {
 		{"i", "invite member (projects)"},
 		{"p", "republish key on mismatch (projects)"},
 		{"esc", "back / clear / detach / cancel"},
-		{"ctrl+\\", "detach from a live session"},
+		{m.detachName, "detach from a live session (settings: detach key)"},
 		{"S", "live sessions: reattach, kill, or open another"},
 		{"alt+1..9", "reattach a live session (needs Option-as-Meta)"},
 		{"q", "lock vault — keeps you signed in (sign in/out in demo)"},

@@ -628,6 +628,11 @@ func (m Model) toggleSetting() (tea.Model, tea.Cmd) {
 			return m.setToast("the proxy setting needs a real vault", "err"), nil
 		}
 		return m.openProxyForm(), nil
+	case "detachkey":
+		if m.applyDetachKey == nil {
+			return m.setToast("changing the detach key needs a real vault", "err"), nil
+		}
+		return m.openDetachKeyForm(), nil
 	case "agent":
 		m.settings.Agent = !m.settings.Agent
 		m.applySSHSettings()

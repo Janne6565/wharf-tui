@@ -63,6 +63,8 @@ func (m Model) modalView(t theme.Theme) []string {
 		return m.moveProjectView(t)
 	case modalProxy:
 		return m.proxyView(t)
+	case modalDetachKey:
+		return m.detachKeyView(t)
 	}
 	return m.mainView(t)
 }
@@ -294,7 +296,7 @@ func (m Model) sessionHintView(t theme.Theme) []string {
 		"",
 		stl(t.Fg, t.Panel).Render("Wharf hands your terminal to the session. To get back:"),
 		"",
-		key("ctrl+\\", "   detach — the session keeps running"),
+		key(m.detachName, strings.Repeat(" ", maxInt(1, 9-len(m.detachName)))+"detach — the session keeps running"),
 		key("S", "        list live sessions: reattach, kill, open another"),
 		key("enter", "    reattach from a host row marked live"),
 		key("alt+1..9", " reattach by number (needs Option-as-Meta)"),

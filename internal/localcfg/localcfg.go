@@ -26,6 +26,15 @@ type Config struct {
 	// empty to defer to the environment. Any password in the URL is stripped
 	// before writing — see Save.
 	Proxy string `json:"proxy,omitempty"`
+
+	// DetachKey is the key that leaves an attached session running, by the name
+	// bubbletea reports for it ("ctrl+]"); empty means the default, ctrl+\.
+	// Like the proxy this is machine-local rather than synced: which control
+	// keys survive the trip to wharf depends on the terminal emulator and its
+	// keybindings, so the right answer on a laptop is not the right answer on
+	// the machine that shares the account. See internal/detachkey for the
+	// bindable set.
+	DetachKey string `json:"detachKey,omitempty"`
 }
 
 // DefaultPath resolves the config file, honouring $WHARF_CONFIG. It sits beside

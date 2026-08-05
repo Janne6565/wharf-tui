@@ -80,6 +80,7 @@ const (
 	modalSessionPicker   // choose among a host's open sessions, or start another
 	modalMoveProject     // move the selected host between personal and a project
 	modalProxy           // edit the machine-local egress proxy (settings tab)
+	modalDetachKey       // capture a new detach key (settings tab)
 )
 
 // syncState is the rendered sync status (header indicator). It is pure
@@ -164,6 +165,7 @@ func (m Model) settingRows() []settingDef {
 		{key: "agent", label: "Use SSH agent keys", act: true},
 		{key: "keepalive", label: "Keep-alive packets (30s)", act: true},
 		{key: "proxy", label: "Egress proxy", act: true},
+		{key: "detachkey", label: "Detach key", act: true},
 	}
 	if m.signedIn {
 		rows = append(rows,
@@ -277,6 +279,15 @@ type Model struct {
 	applyProxy  func(setting string) error
 	pxVal       string // proxy-edit modal buffer
 	pxErr       string // inline validation error in that modal
+
+	// --- detach key (machine-local, never synced) ---
+	// detachName is the key that leaves an attached session running, by the
+	// name bubbletea reports for it. It is resolved to a byte at attach time,
+	// so a change applies to sessions that are already open. applyDetachKey
+	// persists an edit; nil disables editing (demo mode, tests).
+	detachName     string
+	applyDetachKey func(name string) error
+	dkErr          string // rejected-key message in the capture modal
 
 	// sync hooks (injectable for tests; defaults wired in initSync).
 	syncAPI           syncx.API

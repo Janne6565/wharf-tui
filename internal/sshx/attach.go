@@ -5,27 +5,32 @@ import (
 	"io"
 	"os"
 
+	"github.com/Janne6565/wharf-tui/internal/detachkey"
 	"github.com/Janne6565/wharf-tui/internal/termsig"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/muesli/cancelreader"
 	"golang.org/x/term"
 )
 
-// detachByte is ctrl+\ (0x1C): typing it while attached returns from the
-// takeover with the session still alive.
-const detachByte = 0x1C
-
 // Attach returns the tea.ExecCommand that performs the full-screen terminal
 // takeover: raw mode, replay of the ring buffer, bidirectional copy, WINCH
-// forwarding. Typing ctrl+\ (0x1C) detaches — Run returns with the session
-// still alive.
-func (s *Session) Attach() tea.ExecCommand {
-	return &attachCmd{s: s}
+// forwarding. Typing detach (the configured key, ctrl+\ by default) returns
+// from the takeover — Run returns with the session still alive.
+//
+// detach is a byte rather than a key name because that is all the attach loop
+// sees: the terminal is raw and input is a stream on its way to the remote. A
+// zero byte means "unset" and falls back to the default.
+func (s *Session) Attach(detach byte) tea.ExecCommand {
+	if detach == 0 {
+		detach = detachkey.DefaultByte
+	}
+	return &attachCmd{s: s, detach: detach}
 }
 
 // attachCmd implements tea.ExecCommand for a single attach lifetime.
 type attachCmd struct {
 	s      *Session
+	detach byte
 	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
@@ -35,7 +40,7 @@ func (a *attachCmd) SetStdin(r io.Reader)  { a.stdin = r }
 func (a *attachCmd) SetStdout(w io.Writer) { a.stdout = w }
 func (a *attachCmd) SetStderr(w io.Writer) { a.stderr = w }
 
-// Run takes over the terminal until the user detaches (ctrl+\) or the session
+// Run takes over the terminal until the user detaches or the session
 // dies. It always leaves the terminal restored and the session's live writer
 // cleared on return.
 func (a *attachCmd) Run() error {
@@ -59,7 +64,9 @@ func (a *attachCmd) Run() error {
 	}
 
 	// In raw mode ctrl+\ reaches us as a byte; guard against the quit signal in
-	// case raw mode ever fails to engage.
+	// case raw mode ever fails to engage. This holds whether or not ctrl+\ is
+	// still the detach key: unbound, it belongs to the remote as a byte, not to
+	// us as a signal.
 	defer termsig.IgnoreQuit()()
 
 	stopWindow := a.syncWindow(stdout)
@@ -149,7 +156,7 @@ func (a *attachCmd) forward(r io.Reader, s *Session) error {
 		n, err := r.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
-			if i := bytes.IndexByte(chunk, detachByte); i >= 0 {
+			if i := bytes.IndexByte(chunk, a.detach); i >= 0 {
 				if i > 0 {
 					_, _ = s.stdin.Write(chunk[:i])
 				}
