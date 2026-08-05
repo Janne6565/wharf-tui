@@ -12,6 +12,7 @@ import (
 	"github.com/Janne6565/wharf-tui/internal/identity"
 	"github.com/Janne6565/wharf-tui/internal/store"
 	syncx "github.com/Janne6565/wharf-tui/internal/sync"
+	"github.com/Janne6565/wharf-tui/internal/vault"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -79,9 +80,9 @@ type projPushTimerMsg struct {
 
 // --- identity bootstrap -------------------------------------------------------
 
-// ensureIdentity lazily prepares the account's X25519 identity for projects. It
-// runs on the first real Projects entry / create / accept. Cheap when the
-// identity is already loaded.
+// ensureIdentity lazily prepares the account's identity for projects. It runs
+// on the first real Projects entry / create / accept. Cheap when the identity is
+// already loaded.
 func (m Model) ensureIdentity() (Model, tea.Cmd) {
 	if m.identityReady || m.identityBooting || m.eng == nil || !m.realMode() {
 		return m, nil
@@ -93,14 +94,57 @@ func (m Model) ensureIdentity() (Model, tea.Cmd) {
 		// and reads back what the server actually hands out for this account.
 		m.eng.SetIdentity(pub, priv)
 		m.identityReady = true
-		return m, tea.Batch(m.publishIdentityCmd(pub), m.identityCheckCmd())
+		// The hybrid upgrade deliberately does NOT happen here: it replaces the
+		// server's copy of the key, which would paper over a substituted one
+		// before the check below ever saw it. It runs from handleIdentityChecked
+		// instead, once the published key is confirmed to be ours.
+		return m, tea.Batch(m.publishIdentityCmd(pub, api.PublishNew), m.identityCheckCmd())
 	}
 	// No local identity — a network check decides whether to generate one.
 	m.identityBooting = true
 	return m, m.bootstrapIdentityCmd()
 }
 
-// loadIdentity decodes the personal vault's stored identity keypair.
+// identityNeedsHybridUpgrade reports whether the vault holds a classical (v1)
+// identity that has not yet grown its ML-KEM half.
+func (m Model) identityNeedsHybridUpgrade() bool {
+	if m.st == nil {
+		return false
+	}
+	id := m.st.Identity()
+	return id != nil && id.X25519Pub != "" && id.MLKEMSeed == ""
+}
+
+// upgradeIdentityToHybrid mints the ML-KEM-768 half of an existing identity and
+// persists it. The X25519 keypair is kept, so every DEK already sealed to this
+// account still opens and no project drops into awaiting-access; the publish
+// that follows therefore uses PublishUpgrade rather than PublishRotate.
+//
+// A failure here is deliberately silent: the account simply stays on the
+// classical identity, which still works. Nothing is lost, and shouting about it
+// mid-flow would only block the user from reaching their projects.
+func (m Model) upgradeIdentityToHybrid() (Model, bool) {
+	id := m.st.Identity()
+	seed, err := vault.NewMLKEMSeed()
+	if err != nil {
+		return m, false
+	}
+	upgraded := *id
+	upgraded.MLKEMSeed = base64.StdEncoding.EncodeToString(seed)
+	m.st.SetIdentity(&upgraded)
+	if err := m.st.Save(); err != nil {
+		m.st.SetIdentity(id)
+		return m, false
+	}
+	m.identityHybridUpgraded = true
+	// Persist to the synced payload too, so the other clients pick up the seed.
+	mm, _ := m.schedulePush()
+	return mm, true
+}
+
+// loadIdentity decodes the personal vault's stored identity keypair into the
+// wire forms the engine and server use: the bare X25519 keys for a pre-hybrid
+// identity, the versioned hybrid blobs once an ML-KEM seed is present.
 func (m Model) loadIdentity() (pub, priv []byte, ok bool) {
 	if m.st == nil {
 		return nil, nil, false
@@ -109,9 +153,21 @@ func (m Model) loadIdentity() (pub, priv []byte, ok bool) {
 	if id == nil {
 		return nil, nil, false
 	}
-	pub, e1 := base64.StdEncoding.DecodeString(id.X25519Pub)
-	priv, e2 := base64.StdEncoding.DecodeString(id.X25519Priv)
-	if e1 != nil || e2 != nil || len(pub) != 32 || len(priv) != 32 {
+	xPub, e1 := base64.StdEncoding.DecodeString(id.X25519Pub)
+	xPriv, e2 := base64.StdEncoding.DecodeString(id.X25519Priv)
+	if e1 != nil || e2 != nil || len(xPub) != 32 || len(xPriv) != 32 {
+		return nil, nil, false
+	}
+	var seed []byte
+	if id.MLKEMSeed != "" {
+		s, err := base64.StdEncoding.DecodeString(id.MLKEMSeed)
+		if err != nil {
+			return nil, nil, false
+		}
+		seed = s
+	}
+	pub, priv, err := vault.EncodeIdentity(xPub, xPriv, seed)
+	if err != nil {
 		return nil, nil, false
 	}
 	return pub, priv, true
@@ -119,12 +175,12 @@ func (m Model) loadIdentity() (pub, priv []byte, ok bool) {
 
 // publishIdentityCmd publishes an existing public key; a 409 (already set) is a
 // success.
-func (m Model) publishIdentityCmd(pub []byte) tea.Cmd {
+func (m Model) publishIdentityCmd(pub []byte, mode api.PublishMode) tea.Cmd {
 	eng := m.eng
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), projTimeout)
 		defer cancel()
-		err := eng.PublishIdentity(ctx, pub, false)
+		err := eng.PublishIdentity(ctx, pub, mode)
 		if err != nil && !errors.Is(err, api.ErrPublicKeyExists) {
 			return identityReadyMsg{err: err}
 		}
@@ -141,7 +197,7 @@ func (m Model) publishIdentityRotateCmd(pub []byte) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), projTimeout)
 		defer cancel()
-		if err := eng.PublishIdentity(ctx, pub, true); err != nil {
+		if err := eng.PublishIdentity(ctx, pub, api.PublishRotate); err != nil {
 			return identityReadyMsg{err: err}
 		}
 		return identityReadyMsg{ready: true}
@@ -190,12 +246,13 @@ func (m Model) identityCheckCmd() tea.Cmd {
 }
 
 // serverFingerprint renders the fingerprint of a base64 public key as published
-// by the server. Anything that is not a well-formed 32-byte key is reported as
-// such rather than fingerprinted: it is still not our key, and pretending to
-// fingerprint garbage would give the user something meaningless to compare.
+// by the server. Anything that is not a well-formed identity key — of either
+// version — is reported as such rather than fingerprinted: it is still not our
+// key, and pretending to fingerprint garbage would give the user something
+// meaningless to compare.
 func serverFingerprint(b64 string) string {
 	raw, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil || len(raw) != 32 {
+	if err != nil || !vault.IsIdentityPub(raw) {
 		return "(malformed key)"
 	}
 	return identity.Fingerprint(raw)
@@ -209,7 +266,7 @@ func (m Model) republishIdentityCmd(pub []byte) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), projTimeout)
 		defer cancel()
-		return identityRepublishedMsg{err: eng.PublishIdentity(ctx, pub, true)}
+		return identityRepublishedMsg{err: eng.PublishIdentity(ctx, pub, api.PublishRotate)}
 	}
 }
 
@@ -227,6 +284,22 @@ func (m Model) handleIdentityChecked(msg identityCheckedMsg) (tea.Model, tea.Cmd
 	}
 	if msg.mismatch {
 		return m.setToast("published key mismatch — see the projects tab", "err"), nil
+	}
+	// The published key is ours, so it is safe to replace it with the hybrid
+	// form: any substitution would have surfaced above. PublishUpgrade keeps the
+	// wrapped DEKs, which stay openable because the X25519 half is unchanged.
+	if m.identityNeedsHybridUpgrade() {
+		mm, ok := m.upgradeIdentityToHybrid()
+		if !ok {
+			return m, nil
+		}
+		m = mm
+		pub, priv, ok := m.loadIdentity()
+		if !ok {
+			return m, nil
+		}
+		m.eng.SetIdentity(pub, priv)
+		return m, m.publishIdentityCmd(pub, api.PublishUpgrade)
 	}
 	return m, nil
 }
@@ -282,13 +355,24 @@ func (m Model) handleIdentityReady(msg identityReadyMsg) (tea.Model, tea.Cmd) {
 		return mm, cmd
 	default:
 		// Neither side has a key: generate one, persist it, publish it.
-		pub, priv, err := m.genIdentity()
-		if err != nil || len(pub) != 32 || len(priv) != 32 {
+		xPub, xPriv, err := m.genIdentity()
+		if err != nil || len(xPub) != 32 || len(xPriv) != 32 {
+			return m.setToast("could not generate an identity key", "err"), nil
+		}
+		// A fresh identity is always hybrid: the X25519 keypair plus the ML-KEM
+		// half that makes DEKs sealed to it quantum-safe.
+		seed, err := vault.NewMLKEMSeed()
+		if err != nil {
+			return m.setToast("could not generate an identity key", "err"), nil
+		}
+		pub, priv, err := vault.EncodeIdentity(xPub, xPriv, seed)
+		if err != nil {
 			return m.setToast("could not generate an identity key", "err"), nil
 		}
 		m.st.SetIdentity(&store.Identity{
-			X25519Pub:  base64.StdEncoding.EncodeToString(pub),
-			X25519Priv: base64.StdEncoding.EncodeToString(priv),
+			X25519Pub:  base64.StdEncoding.EncodeToString(xPub),
+			X25519Priv: base64.StdEncoding.EncodeToString(xPriv),
+			MLKEMSeed:  base64.StdEncoding.EncodeToString(seed),
 			CreatedAt:  time.Now().UTC(),
 		})
 		if err := m.st.Save(); err != nil {
@@ -300,7 +384,7 @@ func (m Model) handleIdentityReady(msg identityReadyMsg) (tea.Model, tea.Cmd) {
 		m.identityNeedsSync = false
 		// Persisting to the synced payload also schedules a personal push.
 		mm, pushCmd := m.schedulePush()
-		return mm, tea.Batch(pushCmd, mm.publishIdentityCmd(pub))
+		return mm, tea.Batch(pushCmd, mm.publishIdentityCmd(pub, api.PublishNew))
 	}
 }
 
@@ -966,13 +1050,24 @@ func (m Model) resetIdentityConfirmKey(key string) (tea.Model, tea.Cmd) {
 		if m.st == nil || m.eng == nil {
 			return m.setToast("cannot reset identity right now", "err"), nil
 		}
-		pub, priv, err := m.genIdentity()
-		if err != nil || len(pub) != 32 || len(priv) != 32 {
+		xPub, xPriv, err := m.genIdentity()
+		if err != nil || len(xPub) != 32 || len(xPriv) != 32 {
+			return m.setToast("could not generate an identity key", "err"), nil
+		}
+		// A fresh identity is always hybrid: the X25519 keypair plus the ML-KEM
+		// half that makes DEKs sealed to it quantum-safe.
+		seed, err := vault.NewMLKEMSeed()
+		if err != nil {
+			return m.setToast("could not generate an identity key", "err"), nil
+		}
+		pub, priv, err := vault.EncodeIdentity(xPub, xPriv, seed)
+		if err != nil {
 			return m.setToast("could not generate an identity key", "err"), nil
 		}
 		m.st.SetIdentity(&store.Identity{
-			X25519Pub:  base64.StdEncoding.EncodeToString(pub),
-			X25519Priv: base64.StdEncoding.EncodeToString(priv),
+			X25519Pub:  base64.StdEncoding.EncodeToString(xPub),
+			X25519Priv: base64.StdEncoding.EncodeToString(xPriv),
+			MLKEMSeed:  base64.StdEncoding.EncodeToString(seed),
 			CreatedAt:  time.Now().UTC(),
 		})
 		if err := m.st.Save(); err != nil {

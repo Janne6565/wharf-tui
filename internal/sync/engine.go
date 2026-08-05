@@ -30,7 +30,7 @@ type API interface {
 
 	// Projects (M3). All project-scoped routes 404 for non-members.
 	Me(ctx context.Context) (api.Profile, error)
-	PublishPublicKey(ctx context.Context, pub []byte, rotate bool) error
+	PublishPublicKey(ctx context.Context, pub []byte, mode api.PublishMode) error
 	ListProjects(ctx context.Context) ([]api.ProjectSummary, error)
 	GetProject(ctx context.Context, id string) (api.ProjectDetail, error)
 	CreateProject(ctx context.Context, name, description string, blob, wrappedDek []byte) (api.ProjectDetail, error)

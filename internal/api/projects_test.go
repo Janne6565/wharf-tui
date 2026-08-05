@@ -152,6 +152,7 @@ func TestPutProjectVaultConflict(t *testing.T) {
 
 func TestPublishPublicKey(t *testing.T) {
 	var rotate bool
+	var sentRotate, sentUpgrade bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/users/me/public-key" || r.Method != http.MethodPut {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -159,12 +160,14 @@ func TestPublishPublicKey(t *testing.T) {
 		var body struct {
 			PublicKey string `json:"publicKey"`
 			Rotate    bool   `json:"rotate"`
+			Upgrade   bool   `json:"upgrade"`
 		}
 		json.NewDecoder(r.Body).Decode(&body)
 		if got, _ := base64.StdEncoding.DecodeString(body.PublicKey); string(got) != "pub" {
 			t.Fatalf("unexpected publicKey %q", got)
 		}
-		if !body.Rotate && !rotate {
+		sentRotate, sentUpgrade = body.Rotate, body.Upgrade
+		if !body.Rotate && !body.Upgrade && !rotate {
 			problem(w, http.StatusConflict, "public key already set")
 			return
 		}
@@ -174,11 +177,21 @@ func TestPublishPublicKey(t *testing.T) {
 
 	c := authedClient(srv.URL)
 	rotate = true
-	if err := c.PublishPublicKey(context.Background(), []byte("pub"), true); err != nil {
+	if err := c.PublishPublicKey(context.Background(), []byte("pub"), PublishRotate); err != nil {
 		t.Fatalf("publish (rotate): %v", err)
 	}
+	if !sentRotate || sentUpgrade {
+		t.Fatalf("rotate mode sent rotate=%v upgrade=%v", sentRotate, sentUpgrade)
+	}
+	rotate = true
+	if err := c.PublishPublicKey(context.Background(), []byte("pub"), PublishUpgrade); err != nil {
+		t.Fatalf("publish (upgrade): %v", err)
+	}
+	if sentRotate || !sentUpgrade {
+		t.Fatalf("upgrade mode sent rotate=%v upgrade=%v", sentRotate, sentUpgrade)
+	}
 	rotate = false
-	if err := c.PublishPublicKey(context.Background(), []byte("pub"), false); !errors.Is(err, ErrPublicKeyExists) {
+	if err := c.PublishPublicKey(context.Background(), []byte("pub"), PublishNew); err != nil && !errors.Is(err, ErrPublicKeyExists) {
 		t.Fatalf("want ErrPublicKeyExists, got %v", err)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/Janne6565/wharf-tui/internal/api"
 	"github.com/Janne6565/wharf-tui/internal/identity"
 	"github.com/Janne6565/wharf-tui/internal/store"
+	"github.com/Janne6565/wharf-tui/internal/vault"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -83,10 +84,10 @@ func (f *fakeBackend) Me(context.Context) (api.Profile, error) {
 	return p, nil
 }
 
-func (f *fakeBackend) PublishPublicKey(_ context.Context, pub []byte, rotate bool) error {
+func (f *fakeBackend) PublishPublicKey(_ context.Context, pub []byte, mode api.PublishMode) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.publicKey) > 0 && !rotate {
+	if len(f.publicKey) > 0 && mode == api.PublishNew {
 		return api.ErrPublicKeyExists
 	}
 	f.publicKey = append([]byte(nil), pub...)
@@ -655,9 +656,14 @@ func TestIdentityResetFlow(t *testing.T) {
 		t.Fatalf("reset should leave identity ready and out of needs-sync (ready=%v needsSync=%v)", m.identityReady, m.identityNeedsSync)
 	}
 	fb.mu.Lock()
-	rotated := bytes.Equal(fb.publicKey, bytesFill("u1pubkey", 32))
+	published := append([]byte(nil), fb.publicKey...)
 	fb.mu.Unlock()
-	if !rotated {
+	// The published key is the hybrid encoding of the freshly minted identity:
+	// version byte, the new X25519 key, then the ML-KEM encapsulation key.
+	if !vault.IsHybridPub(published) {
+		t.Fatalf("reset should publish a hybrid identity key, got %d bytes", len(published))
+	}
+	if !bytes.Equal(published[1:33], bytesFill("u1pubkey", 32)) {
 		t.Fatal("reset should rotate the published public key to the freshly minted one")
 	}
 	if fv.saves == savesBefore {
@@ -727,7 +733,10 @@ func TestIdentityMismatchDetected(t *testing.T) {
 	if !m.identityMismatch {
 		t.Fatalf("a differing published key must enter the mismatch state:\n%s", tm.View())
 	}
-	localPub, _, _ := fakeIdentity()
+	localPub, _, ok := m.loadIdentity()
+	if !ok {
+		t.Fatal("local identity should load")
+	}
 	if want := identity.Fingerprint(localPub); m.identityLocalFP != want {
 		t.Fatalf("local fingerprint = %q, want %q", m.identityLocalFP, want)
 	}
@@ -791,6 +800,42 @@ func TestIdentityUnreachableServerIsNotMismatch(t *testing.T) {
 	}
 }
 
+// TestIdentityHybridUpgradeOnEntry covers the v1 -> v2 migration: a vault
+// carrying a pre-hybrid identity grows its ML-KEM half on the first projects
+// entry, keeps the same X25519 keypair (so already-wrapped DEKs stay openable)
+// and republishes the hybrid key.
+func TestIdentityHybridUpgradeOnEntry(t *testing.T) {
+	tm, fb := identityModel(t)
+	before := tm.(Model).st.Identity()
+	if before.MLKEMSeed != "" {
+		t.Fatal("the fixture identity should start out classical")
+	}
+
+	tm = enterProjects(t, tm)
+	m := tm.(Model)
+
+	id := m.st.Identity()
+	if id.MLKEMSeed == "" {
+		t.Fatal("entering projects should add the ML-KEM half")
+	}
+	if id.X25519Pub != before.X25519Pub || id.X25519Priv != before.X25519Priv {
+		t.Fatal("the upgrade must keep the X25519 keypair, or every wrapped DEK stops opening")
+	}
+
+	fb.mu.Lock()
+	published := append([]byte(nil), fb.publicKey...)
+	fb.mu.Unlock()
+	if !vault.IsHybridPub(published) {
+		t.Fatalf("the upgraded key should be published, got %d bytes", len(published))
+	}
+	if !bytes.Equal(published[1:33], bytesFill("u1pubkey", 32)) {
+		t.Fatal("the published hybrid key must embed the original X25519 key")
+	}
+	if m.identityMismatch {
+		t.Fatal("upgrading our own key is not a mismatch")
+	}
+}
+
 func TestIdentityMismatchRepublish(t *testing.T) {
 	tm, fb := identityModel(t)
 	fb.mu.Lock()
@@ -818,7 +863,10 @@ func TestIdentityMismatchRepublish(t *testing.T) {
 	fb.mu.Lock()
 	published := append([]byte(nil), fb.publicKey...)
 	fb.mu.Unlock()
-	if !bytes.Equal(published, localPub) {
+	// Republishing puts this vault's own key back on the server. The re-check
+	// that follows finds it matching and then runs the hybrid upgrade, so what
+	// finally sits on the server is the v2 encoding of the *same* X25519 key.
+	if !vault.IsHybridPub(published) || !bytes.Equal(published[1:33], localPub) {
 		t.Fatal("republish should put this vault's own key on the server")
 	}
 	m := tm.(Model)

@@ -18,11 +18,12 @@ import (
 
 // schemaVersion is the document version this build writes. The document has
 // grown by version: 1 was hosts + settings, 2 added the vault identity, 3
-// added synced SSH keys. Open still accepts the older versions 1 and 2
-// (upgraded in-memory and rewritten as 3 on the next Save); any newer version
-// is a hard error, since an old build cannot round-trip fields it does not
-// know without silently dropping them.
-const schemaVersion = 3
+// added synced SSH keys, 4 added the identity's ML-KEM-768 seed (the
+// post-quantum half of the hybrid project-DEK wrapping). Open still accepts
+// the older versions 1-3 (upgraded in-memory and rewritten as 4 on the next
+// Save); any newer version is a hard error, since an old build cannot
+// round-trip fields it does not know without silently dropping them.
+const schemaVersion = 4
 
 // Backend persists the raw payload. *vault.Vault satisfies this.
 type Backend interface {
@@ -73,11 +74,18 @@ func DefaultSettings() Settings {
 	return Settings{Theme: "abyss", Agent: true, Keepalive: true}
 }
 
-// Identity is the vault's X25519 keypair used to wrap project DEKs. The keys
-// are base64-encoded; CreatedAt records when the identity was generated.
+// Identity is the vault's keypair used to wrap project DEKs. The keys are
+// base64-encoded; CreatedAt records when the identity was generated.
+//
+// MLKEMSeed (schema 4) is the 64-byte FIPS 203 seed of the ML-KEM-768 keypair
+// that makes DEK wrapping post-quantum. It is stored alongside — never instead
+// of — the X25519 keys: the hybrid public key embeds the same X25519 key, so
+// adding a seed leaves every already-wrapped DEK openable. An identity written
+// before schema 4 carries an empty seed and stays classical until upgraded.
 type Identity struct {
-	X25519Priv string    `json:"x25519Priv"` // base64
-	X25519Pub  string    `json:"x25519Pub"`  // base64
+	X25519Priv string    `json:"x25519Priv"`          // base64
+	X25519Pub  string    `json:"x25519Pub"`           // base64
+	MLKEMSeed  string    `json:"mlkemSeed,omitempty"` // base64, 64 bytes
 	CreatedAt  time.Time `json:"createdAt"`
 }
 
@@ -127,10 +135,10 @@ func Open(b Backend) (*Store, error) {
 	if err := json.Unmarshal(payload, &doc); err != nil {
 		return nil, fmt.Errorf("store: invalid vault payload: %w", err)
 	}
-	// Older schemas (1, 2) are read as-is and rewritten as schema 3 on the
+	// Older schemas (1-3) are read as-is and rewritten as schema 4 on the
 	// next Save.
-	if doc.Schema != 1 && doc.Schema != 2 && doc.Schema != 3 {
-		return nil, fmt.Errorf("store: unsupported schema version %d (this build understands 1-3)", doc.Schema)
+	if doc.Schema < 1 || doc.Schema > schemaVersion {
+		return nil, fmt.Errorf("store: unsupported schema version %d (this build understands 1-%d)", doc.Schema, schemaVersion)
 	}
 
 	return &Store{

@@ -121,15 +121,15 @@ func (e *Engine) ServerProfile(ctx context.Context) (api.Profile, error) {
 	return e.cfg.API.Me(ctx)
 }
 
-// PublishIdentity publishes the caller's public key. rotate=true replaces an
-// existing key and nulls all the caller's wrapped DEKs.
-func (e *Engine) PublishIdentity(ctx context.Context, pub []byte, rotate bool) error {
+// PublishIdentity publishes the caller's public key under mode (see
+// api.PublishMode: first publish, rotate, or hybrid upgrade).
+func (e *Engine) PublishIdentity(ctx context.Context, pub []byte, mode api.PublishMode) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.sess == nil || e.closed {
 		return ErrSignedOut
 	}
-	return e.cfg.API.PublishPublicKey(ctx, pub, rotate)
+	return e.cfg.API.PublishPublicKey(ctx, pub, mode)
 }
 
 // CreateProject seals an empty project document under a fresh DEK, wraps that

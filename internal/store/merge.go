@@ -94,8 +94,8 @@ func parseDocument(payload []byte) (document, error) {
 	if err := json.Unmarshal(payload, &doc); err != nil {
 		return document{}, fmt.Errorf("invalid vault payload: %w", err)
 	}
-	if doc.Schema != 1 && doc.Schema != 2 && doc.Schema != 3 {
-		return document{}, fmt.Errorf("unsupported schema version %d (this build understands 1-3)", doc.Schema)
+	if doc.Schema < 1 || doc.Schema > schemaVersion {
+		return document{}, fmt.Errorf("unsupported schema version %d (this build understands 1-%d)", doc.Schema, schemaVersion)
 	}
 	return doc, nil
 }
