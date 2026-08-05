@@ -42,6 +42,30 @@ func TestSaveRoundTrip(t *testing.T) {
 	}
 }
 
+// The detach key shares the file with the proxy and must survive a write that
+// only touches the other field — both are edited from their own settings row.
+func TestSaveRoundTripsEveryField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Save(path, Config{Proxy: "off", DetachKey: "ctrl+]"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Proxy != "off" || c.DetachKey != "ctrl+]" {
+		t.Fatalf("round trip gave %+v, want both fields preserved", c)
+	}
+
+	c.Proxy = ""
+	if err := Save(path, c); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if c, err = Load(path); err != nil || c.DetachKey != "ctrl+]" {
+		t.Fatalf("DetachKey = %q after a proxy-only edit (err %v), want it kept", c.DetachKey, err)
+	}
+}
+
 func TestSaveFileMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix file modes")

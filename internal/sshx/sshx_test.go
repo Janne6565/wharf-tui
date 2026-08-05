@@ -372,6 +372,36 @@ func TestDialPasswordAuth(t *testing.T) {
 	}
 }
 
+// TestKexIsPostQuantum guards the pin in preferredKexAlgos: against a server
+// that offers it, the negotiated key exchange must be the hybrid ML-KEM-768 +
+// X25519 one. Without the explicit Config we would merely inherit x/crypto's
+// default order, which a dependency bump could reorder silently.
+func TestKexIsPostQuantum(t *testing.T) {
+	ts := startServer(t, testPassword, echoHandler(nil, nil))
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	t.Setenv("SSH_AUTH_SOCK", "")
+	m := NewManager(khPath, false)
+	m.SetNotify(newRecorder().notify)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sess, err := m.Dial(ctx, ts.passwordSpec(), 80, 24)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	meta, ok := sess.client.Conn.(gossh.AlgorithmsConnMetadata)
+	if !ok {
+		t.Fatal("client conn does not report negotiated algorithms")
+	}
+	if got := meta.Algorithms().KeyExchange; got != gossh.KeyExchangeMLKEM768X25519 {
+		t.Fatalf("negotiated kex = %q, want %q", got, gossh.KeyExchangeMLKEM768X25519)
+	}
+}
+
 func TestTOFUAcceptAndPersist(t *testing.T) {
 	rec := newRecorder()
 	ts := startServer(t, testPassword, echoHandler(nil, nil))
@@ -586,8 +616,8 @@ func TestAttachDetachByte(t *testing.T) {
 	t.Cleanup(func() { _ = pr.Close(); _ = pw.Close() })
 	go func() { _, _ = pw.Write([]byte("abc\x1c")) }()
 
-	var out bytes.Buffer // not an *os.File => no raw mode
-	cmd := sess.Attach()
+	var out bytes.Buffer  // not an *os.File => no raw mode
+	cmd := sess.Attach(0) // 0 => the default detach byte
 	cmd.SetStdin(pr)
 	cmd.SetStdout(&out)
 
@@ -618,6 +648,69 @@ func TestAttachDetachByte(t *testing.T) {
 	if live != nil {
 		t.Fatal("live writer not cleared after detach")
 	}
+}
+
+// A rebound detach key ends the takeover, and the byte it replaced is no
+// longer special: it belongs to the remote like any other keystroke.
+func TestAttachHonoursACustomDetachByte(t *testing.T) {
+	rec := newRecorder()
+	rec.secretReply = func(SecretPromptMsg) []byte { return []byte(testPassword) }
+	capture := &safeBuffer{}
+	ready := make(chan struct{})
+	ts := startServer(t, testPassword, echoHandler(capture, ready))
+
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	t.Setenv("SSH_AUTH_SOCK", "")
+	m := NewManager(khPath, false)
+	m.SetNotify(rec.notify)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sess, err := m.Dial(ctx, ts.passwordSpec(), 80, 24)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server handler did not become ready")
+	}
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	t.Cleanup(func() { _ = pr.Close(); _ = pw.Close() })
+	// The old default (0x1C) first, then the rebound key (ctrl+], 0x1D).
+	go func() { _, _ = pw.Write([]byte("ab\x1ccd\x1d")) }()
+
+	var out bytes.Buffer
+	cmd := sess.Attach(0x1D)
+	cmd.SetStdin(pr)
+	cmd.SetStdout(&out)
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Run() }()
+
+	select {
+	case rerr := <-done:
+		if rerr != nil {
+			t.Fatalf("attach Run returned error: %v", rerr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("attach Run did not return after the custom detach byte")
+	}
+
+	if !sess.Alive() {
+		t.Fatal("session should still be alive after detach")
+	}
+	// Everything up to the custom byte reached the remote, 0x1C included.
+	waitFor(t, 5*time.Second, "remote to receive the unbound ctrl+backslash", func() bool {
+		return strings.Contains(capture.String(), "ab\x1ccd")
+	})
 }
 
 func TestWrongPasswordFailsCleanly(t *testing.T) {

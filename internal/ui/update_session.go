@@ -64,7 +64,7 @@ func (m Model) vaultKeySpecs(authMethod string) []sshx.VaultKeySpec {
 func (m Model) attach(sessionID string, s *sessd.Remote) (tea.Model, tea.Cmd) {
 	m.attaching = true
 	m.modal = modalNone
-	return m, tea.Exec(s.Attach(), func(error) tea.Msg { return detachedMsg{sessionID: sessionID} })
+	return m, tea.Exec(s.Attach(m.detachByte()), func(error) tea.Msg { return detachedMsg{sessionID: sessionID} })
 }
 
 // sessionHintKey dismisses the first-connect primer: enter/space hands the

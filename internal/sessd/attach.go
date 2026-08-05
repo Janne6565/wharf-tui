@@ -7,24 +7,32 @@ import (
 	"io"
 	"os"
 
+	"github.com/Janne6565/wharf-tui/internal/detachkey"
 	"github.com/Janne6565/wharf-tui/internal/termsig"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/muesli/cancelreader"
 	"golang.org/x/term"
 )
 
-// detachByte is ctrl+\ (0x1C), the same key the in-process attach uses: typing
-// it returns from the takeover with the remote session still running.
-const detachByte = 0x1C
-
 // Attach returns the tea.ExecCommand that hands this terminal to the remote
 // session. It is the socket-backed twin of sshx.Session.Attach: raw mode,
 // replay, bidirectional copy and WINCH forwarding, except the bytes travel over
 // the unix socket to the child process that owns the SSH connection.
-func (r *Remote) Attach() tea.ExecCommand { return &attachCmd{r: r} }
+//
+// detach is the byte that ends the takeover, the same contract as
+// sshx.Session.Attach: zero falls back to the default (ctrl+\). The key is
+// watched here rather than in the session host, so it applies from the moment
+// it is changed — including to sessions an earlier wharf left running.
+func (r *Remote) Attach(detach byte) tea.ExecCommand {
+	if detach == 0 {
+		detach = detachkey.DefaultByte
+	}
+	return &attachCmd{r: r, detach: detach}
+}
 
 type attachCmd struct {
 	r      *Remote
+	detach byte
 	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
@@ -34,7 +42,7 @@ func (a *attachCmd) SetStdin(rd io.Reader) { a.stdin = rd }
 func (a *attachCmd) SetStdout(w io.Writer) { a.stdout = w }
 func (a *attachCmd) SetStderr(w io.Writer) { a.stderr = w }
 
-// Run streams until the user detaches (ctrl+\) or the session dies. It always
+// Run streams until the user detaches or the session dies. It always
 // leaves the terminal restored and tells the host to stop streaming.
 func (a *attachCmd) Run() error {
 	r := a.r
@@ -56,7 +64,8 @@ func (a *attachCmd) Run() error {
 	}
 
 	// In raw mode ctrl+\ arrives as a byte; guard against the quit signal in
-	// case raw mode ever fails to engage.
+	// case raw mode ever fails to engage. This holds whether or not ctrl+\ is
+	// still the detach key: unbound, it is a byte for the remote, not a signal.
 	defer termsig.IgnoreQuit()()
 
 	cols, rows := terminalSize(stdout)
@@ -139,7 +148,7 @@ func (a *attachCmd) forward(rd io.Reader) error {
 		n, err := rd.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
-			if i := bytes.IndexByte(chunk, detachByte); i >= 0 {
+			if i := bytes.IndexByte(chunk, a.detach); i >= 0 {
 				if i > 0 {
 					_ = r.writeFrame(kindData, chunk[:i])
 				}

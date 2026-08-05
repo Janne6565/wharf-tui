@@ -8,6 +8,7 @@ import (
 	"github.com/Janne6565/wharf-tui/internal/api"
 	"github.com/Janne6565/wharf-tui/internal/browser"
 	"github.com/Janne6565/wharf-tui/internal/data"
+	"github.com/Janne6565/wharf-tui/internal/detachkey"
 	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
 	"github.com/Janne6565/wharf-tui/internal/proxydial"
@@ -103,6 +104,13 @@ type Config struct {
 	// ProxySetting. The UI deliberately does not resolve precedence or write the
 	// file itself; nil disables editing (demo mode, tests).
 	ApplyProxy func(setting string) error
+
+	// DetachKey is the machine-local detach hotkey as stored on disk, by the
+	// name bubbletea reports for it. Empty means the default (ctrl+\).
+	DetachKey string
+	// ApplyDetachKey validates and persists an edited detach key. Nil disables
+	// editing (demo mode, tests) but not the key itself.
+	ApplyDetachKey func(name string) error
 }
 
 // New builds the initial model. Demo mode opens on the simulated account
@@ -133,6 +141,8 @@ func New(cfg Config) Model {
 		proxyStored:       cfg.Proxy,
 		proxy:             cfg.ProxySetting,
 		applyProxy:        cfg.ApplyProxy,
+		detachName:        detachkey.Name(detachkey.Byte(cfg.DetachKey)),
+		applyDetachKey:    cfg.ApplyDetachKey,
 	}
 	// cfg.Demo, not m.demo: the demo/real branches below are what set m.demo,
 	// so reading it here would always see false and hand a demo run a real

@@ -277,7 +277,7 @@ func (r *Remote) Done() <-chan struct{} { return r.sess.Done() }
 
 // Attach hands this terminal to the session until the user detaches (ctrl+\)
 // or it dies.
-func (r *Remote) Attach() tea.ExecCommand { return r.sess.Attach() }
+func (r *Remote) Attach(detach byte) tea.ExecCommand { return r.sess.Attach(detach) }
 
 // Close terminates the session.
 func (r *Remote) Close() error {

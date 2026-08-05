@@ -123,6 +123,8 @@ func (m Model) modalKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		return m.moveProjectKey(key)
 	case modalProxy:
 		return m.proxyKey(key)
+	case modalDetachKey:
+		return m.detachKeyCapture(key)
 	}
 	return m, nil
 }
