@@ -213,6 +213,21 @@ func (s *Store) DeleteHost(id string) error {
 // -byte identical to the incoming one counts as skipped (nothing to write);
 // only a real change counts as updated.
 func (s *Store) UpsertImported(hs []Host) (added, updated, skipped int) {
+	return s.upsertImported(hs, false)
+}
+
+// UpsertImportedWithSecrets is UpsertImported for sources that do carry auth
+// secrets — a Termius profile stores per-host passwords, unlike ssh_config.
+//
+// The difference is confined to re-imports: an incoming password replaces the
+// stored one, while an incoming *empty* password still leaves a locally saved
+// one alone, so re-importing never silently drops a credential the user typed
+// into Wharf.
+func (s *Store) UpsertImportedWithSecrets(hs []Host) (added, updated, skipped int) {
+	return s.upsertImported(hs, true)
+}
+
+func (s *Store) upsertImported(hs []Host, withSecrets bool) (added, updated, skipped int) {
 	for _, in := range hs {
 		i := indexByNameIn(s.hosts, in.Name)
 		if i < 0 {
@@ -240,8 +255,14 @@ func (s *Store) UpsertImported(hs []Host) (added, updated, skipped int) {
 		merged := in
 		merged.ID = existing.ID
 		merged.LastSeen = existing.LastSeen
-		merged.AuthMethod = existing.AuthMethod
-		merged.Password = existing.Password
+		if !withSecrets {
+			merged.AuthMethod = existing.AuthMethod
+			merged.Password = existing.Password
+		} else if merged.Password == "" {
+			// The source carries secrets but this host has none, so keep any
+			// password the user saved locally rather than clearing it.
+			merged.Password = existing.Password
+		}
 		if reflect.DeepEqual(existing, merged) {
 			skipped++
 			continue

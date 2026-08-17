@@ -10,6 +10,7 @@ import (
 
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
+	"github.com/Janne6565/wharf-tui/internal/termius"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -79,6 +80,8 @@ func (m Model) modalKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		return m.deleteConfirmKey(key)
 	case modalKeygen:
 		return m.keygenKey(key)
+	case modalImportSource:
+		return m.importSourceKey(key)
 	case modalImportSummary:
 		return m.importSummaryKey(key)
 	case modalQuitConfirm:
@@ -586,21 +589,63 @@ func (m Model) keyUnsyncConfirmKey(key string) (tea.Model, tea.Cmd) {
 
 func (m Model) handleImportDone(msg importDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		if errors.Is(msg.err, os.ErrNotExist) {
+		if errors.Is(msg.err, os.ErrNotExist) && msg.source != termius.Source {
 			return m.setToast("no ~/.ssh/config found", "err"), nil
+		}
+		// Termius failures carry multi-line guidance (which profiles were
+		// searched, which keyring entries were tried), so they go to the error
+		// modal rather than a one-line toast that would truncate them.
+		if msg.source == termius.Source {
+			m.modal = modalError
+			m.errTitle = "termius import failed"
+			m.errBody = msg.err.Error()
+			return m, nil
 		}
 		return m.setToast("import failed: "+msg.err.Error(), "err"), nil
 	}
 	m.importHosts = msg.hosts
 	m.importSkipped = msg.skipped
+	m.importSource = msg.source
+	m.importNote = msg.note
 	m.modal = modalImportSummary
+	return m, nil
+}
+
+// openImportSource asks what to import from. ssh_config used to run straight
+// off the keypress; the chooser exists because Termius is a second source, and
+// a wrong guess there is expensive (it prompts the OS credential store).
+func (m Model) openImportSource() (tea.Model, tea.Cmd) {
+	m.modal = modalImportSource
+	return m, nil
+}
+
+// importSourceKey handles the "import from where?" chooser.
+func (m Model) importSourceKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "s", "S":
+		m.modal = modalNone
+		return m.setToast("importing ~/.ssh/config…", "ok"), m.importCmd()
+	case "t", "T":
+		m.modal = modalNone
+		// The credential store may prompt, and on macOS that dialog can end up
+		// behind other windows, so the toast says to expect it.
+		return m.setToast("reading Termius profile… (approve the keychain prompt)", "ok"), m.termiusImportCmd()
+	case "esc", "n", "N", "q":
+		m.modal = modalNone
+	}
 	return m, nil
 }
 
 func (m Model) importSummaryKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "y", "Y", "enter":
-		added, updated, skipped := m.st.UpsertImported(m.importHosts)
+		var added, updated, skipped int
+		if m.importSource == termius.Source {
+			// Only a Termius profile brings passwords with it.
+			added, updated, skipped = m.st.UpsertImportedWithSecrets(m.importHosts)
+		} else {
+			added, updated, skipped = m.st.UpsertImported(m.importHosts)
+		}
 		m.modal = modalNone
 		m, syncCmd := m.saveVault()
 		summary := itoa(added) + " added · " + itoa(updated) + " updated · " + itoa(skipped) + " skipped"

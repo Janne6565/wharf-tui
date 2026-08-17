@@ -81,6 +81,7 @@ const (
 	modalMoveProject     // move the selected host between personal and a project
 	modalProxy           // edit the machine-local egress proxy (settings tab)
 	modalDetachKey       // capture a new detach key (settings tab)
+	modalImportSource    // choose what to import hosts from (ssh_config / Termius)
 )
 
 // syncState is the rendered sync status (header indicator). It is pure
@@ -475,6 +476,13 @@ type Model struct {
 
 	importHosts   []store.Host
 	importSkipped []string
+	// importSource is which importer produced importHosts ("ssh_config" or
+	// termius.Source). It selects the summary wording and, because only a
+	// Termius profile carries passwords, the upsert path.
+	importSource string
+	// importNote is a source-specific line for the summary, e.g. how many
+	// imported hosts brought a saved password with them.
+	importNote string
 
 	pendingHostKey *sshx.HostKeyPromptMsg
 	pendingSecret  *sshx.SecretPromptMsg

@@ -609,7 +609,7 @@ func (m Model) hostsEmpty(t theme.Theme, contentH int) []string {
 		stl(t.Fg, t.Panel).Render("No hosts yet."),
 		"",
 		stl(t.Hi, t.Panel).Render("a") + stl(t.Dim, t.Panel).Render("   add a host"),
-		stl(t.Hi, t.Panel).Render("m") + stl(t.Dim, t.Panel).Render("   import ~/.ssh/config"),
+		stl(t.Hi, t.Panel).Render("m") + stl(t.Dim, t.Panel).Render("   import hosts (ssh config / Termius)"),
 	}
 	box := boxPanelAuto(t, "hosts", t.Hi, pw, body)
 	return centerInArea(box, m.w, contentH, t.Bg)
@@ -1179,7 +1179,7 @@ func (m Model) helpView(t theme.Theme) []string {
 		{"a / e / d", "add / edit / delete host"},
 		{"f", "start a port forward (hosts)"},
 		{"F", "show active forwards"},
-		{"m", "import ~/.ssh/config"},
+		{"m", "import hosts (ssh config / Termius)"},
 		{"R", "re-probe all hosts"},
 		{"g", "generate a key (keys tab)"},
 		{"s / u", "sync / unsync key (keys tab)"},

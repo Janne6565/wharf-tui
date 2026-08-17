@@ -13,7 +13,7 @@ mobile companion, sync backend, deployment) live in sibling `wharf-*` repos.
 ## Status
 
 **Usable SSH client with real account sync.** Real SSH transport, encrypted vault
-persistence, host management, `~/.ssh/config` import, reachability probes and key
+persistence, host management, `~/.ssh/config` and Termius import, reachability probes and key
 generation are implemented and tested. Device-code sign-in, cross-machine
 **vault sync** and **team projects** all run against the live `wharf-backend`
 (see [Account sync](#account-sync)). See [Roadmap](#roadmap).
@@ -355,7 +355,7 @@ awaiting-access until an admin re-grants).
 | --- | --- |
 | Hosts, keys/identities, settings — encrypted vault | Cross-machine **sync** of your vault |
 | Real SSH sessions: connect / detach / reattach | **Projects**: shared host workspaces *(planned)* |
-| `~/.ssh/config` import, key generation, probes | Invite teammates, roles (owner/admin/member) *(planned)* |
+| `~/.ssh/config` + Termius import, key generation, probes | Invite teammates, roles (owner/admin/member) *(planned)* |
 
 ### Security model
 
@@ -450,7 +450,7 @@ it, and holds nothing else. `WHARF_RUNTIME_DIR` overrides the location.
 | `a` / `e` / `d` | add / edit / delete host |
 | `p` | move the selected host into a project (or back to personal) |
 | `f` | show this project's hosts on the hosts tab *(projects tab)* |
-| `m` | import `~/.ssh/config` |
+| `m` | import hosts (`~/.ssh/config` or a local Termius profile) |
 | `R` | re-probe reachability |
 | `g` | generate an ed25519 key *(keys tab)* |
 | `s` | sync now *(settings tab, signed in)* |
@@ -477,6 +477,7 @@ internal/
   sessd/    session-host child processes + their unix-socket protocol
   keys/     ~/.ssh scan + ed25519 generation
   sshcfg/   ~/.ssh/config import
+  termius/  local Termius profile import (IndexedDB + keyring)
   probe/    advisory TCP reachability checks
   data/     demo-mode fixtures
   ui/       model · update · view (Elm architecture)

@@ -411,7 +411,7 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		}
 	case "m":
 		if m.tab == 0 && !m.demo {
-			return m.setToast("importing ~/.ssh/config…", "ok"), m.importCmd()
+			return m.openImportSource()
 		}
 	case "p":
 		// Move the selected host between the personal vault and a project.

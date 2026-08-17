@@ -7,6 +7,7 @@ import (
 
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
+	"github.com/Janne6565/wharf-tui/internal/termius"
 	"github.com/Janne6565/wharf-tui/internal/theme"
 )
 
@@ -19,6 +20,8 @@ func (m Model) modalView(t theme.Theme) []string {
 		return m.deleteConfirmView(t)
 	case modalKeygen:
 		return m.keygenView(t)
+	case modalImportSource:
+		return m.importSourceView(t)
 	case modalImportSummary:
 		return m.importSummaryView(t)
 	case modalQuitConfirm:
@@ -387,12 +390,43 @@ func (m Model) secretView(t theme.Theme) []string {
 
 // --- import summary ---------------------------------------------------------
 
-func (m Model) importSummaryView(t theme.Theme) []string {
+// importSourceView is the "import from where?" chooser.
+func (m Model) importSourceView(t theme.Theme) []string {
+	opt := func(key, label, detail string) string {
+		return stl(t.Hi, t.Panel).Render(key) + stl(t.Fg, t.Panel).Render("  "+label) +
+			stl(t.Dim, t.Panel).Render("  "+detail)
+	}
 	body := []string{
-		stl(t.Fg, t.Panel).Render(itoa(len(m.importHosts)) + " host(s) found in ~/.ssh/config"),
+		opt("s", "ssh config", "~/.ssh/config, including Include"),
+		opt("t", "Termius", "local profile, read-only"),
+		"",
+		stl(t.Dim, t.Panel).Render("Termius needs no export and no Pro plan, but its"),
+		stl(t.Dim, t.Panel).Render("credential store will ask for authorization."),
+		"",
+		stl(t.Hi, t.Panel).Render("esc") + stl(t.Dim, t.Panel).Render(" cancel"),
+	}
+	return m.modalBox(t, "import hosts", "hi", body)
+}
+
+func (m Model) importSummaryView(t theme.Theme) []string {
+	from := "~/.ssh/config"
+	if m.importSource == termius.Source {
+		from = "the Termius profile"
+	}
+	body := []string{
+		stl(t.Fg, t.Panel).Render(itoa(len(m.importHosts)) + " host(s) found in " + from),
+	}
+	if m.importNote != "" {
+		// Passwords ride along from Termius and land in the encrypted vault;
+		// say so rather than importing credentials silently.
+		body = append(body, stl(t.Dim, t.Panel).Render(m.importNote))
 	}
 	if len(m.importSkipped) > 0 {
-		body = append(body, stl(t.Dim, t.Panel).Render(itoa(len(m.importSkipped))+" wildcard pattern(s) skipped"))
+		what := "wildcard pattern(s) skipped"
+		if m.importSource == termius.Source {
+			what = "host(s) skipped"
+		}
+		body = append(body, stl(t.Dim, t.Panel).Render(itoa(len(m.importSkipped))+" "+what))
 	}
 	body = append(body,
 		"",
@@ -401,7 +435,11 @@ func (m Model) importSummaryView(t theme.Theme) []string {
 		stl(t.Hi, t.Panel).Render("y")+stl(t.Dim, t.Panel).Render("/")+stl(t.Hi, t.Panel).Render("enter")+
 			stl(t.Dim, t.Panel).Render(" apply · ")+stl(t.Hi, t.Panel).Render("esc")+
 			stl(t.Dim, t.Panel).Render("/")+stl(t.Hi, t.Panel).Render("n")+stl(t.Dim, t.Panel).Render(" cancel"))
-	return m.modalBox(t, "import ssh config", "hi", body)
+	title := "import ssh config"
+	if m.importSource == termius.Source {
+		title = "import from termius"
+	}
+	return m.modalBox(t, title, "hi", body)
 }
 
 // --- keygen -----------------------------------------------------------------

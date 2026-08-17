@@ -9,6 +9,7 @@ import (
 	"github.com/Janne6565/wharf-tui/internal/sshcfg"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
+	"github.com/Janne6565/wharf-tui/internal/termius"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -161,14 +162,41 @@ func (m Model) syncKeyCmd(info keys.KeyInfo) tea.Cmd {
 type importDoneMsg struct {
 	hosts   []store.Host
 	skipped []string
-	err     error
+	// source is which importer ran; the summary and the upsert path branch on
+	// it, because only a Termius profile carries per-host passwords.
+	source string
+	// note is a source-specific summary line.
+	note string
+	err  error
 }
 
 func (m Model) importCmd() tea.Cmd {
 	path := m.sshDir() + "/config"
 	return func() tea.Msg {
 		hs, skipped, err := sshcfg.Import(path)
-		return importDoneMsg{hosts: hs, skipped: skipped, err: err}
+		return importDoneMsg{hosts: hs, skipped: skipped, source: "ssh_config", err: err}
+	}
+}
+
+// termiusImportCmd reads the local Termius profile. It can block for a while:
+// the OS credential store may put up an authorization dialog, and the profile
+// is several megabytes of LevelDB, so this stays off the update loop.
+func (m Model) termiusImportCmd() tea.Cmd {
+	return func() tea.Msg {
+		res, err := termius.Import(termius.Options{})
+		if err != nil {
+			return importDoneMsg{source: termius.Source, err: err}
+		}
+		note := ""
+		if res.WithPassword > 0 {
+			note = itoa(res.WithPassword) + " with a saved password"
+		}
+		return importDoneMsg{
+			hosts:   res.Hosts,
+			skipped: res.Skipped,
+			source:  termius.Source,
+			note:    note,
+		}
 	}
 }
 
