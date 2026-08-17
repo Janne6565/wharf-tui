@@ -53,6 +53,17 @@ func main() {
 		return
 	}
 
+	// Remote-access client mode is checked before flag parsing too, but for the
+	// opposite reason to --session-host: it is very much user-facing, and it has
+	// to be, because stdlib flag consumes the "--" separator and would then hand
+	// the command's own words back as positionals, where the "at most one host
+	// argument" check below would reject them. It takes over the process — no
+	// TUI, no vault, no disk I/O — and returns an exit code rather than exiting
+	// itself, so all of it stays testable.
+	if len(os.Args) > 1 && isRemoteFlag(os.Args[1]) {
+		os.Exit(runRemote(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	}
+
 	demo := flag.Bool("demo", false, "run with sample data and a simulated session (no disk I/O, no real SSH)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	logout := flag.Bool("logout", false, "delete the local sync session (sign this device out) and exit")
@@ -94,8 +105,15 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "wharf:", err)
 	}
-	if _, err := detachkey.Parse(cfg.DetachKey); err != nil {
-		fmt.Fprintln(os.Stderr, "wharf: detach key:", err, "— using", detachkey.DefaultName)
+	if _, err := detachkey.Detach.Parse(cfg.DetachKey); err != nil {
+		fmt.Fprintln(os.Stderr, "wharf: detach key:", err, "— using", detachkey.Detach.DefaultName())
+	}
+	// The remote-access key gets the same treatment as the detach key, and for
+	// the same reason: a stored key this build no longer accepts is reported
+	// once and then ignored, because falling back to the default is better than
+	// refusing to start over a preference.
+	if _, err := detachkey.RemoteAccess.Parse(cfg.RemoteKey); err != nil {
+		fmt.Fprintln(os.Stderr, "wharf: remote-access key:", err, "— using", detachkey.RemoteAccess.DefaultName())
 	}
 	resolved, err := proxydial.Resolve(*proxyFlag, cfg.Proxy)
 	if err != nil {
@@ -108,7 +126,7 @@ func main() {
 	proxy := proxydial.NewSetting(resolved)
 
 	if *doctor {
-		printDoctor(vaultPath, cfgPath, resolved, cfg.DetachKey)
+		printDoctor(vaultPath, cfgPath, resolved, cfg.DetachKey, cfg.RemoteKey)
 		return
 	}
 
@@ -166,6 +184,10 @@ func main() {
 		// booting into sessions nobody can get out of.
 		DetachKey:      cfg.DetachKey,
 		ApplyDetachKey: applyDetachKeyFn(cfgPath),
+		// Same reasoning for the remote-access key: an unusable value is
+		// reported above and then falls back to ctrl+].
+		RemoteKey:      cfg.RemoteKey,
+		ApplyRemoteKey: applyRemoteKeyFn(cfgPath),
 	})
 	run(model, mgr, pool)
 }
@@ -205,14 +227,34 @@ func applyProxyFn(cfgPath, flagOverride string, proxy *proxydial.Setting) func(s
 // unlike the proxy, only the UI reads this, and only at attach time.
 func applyDetachKeyFn(cfgPath string) func(string) error {
 	return func(name string) error {
-		if _, err := detachkey.Parse(name); err != nil {
-			return err
-		}
 		cfg, err := localcfg.Load(cfgPath)
 		if err != nil {
 			cfg = localcfg.Config{} // unreadable: replace rather than refuse
 		}
+		// Validated against the *stored* remote-access key, not the UI's idea of
+		// it: this is the gate that guards the file, and a config a second wharf
+		// changed underneath must not be able to end up with both hotkeys on one
+		// byte — the attach loop only ever fires one of them.
+		if _, err := detachkey.Detach.ParseAgainst(name, cfg.RemoteKey); err != nil {
+			return err
+		}
 		cfg.DetachKey = name
+		return localcfg.Save(cfgPath, cfg)
+	}
+}
+
+// applyRemoteKeyFn is applyDetachKeyFn for the remote-access key, with the
+// collision check pointed the other way.
+func applyRemoteKeyFn(cfgPath string) func(string) error {
+	return func(name string) error {
+		cfg, err := localcfg.Load(cfgPath)
+		if err != nil {
+			cfg = localcfg.Config{}
+		}
+		if _, err := detachkey.RemoteAccess.ParseAgainst(name, cfg.DetachKey); err != nil {
+			return err
+		}
+		cfg.RemoteKey = name
 		return localcfg.Save(cfgPath, cfg)
 	}
 }
@@ -238,6 +280,7 @@ func usage() {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  wharf [flags] [host]")
+	fmt.Fprintln(out, "  wharf --remote <token> [--timeout <dur>] [--sh] -- <command…>")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "With no arguments wharf opens the TUI. A host argument names a saved host to")
 	fmt.Fprintln(out, "connect to right after the vault is unlocked (exact name, else a unique name")
@@ -246,12 +289,24 @@ func usage() {
 	fmt.Fprintln(out, "Flags:")
 	// --reset is destructive; PrintDefaults lists it, and it prompts before acting.
 	flag.PrintDefaults()
+	// --remote is listed by hand because it is not a flag.CommandLine flag: it is
+	// parsed before flag.Parse, since the "--" separator that makes the command's
+	// own flags unambiguous is something stdlib flag would swallow. Listing it
+	// anyway is the point of the difference from --session-host — that one is an
+	// internal re-exec nobody should type, this one is a command line wharf
+	// prints for the user to hand to an agent, so leaving it out of --help would
+	// make the feature undiscoverable from the terminal.
+	fmt.Fprintln(out, "  --remote <token>")
+	fmt.Fprintln(out, "    \trun one command on a host through a remote-access grant and exit;")
+	fmt.Fprintln(out, "    \tsee `wharf --remote --help`")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Environment:")
 	fmt.Fprintln(out, "  WHARF_VAULT      vault file path (default: per-user data dir)")
 	fmt.Fprintln(out, "  WHARF_CONFIG     machine-local config file (default: per-user config dir)")
 	fmt.Fprintln(out, "  WHARF_API_BASE   sync backend base URL (default: production)")
 	fmt.Fprintln(out, "  WHARF_PROXY      egress proxy for outbound SSH; overrides the saved setting")
+	fmt.Fprintln(out, "  WHARF_REMOTE_TOKEN")
+	fmt.Fprintln(out, "                   grant token for --remote, when it is not in argv")
 	fmt.Fprintln(out, "  ALL_PROXY        egress proxy, if neither of the above is set")
 	fmt.Fprintln(out, "  HTTPS_PROXY      same, checked after ALL_PROXY")
 	fmt.Fprintln(out, "  NO_PROXY         comma-separated hosts, domains and CIDRs to reach directly")
@@ -487,7 +542,7 @@ func plural(n int, noun string) string {
 
 // printDoctor dumps the resolved environment: what to paste into a bug report.
 // It reads no secrets and never unlocks the vault.
-func printDoctor(vaultPath, cfgPath string, proxy *proxydial.Dialer, detach string) {
+func printDoctor(vaultPath, cfgPath string, proxy *proxydial.Dialer, detach, remote string) {
 	base := api.BaseURL()
 	knownHosts := knownHostsPath()
 	sessionPath := syncx.SessionPath(vaultPath)
@@ -497,11 +552,27 @@ func printDoctor(vaultPath, cfgPath string, proxy *proxydial.Dialer, detach stri
 	fmt.Println("config      ", cfgPath, presence(fileExists(cfgPath)))
 	fmt.Println("session     ", sessionPath, presence(fileExists(sessionPath)))
 	fmt.Println("known_hosts ", knownHosts, presence(fileExists(knownHosts)))
+	// The grants directory earns a line because "no live grant accepted this
+	// token" is the failure a --remote user will actually hit, and it has two
+	// very different causes — no grant is open, or the client is looking
+	// somewhere else (a different $WHARF_RUNTIME_DIR, a different user). Only
+	// this line tells them apart. Reporting the error rather than a path also
+	// surfaces a runtime directory whose ownership or mode wharf refuses, which
+	// would otherwise present as the same opaque message.
+	if dir, err := grantsDir(); err != nil {
+		fmt.Println("grants      ", "unavailable:", err)
+	} else {
+		fmt.Println("grants      ", dir, presence(fileExists(dir)))
+	}
 	fmt.Println("api base    ", base, envNote("WHARF_API_BASE"))
 	fmt.Println("device url  ", api.DeviceURL(base))
 	// The resolved name, not the stored one: an unusable value falls back, and
 	// a bug report should say which key actually detaches.
-	fmt.Println("detach key  ", detachkey.Name(detachkey.Byte(detach)))
+	fmt.Println("detach key  ", detachkey.Detach.Name(detachkey.Detach.Byte(detach)))
+	// The in-session hotkey earns its own line for the same reason: "the key
+	// does nothing" is a report this feature will get, and the first thing to
+	// establish is which key is actually bound after the fallbacks have run.
+	fmt.Println("remote key  ", detachkey.RemoteAccess.Name(detachkey.RemoteAccess.Byte(remote)))
 	// String redacts any password; this output is meant to be pasted into bug
 	// reports.
 	fmt.Println("proxy       ", proxy.String(), "(from "+proxy.Source().String()+")")
