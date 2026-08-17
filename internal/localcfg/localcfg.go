@@ -35,6 +35,15 @@ type Config struct {
 	// the machine that shares the account. See internal/detachkey for the
 	// bindable set.
 	DetachKey string `json:"detachKey,omitempty"`
+
+	// RemoteKey is the key that toggles remote access from inside an attached
+	// session, by the name bubbletea reports for it; empty means the default,
+	// ctrl+]. It sits here for the same reason as DetachKey — which control
+	// keys survive the trip through the terminal emulator is a property of this
+	// machine, not of the account — and it is a key *name*, a preference, not a
+	// secret. The grant token it toggles is minted per press and never written
+	// anywhere near this file, which is plaintext and permanent.
+	RemoteKey string `json:"remoteKey,omitempty"`
 }
 
 // DefaultPath resolves the config file, honouring $WHARF_CONFIG. It sits beside

@@ -42,27 +42,60 @@ func TestSaveRoundTrip(t *testing.T) {
 	}
 }
 
-// The detach key shares the file with the proxy and must survive a write that
-// only touches the other field — both are edited from their own settings row.
+// The hotkeys share the file with the proxy and must survive a write that only
+// touches another field — each is edited from its own settings row.
 func TestSaveRoundTripsEveryField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := Save(path, Config{Proxy: "off", DetachKey: "ctrl+]"}); err != nil {
+	if err := Save(path, Config{Proxy: "off", DetachKey: `ctrl+\`, RemoteKey: "ctrl+]"}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	c, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.Proxy != "off" || c.DetachKey != "ctrl+]" {
-		t.Fatalf("round trip gave %+v, want both fields preserved", c)
+	if c.Proxy != "off" || c.DetachKey != `ctrl+\` || c.RemoteKey != "ctrl+]" {
+		t.Fatalf("round trip gave %+v, want every field preserved", c)
 	}
 
 	c.Proxy = ""
 	if err := Save(path, c); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	if c, err = Load(path); err != nil || c.DetachKey != "ctrl+]" {
-		t.Fatalf("DetachKey = %q after a proxy-only edit (err %v), want it kept", c.DetachKey, err)
+	if c, err = Load(path); err != nil || c.DetachKey != `ctrl+\` || c.RemoteKey != "ctrl+]" {
+		t.Fatalf("hotkeys = %q/%q after a proxy-only edit (err %v), want them kept", c.DetachKey, c.RemoteKey, err)
+	}
+}
+
+// A config written before the remote-access key existed — or by anyone who
+// never touched the setting — must load as "unset" rather than as an error, so
+// the binding falls back to its default the way the detach key does.
+func TestLoadTolerationOfAnAbsentRemoteKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"proxy":"off","detachKey":"ctrl+u"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load of a config without remoteKey: %v", err)
+	}
+	if c.RemoteKey != "" {
+		t.Fatalf("RemoteKey = %q, want empty — empty is what the callers read as the default", c.RemoteKey)
+	}
+	if c.DetachKey != "ctrl+u" {
+		t.Fatalf("DetachKey = %q, want the stored value", c.DetachKey)
+	}
+
+	// And an unset key is omitted rather than written as "", so the file stays
+	// the short hand-editable thing it is meant to be.
+	if err := Save(path, Config{DetachKey: "ctrl+u"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "remoteKey") {
+		t.Fatalf("an unset remote key was written out:\n%s", raw)
 	}
 }
 
@@ -70,8 +103,9 @@ func TestSaveFileMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix file modes")
 	}
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := Save(path, Config{Proxy: "socks5://proxy.corp:1080"}); err != nil {
+	dir := filepath.Join(t.TempDir(), "wharf")
+	path := filepath.Join(dir, "config.json")
+	if err := Save(path, Config{Proxy: "socks5://proxy.corp:1080", RemoteKey: "ctrl+]"}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	fi, err := os.Stat(path)
@@ -80,6 +114,13 @@ func TestSaveFileMode(t *testing.T) {
 	}
 	if perm := fi.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("mode = %v, want 0600", perm)
+	}
+	di, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := di.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("directory mode = %v, want 0700", perm)
 	}
 }
 

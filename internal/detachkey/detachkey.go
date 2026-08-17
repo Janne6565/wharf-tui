@@ -1,11 +1,23 @@
-// Package detachkey maps the detach hotkey between the name the user sees
-// ("ctrl+\") and the single byte the attach loop watches for.
+// Package detachkey maps wharf's in-session hotkeys between the name the user
+// sees ("ctrl+\") and the single byte the attach loop watches for.
 //
 // While attached the terminal is in raw mode and every keystroke is a byte on
-// its way to the remote, so the detach key can only ever be a control byte —
-// there is no key event to inspect, and a multi-byte sequence would have to be
-// buffered out of the stream the remote is reading. That is what bounds the
-// choice to the set below.
+// its way to the remote, so an in-session hotkey can only ever be a control
+// byte — there is no key event to inspect, and a multi-byte sequence would have
+// to be buffered out of the stream the remote is reading. That is what bounds
+// the choice to the set below.
+//
+// There are two such hotkeys: the detach key, which leaves the session running,
+// and the remote-access key, which toggles an exec grant for an AI agent. They
+// are the same problem — same raw mode, same control-byte constraint, same keys
+// the remote shell cannot spare — so they share one set and one set of
+// explanations. A parallel package per binding was the obvious alternative and
+// was rejected: two copies of `allowed` would drift, and only one of them would
+// be the one someone remembered to update.
+//
+// What the two bindings do not share is a key: whichever byte the attach loop
+// swallows for one is a byte the other can never see, so binding both to the
+// same key would silently disable one. See Binding.ParseAgainst.
 package detachkey
 
 import (
@@ -14,8 +26,56 @@ import (
 	"strings"
 )
 
-// DefaultName is the detach key wharf ships with, and the value used whenever
+// Binding is one of the two in-session hotkeys. Only the Detach and
+// RemoteAccess values below are meaningful — the type exists to give the two
+// bindings one implementation rather than to be constructed by callers.
+type Binding struct {
+	// which selects the counterpart in other(). It is an index rather than a
+	// pointer so Binding stays a comparable value type that callers can pass
+	// around and store on a struct.
+	which       int
+	label       string
+	defaultName string
+	defaultByte byte
+}
+
+var (
+	// Detach is the key that leaves an attached session running.
+	Detach = Binding{which: 0, label: "detach key", defaultName: `ctrl+\`, defaultByte: 0x1C}
+
+	// RemoteAccess is the key that toggles the remote-access grant while
+	// attached. ctrl+] is the default because the remote shell has no use for
+	// it — readline, vim and the job-control keys all leave it alone — and
+	// because telnet spent decades training it as "talk to the client, not the
+	// server", which is exactly what this key does. ctrl+g and ctrl+t were the
+	// alternatives considered: both are free in the same sense, but neither
+	// carries that meaning, and ctrl+t is taken by SIGINFO on the BSDs.
+	RemoteAccess = Binding{which: 1, label: "remote-access key", defaultName: "ctrl+]", defaultByte: 0x1D}
+)
+
+// other returns the binding this one must not collide with. With exactly two
+// bindings this is a flip; if a third is ever added, this is the function that
+// has to become a real set difference.
+func (b Binding) other() Binding {
+	if b.which == RemoteAccess.which {
+		return Detach
+	}
+	return RemoteAccess
+}
+
+// Label names the binding as the user knows it, for error and toast text.
+func (b Binding) Label() string { return b.label }
+
+// DefaultName is the key this binding ships with, and the value used whenever
 // the stored preference is empty or unreadable.
+func (b Binding) DefaultName() string { return b.defaultName }
+
+// DefaultByte is DefaultName as the byte the attach loop sees.
+func (b Binding) DefaultByte() byte { return b.defaultByte }
+
+// DefaultName is the detach key wharf ships with, and the value used whenever
+// the stored preference is empty or unreadable. It is Detach.DefaultName(),
+// kept as a constant because the attach paths reach for it by name.
 const DefaultName = `ctrl+\`
 
 // DefaultByte is DefaultName as the byte the attach loop sees (0x1C).
@@ -57,7 +117,8 @@ var allowed = map[string]byte{
 
 // reserved explains, per key, why it cannot be bound. The message is shown in
 // the capture modal, so it says what the key is needed for rather than just
-// refusing.
+// refusing. It is shared by both bindings: a key the remote shell needs is
+// needed whichever hotkey wanted it.
 var reserved = map[string]string{
 	"ctrl+c":    "interrupt — the remote shell needs it",
 	"ctrl+d":    "end of input — the remote shell needs it",
@@ -76,39 +137,93 @@ var reserved = map[string]string{
 	"ctrl+@":    "NUL",
 }
 
-// Parse resolves a key name to its byte. The name is what bubbletea calls the
-// key, which is also what Save writes to the config file, so a hand-edited
-// config and a captured keypress go through the same door.
-func Parse(name string) (byte, error) {
+// Parse resolves a key name to its byte for this binding. The name is what
+// bubbletea calls the key, which is also what the config file stores, so a
+// hand-edited config and a captured keypress go through the same door.
+//
+// It does not know about the other binding — see ParseAgainst for that. The
+// split is deliberate: the attach paths resolve a stored name with no second
+// name to hand, and a collision is a reason to refuse a *new* binding, not a
+// reason to leave a live session with no way out.
+func (b Binding) Parse(name string) (byte, error) {
 	n := strings.ToLower(strings.TrimSpace(name))
 	if n == "" {
-		return DefaultByte, nil
+		return b.defaultByte, nil
 	}
-	if b, ok := allowed[n]; ok {
-		return b, nil
+	if v, ok := allowed[n]; ok {
+		return v, nil
 	}
 	if why, ok := reserved[n]; ok {
 		return 0, fmt.Errorf("%s is %s", n, why)
 	}
 	if !strings.HasPrefix(n, "ctrl+") {
-		return 0, fmt.Errorf("%s is not a control key — the detach key has to be a ctrl combination", n)
+		return 0, fmt.Errorf("%s is not a control key — the %s has to be a ctrl combination", n, b.label)
 	}
-	return 0, fmt.Errorf("%s cannot be used as the detach key", n)
+	return 0, fmt.Errorf("%s cannot be used as the %s", n, b.label)
 }
 
-// Name returns the display name for a detach byte, falling back to the default
-// for anything not bindable — including the zero byte, which is how callers
-// spell "unset".
-func Name(b byte) string {
-	for name, v := range allowed {
-		if v == b {
+// ParseAgainst resolves name for this binding and additionally refuses it when
+// it is the key the *other* binding already holds. otherName is that binding's
+// stored preference; empty means it is on its default, which still counts —
+// the default is a real binding, not an absence.
+//
+// The error names the conflict ("ctrl+] is already the detach key") rather than
+// just refusing, matching the register of the reserved messages: a capture
+// modal shows it verbatim, and "not allowed" would leave the user guessing
+// which of their own settings was in the way.
+//
+// The comparison is on bytes, not names, so a shouted or padded config value
+// ("CTRL+] ") is caught just the same.
+func (b Binding) ParseAgainst(name, otherName string) (byte, error) {
+	v, err := b.Parse(name)
+	if err != nil {
+		return 0, err
+	}
+	o := b.other()
+	if v == o.Byte(otherName) {
+		return 0, fmt.Errorf("%s is already the %s", o.Name(v), o.label)
+	}
+	return v, nil
+}
+
+// Name returns the display name for a byte, falling back to this binding's
+// default for anything not bindable — including the zero byte, which is how
+// callers spell "unset".
+func (b Binding) Name(v byte) string {
+	for name, have := range allowed {
+		if have == v {
 			return name
 		}
 	}
-	return DefaultName
+	return b.defaultName
 }
 
-// Names lists the bindable keys in byte order, for help text and tests.
+// Byte resolves a stored name to its byte, falling back to this binding's
+// default rather than failing: a config that no longer parses must not leave
+// someone attached with no way out.
+func (b Binding) Byte(name string) byte {
+	v, err := b.Parse(name)
+	if err != nil {
+		return b.defaultByte
+	}
+	return v
+}
+
+// Parse resolves a key name to its detach byte. It is Detach.Parse, kept at
+// package level because the detach key is the older and more common caller.
+func Parse(name string) (byte, error) { return Detach.Parse(name) }
+
+// Name returns the display name for a detach byte, falling back to the detach
+// default. It is Detach.Name.
+func Name(b byte) string { return Detach.Name(b) }
+
+// Byte resolves a stored name to its detach byte, falling back to the detach
+// default. It is Detach.Byte.
+func Byte(name string) byte { return Detach.Byte(name) }
+
+// Names lists the bindable keys in byte order, for help text and tests. Both
+// bindings draw from this one set; which of them a given key is free for is
+// ParseAgainst's question, not this one's.
 func Names() []string {
 	out := make([]string, 0, len(allowed))
 	for name := range allowed {
@@ -116,15 +231,4 @@ func Names() []string {
 	}
 	sort.Slice(out, func(i, j int) bool { return allowed[out[i]] < allowed[out[j]] })
 	return out
-}
-
-// Byte resolves a stored name to its byte, falling back to the default rather
-// than failing: a config that no longer parses must not leave someone attached
-// with no way out.
-func Byte(name string) byte {
-	b, err := Parse(name)
-	if err != nil {
-		return DefaultByte
-	}
-	return b
 }
