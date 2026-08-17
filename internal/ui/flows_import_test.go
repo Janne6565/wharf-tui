@@ -113,3 +113,26 @@ func applyImport(t *testing.T, tm tea.Model) tea.Cmd {
 	}
 	return cmd
 }
+
+// Keys imported from Termius must reach the vault, and a re-import must not
+// keep adding renamed copies of keys that are already there.
+func TestTermiusApplyImportsKeys(t *testing.T) {
+	tm, _ := openedModel(t)
+	msg := importDoneMsg{
+		hosts:  []store.Host{{Name: "h", User: "u", Addr: "a", Port: 22, Source: termius.Source}},
+		keys:   []store.VaultKey{{Name: "work", Type: "RSA", Material: "bWF0ZXJpYWw="}},
+		source: termius.Source,
+	}
+
+	tm, _ = step(tm, msg)
+	tm = drainCmd(t, tm, applyImport(t, tm))
+	if got := len(tm.(Model).st.Keys()); got != 1 {
+		t.Fatalf("after first import: %d keys, want 1", got)
+	}
+
+	tm, _ = step(tm, msg)
+	tm = drainCmd(t, tm, applyImport(t, tm))
+	if got := len(tm.(Model).st.Keys()); got != 1 {
+		t.Errorf("re-import added a duplicate: %d keys, want 1", got)
+	}
+}

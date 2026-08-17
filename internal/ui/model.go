@@ -475,6 +475,7 @@ type Model struct {
 	fwdPrefill  map[string]sshx.ForwardSpec // last submitted spec per host ID (ephemeral prefill)
 
 	importHosts   []store.Host
+	importKeys    []store.VaultKey
 	importSkipped []string
 	// importSource is which importer produced importHosts ("ssh_config" or
 	// termius.Source). It selects the summary wording and, because only a

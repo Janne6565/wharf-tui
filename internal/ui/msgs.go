@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"strings"
 
 	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
@@ -161,6 +162,7 @@ func (m Model) syncKeyCmd(info keys.KeyInfo) tea.Cmd {
 
 type importDoneMsg struct {
 	hosts   []store.Host
+	keys    []store.VaultKey
 	skipped []string
 	// source is which importer ran; the summary and the upsert path branch on
 	// it, because only a Termius profile carries per-host passwords.
@@ -187,15 +189,19 @@ func (m Model) termiusImportCmd() tea.Cmd {
 		if err != nil {
 			return importDoneMsg{source: termius.Source, err: err}
 		}
-		note := ""
+		var parts []string
 		if res.WithPassword > 0 {
-			note = itoa(res.WithPassword) + " with a saved password"
+			parts = append(parts, itoa(res.WithPassword)+" with a saved password")
+		}
+		if len(res.Keys) > 0 {
+			parts = append(parts, itoa(len(res.Keys))+" key(s)")
 		}
 		return importDoneMsg{
 			hosts:   res.Hosts,
+			keys:    res.Keys,
 			skipped: res.Skipped,
 			source:  termius.Source,
-			note:    note,
+			note:    strings.Join(parts, " · "),
 		}
 	}
 }

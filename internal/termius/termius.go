@@ -26,6 +26,10 @@ type Options struct {
 // the summary can tell the user what was skipped rather than quietly dropping it.
 type Result struct {
 	Hosts []store.Host
+	// Keys are the profile's private keys, converted where needed. Vault keys
+	// are a separate namespace from hosts and are offered to every key-mode
+	// connection, so they carry no host binding.
+	Keys []store.VaultKey
 	// KeySource describes where the decryption key came from, for the summary.
 	KeySource string
 	// Groups is the number of Termius groups folded into tags.
@@ -82,6 +86,10 @@ func Import(opts Options) (Result, error) {
 	tags := hostTags(dedupeLatest(tbl["tags"]), dedupeLatest(tbl["tag_hosts"]), dec)
 
 	res := Result{KeySource: key.Source, Groups: len(groups)}
+
+	importedKeys, keySkips := importKeys(tbl["keys"], dec)
+	res.Keys = importedKeys
+	res.Skipped = append(res.Skipped, keySkips...)
 	for _, h := range hosts {
 		converted, err := convertHost(h, configs, identities, groups, tags, dec)
 		if err != nil {
@@ -100,8 +108,8 @@ func Import(opts Options) (Result, error) {
 	if dec.decrypted == 0 {
 		return Result{}, ErrWrongKey
 	}
-	if len(res.Hosts) == 0 {
-		return Result{}, fmt.Errorf("no importable hosts: %s", strings.Join(res.Skipped, "; "))
+	if len(res.Hosts) == 0 && len(res.Keys) == 0 {
+		return Result{}, fmt.Errorf("nothing importable: %s", strings.Join(res.Skipped, "; "))
 	}
 
 	sort.Slice(res.Hosts, func(i, j int) bool {

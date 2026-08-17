@@ -450,7 +450,7 @@ it, and holds nothing else. `WHARF_RUNTIME_DIR` overrides the location.
 | `a` / `e` / `d` | add / edit / delete host |
 | `p` | move the selected host into a project (or back to personal) |
 | `f` | show this project's hosts on the hosts tab *(projects tab)* |
-| `m` | import hosts (`~/.ssh/config` or a local Termius profile) |
+| `m` | import hosts + keys (`~/.ssh/config` or a local Termius profile) |
 | `R` | re-probe reachability |
 | `g` | generate an ed25519 key *(keys tab)* |
 | `s` | sync now *(settings tab, signed in)* |
@@ -477,7 +477,7 @@ internal/
   sessd/    session-host child processes + their unix-socket protocol
   keys/     ~/.ssh scan + ed25519 generation
   sshcfg/   ~/.ssh/config import
-  termius/  local Termius profile import (IndexedDB + keyring)
+  termius/  local Termius profile import (IndexedDB + keyring, PuTTY .ppk conversion)
   probe/    advisory TCP reachability checks
   data/     demo-mode fixtures
   ui/       model · update · view (Elm architecture)

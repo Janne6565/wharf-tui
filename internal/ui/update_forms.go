@@ -604,6 +604,7 @@ func (m Model) handleImportDone(msg importDoneMsg) (tea.Model, tea.Cmd) {
 		return m.setToast("import failed: "+msg.err.Error(), "err"), nil
 	}
 	m.importHosts = msg.hosts
+	m.importKeys = msg.keys
 	m.importSkipped = msg.skipped
 	m.importSource = msg.source
 	m.importNote = msg.note
@@ -617,6 +618,32 @@ func (m Model) handleImportDone(msg importDoneMsg) (tea.Model, tea.Cmd) {
 func (m Model) openImportSource() (tea.Model, tea.Cmd) {
 	m.modal = modalImportSource
 	return m, nil
+}
+
+// applyImportedKeys adds the pending imported keys to the vault and returns how
+// many were stored.
+//
+// A key whose name already exists is skipped rather than renamed again: the
+// vault's own key is the user's, and a re-import should be idempotent instead
+// of growing "name (2)", "name (3)" on every run.
+func (m *Model) applyImportedKeys() int {
+	added := 0
+	existing := map[string]bool{}
+	for _, k := range m.st.Keys() {
+		existing[strings.ToLower(k.Name)] = true
+	}
+	for _, k := range m.importKeys {
+		if existing[strings.ToLower(k.Name)] {
+			continue
+		}
+		if _, err := m.st.AddKey(k); err != nil {
+			continue
+		}
+		existing[strings.ToLower(k.Name)] = true
+		added++
+	}
+	m.importKeys = nil
+	return added
 }
 
 // importSourceKey handles the "import from where?" chooser.
@@ -646,9 +673,13 @@ func (m Model) importSummaryKey(key string) (tea.Model, tea.Cmd) {
 		} else {
 			added, updated, skipped = m.st.UpsertImported(m.importHosts)
 		}
+		keysAdded := m.applyImportedKeys()
 		m.modal = modalNone
 		m, syncCmd := m.saveVault()
 		summary := itoa(added) + " added · " + itoa(updated) + " updated · " + itoa(skipped) + " skipped"
+		if keysAdded > 0 {
+			summary += " · " + itoa(keysAdded) + " key(s)"
+		}
 		return m.setToast(summary, "ok"), tea.Batch(m.probeCmds(), syncCmd)
 	case "n", "N", "esc":
 		m.modal = modalNone

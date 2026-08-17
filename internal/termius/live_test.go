@@ -1,8 +1,11 @@
 package termius
 
 import (
+	"encoding/base64"
 	"os"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // TestLiveImport runs against a real Termius profile and is skipped unless
@@ -25,8 +28,8 @@ func TestLiveImport(t *testing.T) {
 	}
 
 	t.Logf("key source: %s", res.KeySource)
-	t.Logf("hosts=%d groups=%d withPassword=%d skipped=%d",
-		len(res.Hosts), res.Groups, res.WithPassword, len(res.Skipped))
+	t.Logf("hosts=%d keys=%d groups=%d withPassword=%d skipped=%d",
+		len(res.Hosts), len(res.Keys), res.Groups, res.WithPassword, len(res.Skipped))
 	for _, s := range res.Skipped {
 		t.Logf("  skipped: %s", s)
 	}
@@ -41,6 +44,8 @@ func TestLiveImport(t *testing.T) {
 			h.AuthMethod, h.Password != "", maskAll(h.Tags))
 	}
 
+	checkKeysUsable(t, res)
+
 	for _, h := range res.Hosts {
 		if h.Addr == "" || h.User == "" || h.Port == 0 {
 			t.Errorf("host %q incomplete: user=%q addr=%q port=%d",
@@ -51,6 +56,22 @@ func TestLiveImport(t *testing.T) {
 		}
 		if h.AuthMethod != "key" && h.AuthMethod != "password" {
 			t.Errorf("host %q has auth method %q", maskValue(h.Name), h.AuthMethod)
+		}
+	}
+}
+
+// Every imported key must be loadable by the engine: a .ppk that was converted
+// wrongly would otherwise sit in the list and fail at connect time.
+func checkKeysUsable(t *testing.T, res Result) {
+	t.Helper()
+	for _, k := range res.Keys {
+		material, err := base64.StdEncoding.DecodeString(k.Material)
+		if err != nil {
+			t.Errorf("key %q: material is not base64", maskValue(k.Name))
+			continue
+		}
+		if _, err := ssh.ParsePrivateKey(material); err != nil {
+			t.Errorf("key %q (%s) is not loadable: %v", maskValue(k.Name), k.Type, err)
 		}
 	}
 }
