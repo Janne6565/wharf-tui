@@ -7,11 +7,13 @@ import (
 
 	"github.com/Janne6565/wharf-tui/internal/api"
 	"github.com/Janne6565/wharf-tui/internal/browser"
+	"github.com/Janne6565/wharf-tui/internal/clipboard"
 	"github.com/Janne6565/wharf-tui/internal/data"
 	"github.com/Janne6565/wharf-tui/internal/detachkey"
 	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
 	"github.com/Janne6565/wharf-tui/internal/proxydial"
+	"github.com/Janne6565/wharf-tui/internal/remoteaccess"
 	"github.com/Janne6565/wharf-tui/internal/sessd"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
@@ -92,6 +94,17 @@ type Config struct {
 	// it disabled. Tests inject a recorder so no real browser is launched.
 	OpenBrowser func(string) error
 
+	// CopyToClipboard puts the remote-access command line on the terminal's
+	// clipboard. Nil defaults to clipboard.Copy, except in demo mode, where the
+	// feature is inert and a real escape sequence would be written for nothing.
+	// Tests inject a recorder so a headless run never emits OSC 52.
+	//
+	// A nil error from it means the bytes reached the terminal, not that the
+	// terminal honoured them — there is no reply to an OSC 52 set request. The
+	// UI therefore keeps showing the command as selectable text and only claims
+	// a copy on a nil error, never as the default assumption.
+	CopyToClipboard func(string) error
+
 	// Proxy is the machine-local egress proxy setting as stored on disk — what
 	// the settings screen edits. It is not necessarily what is in effect:
 	// --proxy and $WHARF_PROXY outrank it.
@@ -111,6 +124,13 @@ type Config struct {
 	// ApplyDetachKey validates and persists an edited detach key. Nil disables
 	// editing (demo mode, tests) but not the key itself.
 	ApplyDetachKey func(name string) error
+
+	// RemoteKey is the machine-local remote-access hotkey as stored on disk, by
+	// the name bubbletea reports for it. Empty means the default (ctrl+]).
+	RemoteKey string
+	// ApplyRemoteKey validates and persists an edited remote-access key. Nil
+	// disables editing (demo mode, tests) but not the key itself.
+	ApplyRemoteKey func(name string) error
 }
 
 // New builds the initial model. Demo mode opens on the simulated account
@@ -138,17 +158,32 @@ func New(cfg Config) Model {
 		projectDocs:       map[string]*store.ProjectDoc{},
 		deviceURL:         api.DeviceURL(api.BaseURL()),
 		openBrowser:       cfg.OpenBrowser,
+		copyToClipboard:   cfg.CopyToClipboard,
 		proxyStored:       cfg.Proxy,
 		proxy:             cfg.ProxySetting,
 		applyProxy:        cfg.ApplyProxy,
-		detachName:        detachkey.Name(detachkey.Byte(cfg.DetachKey)),
+		detachName:        detachkey.Detach.Name(detachkey.Detach.Byte(cfg.DetachKey)),
 		applyDetachKey:    cfg.ApplyDetachKey,
+		remoteName:        detachkey.RemoteAccess.Name(detachkey.RemoteAccess.Byte(cfg.RemoteKey)),
+		applyRemoteKey:    cfg.ApplyRemoteKey,
+		// The Holder is created unconditionally, including in demo mode. It owns
+		// no resources until a grant is minted, and a nil pointer would mean
+		// every read site had to guard — the exact shape of bug this feature
+		// cannot afford, since the guard that gets forgotten is the one that
+		// stops showing a live capability.
+		ra:     remoteaccess.NewHolder(),
+		raCopy: &raCopyStatus{},
 	}
 	// cfg.Demo, not m.demo: the demo/real branches below are what set m.demo,
 	// so reading it here would always see false and hand a demo run a real
 	// browser.
 	if m.openBrowser == nil && !cfg.Demo && browser.Available() {
 		m.openBrowser = browser.Open
+	}
+	// Same reasoning as openBrowser above, and the same reliance on cfg.Demo
+	// rather than m.demo: the demo branch has not run yet.
+	if m.copyToClipboard == nil && !cfg.Demo {
+		m.copyToClipboard = clipboard.Copy
 	}
 	if m.syncProjectCrypto == nil {
 		m.syncProjectCrypto = vaultProjectCrypto{}

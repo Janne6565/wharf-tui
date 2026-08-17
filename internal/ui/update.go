@@ -25,6 +25,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.toast != "" && m.tick-m.toastAt > toastTTL {
 			m.toast, m.toastRole = "", ""
 		}
+		// The grant's TTL is checked here rather than by a timer armed when it
+		// was minted, because the in-session hotkey mints one while the reducer
+		// is suspended and no timer could have been armed for it. See
+		// expireRemoteAccess.
+		if next, expired := m.expireRemoteAccess(); expired {
+			m = next
+		}
 		// Suspend the ticker while the TTY is handed to a session so ticks don't
 		// pile up during the takeover; detachedMsg restarts it.
 		if m.attaching {
@@ -135,6 +142,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSessionEnded(msg)
 	case sshx.ForwardEndedMsg:
 		return m.handleForwardEnded(msg)
+
+	// remote-access grant: the Holder changed, so render it again.
+	case raChangedMsg:
+		return m.handleRemoteAccessChanged()
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -312,6 +323,13 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		if !m.demo && m.mgr != nil {
 			return m.openForwards(), nil
 		}
+	case "A":
+		// Remote-access overlay, mirroring F: reachable from any tab in real mode
+		// so the standing capability is always one key away from being read — and
+		// revoked. Inert in demo.
+		if !m.demo {
+			return m.openRemoteAccess(), nil
+		}
 	case "S":
 		// Live-sessions overlay, mirroring F for forwards. This is the reliable
 		// way to reattach: alt+1..9 needs a terminal that sends Option as Meta,
@@ -408,6 +426,13 @@ func (m Model) mainKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 	case "f":
 		if m.tab == 0 && !m.demo {
 			return m.startForwardForm()
+		}
+	case "r":
+		// Grant or revoke remote access on the selected host. Lower-case r is
+		// free here; the upper-case R above re-probes, and the projects tab's own
+		// key map (identity reset) is a different map entirely.
+		if m.tab == 0 && !m.demo {
+			return m.toggleRemoteAccess()
 		}
 	case "m":
 		if m.tab == 0 && !m.demo {
@@ -633,6 +658,11 @@ func (m Model) toggleSetting() (tea.Model, tea.Cmd) {
 			return m.setToast("changing the detach key needs a real vault", "err"), nil
 		}
 		return m.openDetachKeyForm(), nil
+	case "remotekey":
+		if m.applyRemoteKey == nil {
+			return m.setToast("changing the remote-access key needs a real vault", "err"), nil
+		}
+		return m.openRemoteKeyForm(), nil
 	case "agent":
 		m.settings.Agent = !m.settings.Agent
 		m.applySSHSettings()

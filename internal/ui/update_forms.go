@@ -128,6 +128,10 @@ func (m Model) modalKey(k tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 		return m.proxyKey(key)
 	case modalDetachKey:
 		return m.detachKeyCapture(key)
+	case modalRemoteKey:
+		return m.remoteKeyCapture(key)
+	case modalRemoteAccess:
+		return m.remoteAccessKey(key)
 	}
 	return m, nil
 }
@@ -695,7 +699,7 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 	if m.demo {
 		return m, tea.Quit
 	}
-	if m.liveSessions() > 0 || m.liveForwards() > 0 {
+	if m.liveSessions() > 0 || m.liveForwards() > 0 || m.raGrant() != nil {
 		m.modal = modalQuitConfirm
 		return m, nil
 	}
@@ -703,6 +707,10 @@ func (m Model) requestQuit() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) doQuit() (tea.Model, tea.Cmd) {
+	// A grant is process-bound like a forward, but it is revoked explicitly
+	// rather than left to the process exit: Close is synchronous, so quitting
+	// cannot race a command that is starting as wharf goes away.
+	m = m.revokeRemoteAccess()
 	// Sessions are deliberately left running in their child processes; only the
 	// control connections go away. Forwards are process-bound and do close.
 	if m.pool != nil {

@@ -10,6 +10,7 @@ import (
 	"github.com/Janne6565/wharf-tui/internal/keys"
 	"github.com/Janne6565/wharf-tui/internal/probe"
 	"github.com/Janne6565/wharf-tui/internal/proxydial"
+	"github.com/Janne6565/wharf-tui/internal/remoteaccess"
 	"github.com/Janne6565/wharf-tui/internal/sessd"
 	"github.com/Janne6565/wharf-tui/internal/sshx"
 	"github.com/Janne6565/wharf-tui/internal/store"
@@ -82,6 +83,8 @@ const (
 	modalProxy           // edit the machine-local egress proxy (settings tab)
 	modalDetachKey       // capture a new detach key (settings tab)
 	modalImportSource    // choose what to import hosts from (ssh_config / Termius)
+	modalRemoteKey       // capture a new remote-access key (settings tab)
+	modalRemoteAccess    // remote-access grant: command line, expiry, live audit log (A)
 )
 
 // syncState is the rendered sync status (header indicator). It is pure
@@ -167,6 +170,7 @@ func (m Model) settingRows() []settingDef {
 		{key: "keepalive", label: "Keep-alive packets (30s)", act: true},
 		{key: "proxy", label: "Egress proxy", act: true},
 		{key: "detachkey", label: "Detach key", act: true},
+		{key: "remotekey", label: "Remote-access key", act: true},
 	}
 	if m.signedIn {
 		rows = append(rows,
@@ -268,6 +272,13 @@ type Model struct {
 	openBrowser   func(string) error
 	browserOpened bool // the pairing page was handed to a browser
 
+	// copyToClipboard puts a string on the terminal's clipboard (OSC 52). It is
+	// injectable for the same reason openBrowser is: a headless test must never
+	// emit an escape sequence into the test runner's terminal. Nil means "no
+	// clipboard at all", which is a supported state — the remote-access overlay
+	// always shows the command as selectable text regardless.
+	copyToClipboard func(string) error
+
 	// --- egress proxy (machine-local, never synced) ---
 	// proxyStored is the value the settings row edits, as saved on this
 	// machine. What is actually in effect lives in the shared proxydial.Setting
@@ -289,6 +300,17 @@ type Model struct {
 	detachName     string
 	applyDetachKey func(name string) error
 	dkErr          string // rejected-key message in the capture modal
+
+	// --- remote-access key (machine-local, never synced) ---
+	// remoteName is the key that toggles the remote-access grant from inside an
+	// attached session, by the name bubbletea reports for it. It is the twin of
+	// detachName in every respect — resolved to a byte per attach, persisted by
+	// applyRemoteKey, nil disables editing — and the two are kept apart because
+	// whichever byte the attach loop swallows for one is a byte the other can
+	// never see. Each capture modal validates against the other's binding.
+	remoteName     string
+	applyRemoteKey func(name string) error
+	rkErr          string // rejected-key message in that capture modal
 
 	// sync hooks (injectable for tests; defaults wired in initSync).
 	syncAPI           syncx.API
@@ -474,6 +496,43 @@ type Model struct {
 	fwdIdx      int                         // cursor in the active-forwards overlay
 	fwdPrefill  map[string]sshx.ForwardSpec // last submitted spec per host ID (ephemeral prefill)
 
+	// --- remote access ---
+	// A grant hands one local process — in practice an AI coding agent — an
+	// exec-only capability on exactly one host, riding a connection wharf
+	// already holds. None of this is ever persisted: not the token, not the
+	// audit log, not the fact that a grant existed. There is no field here that
+	// reaches the vault, the store or localcfg, and that is deliberate — a
+	// grant dies with wharf, so a restart is itself a revocation, and a token
+	// that only ever lived in this process cannot be lifted off a disk.
+	//
+	// The grant and its audit log are *not* Model state. They live in a
+	// remoteaccess.Holder the Model only points at, because the in-session
+	// hotkey toggles the grant from the attach byte scanner — a goroutine
+	// running while Bubble Tea is suspended, which may not touch a Model that
+	// is copied on every update and written only by Update. The Model holds a
+	// stable pointer and reads through it, so a grant minted while attached is
+	// simply *there* the next time anything renders, with no message to deliver
+	// and nothing to synchronise. See internal/remoteaccess.Holder.
+	ra *remoteaccess.Holder
+	// raCopy is the one piece of grant-adjacent state the Holder does not own:
+	// whether the clipboard actually took the command line. It is behind a
+	// pointer and its own mutex for the same reason the Holder is — the attach
+	// callback records a copy result from its own goroutine — and it is keyed
+	// to the grant it describes, so a stale "copied" can never be shown against
+	// a grant that was never copied.
+	raCopy *raCopyStatus
+	// raSel is the overlay cursor, held as the Entry.ID of the selected row
+	// rather than as an index: the log grows at the front, so an index-keyed
+	// cursor slides onto a different command every time a new one starts. Zero
+	// means "the newest row", which is where the overlay opens.
+	raSel uint64
+	// raErr is an inline error about the last attempt (no live session,
+	// unix-only, open failed); raEnded says how a grant that is no longer there
+	// ended, for a reader who was in the overlay when it happened and never saw
+	// the toast the panel was covering.
+	raErr   string
+	raEnded string
+
 	importHosts   []store.Host
 	importKeys    []store.VaultKey
 	importSkipped []string
@@ -524,8 +583,18 @@ var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"
 
 func (m Model) spinner() string { return spinFrames[m.tick%len(spinFrames)] }
 
-// Init starts the animation ticker.
-func (m Model) Init() tea.Cmd { return tickCmd() }
+// Init starts the animation ticker, and the single consumer of the Holder's
+// re-render nudge.
+//
+// The nudge is armed exactly once, here, and re-armed only by its own message
+// handler, because Holder.Changed is a depth-1 channel with one consumer: a
+// second waiter would take turns with the first and each would see half the
+// nudges. Losing one costs nothing anyway — the nudge carries no data and the
+// UI re-reads the whole Holder when it renders — but two consumers would also
+// mean two re-arming chains growing without bound.
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(tickCmd(), waitRemoteAccessChangedCmd(m.ra))
+}
 
 // --- small helpers ----------------------------------------------------------
 

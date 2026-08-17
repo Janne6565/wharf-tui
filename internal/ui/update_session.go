@@ -61,10 +61,23 @@ func (m Model) vaultKeySpecs(authMethod string) []sshx.VaultKeySpec {
 
 // attach hands the terminal to a session via tea.Exec, suspending the tick loop
 // until the callback delivers detachedMsg.
+//
+// Both in-session hotkeys are resolved here, per attach, so a key rebound while
+// a session sat detached applies the next time it is picked up. The
+// remote-access callback is built from captured values rather than from m: it
+// runs on the attach loop's own goroutine while this Model is frozen, and the
+// one thing it may never do is read or write Model state. See
+// remoteAccessHotkey.
 func (m Model) attach(sessionID string, s *sessd.Remote) (tea.Model, tea.Cmd) {
 	m.attaching = true
 	m.modal = modalNone
-	return m, tea.Exec(s.Attach(m.detachByte()), func(error) tea.Msg { return detachedMsg{sessionID: sessionID} })
+	spec := s.Host()
+	return m, tea.Exec(s.AttachWith(sessd.AttachOptions{
+		Detach:       m.detachByte(),
+		RemoteAccess: m.remoteByte(),
+		OnRemoteAccess: remoteAccessHotkey(
+			m.ra, m.raCopy, m.copyToClipboard, spec.ID, spec.Name, s),
+	}), func(error) tea.Msg { return detachedMsg{sessionID: sessionID} })
 }
 
 // sessionHintKey dismisses the first-connect primer: enter/space hands the
@@ -376,6 +389,12 @@ func (m Model) handleSessionEnded(msg sshx.SessionEndedMsg) (tea.Model, tea.Cmd)
 	var rest string
 	if n := m.hostSessionCount(msg.HostID); n > 0 {
 		rest = " · " + plural(n, "session") + " still open"
+	}
+	// A grant rides the connection, so it cannot outlive it. Say so in the same
+	// toast: a capability being withdrawn is not something to discover later.
+	var revoked bool
+	if m, revoked = m.handleRemoteAccessSessionEnded(msg); revoked {
+		rest += " · remote access revoked"
 	}
 	if msg.Err != nil {
 		return m.setToast("session to "+name+" ended: "+msg.Err.Error()+rest, "err"), nil

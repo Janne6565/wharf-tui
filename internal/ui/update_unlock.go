@@ -348,6 +348,10 @@ func (m Model) hostByName(name string) (store.Host, error) {
 // data, and returns to the unlock screen. Best-effort: a save/close failure
 // still locks the UI.
 func (m Model) lock() (tea.Model, tea.Cmd) {
+	// Revoke first, and before anything can fail: locking is what a user does
+	// when they walk away, and a grant that outlived it would leave a process
+	// able to run commands on a real host while the vault it came from is shut.
+	m = m.revokeRemoteAccess()
 	if m.st != nil {
 		_ = m.st.Save()
 	}

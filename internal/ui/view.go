@@ -333,17 +333,23 @@ func (m Model) header(t theme.Theme, tabs string) []string {
 	badge := bold(t.Ink, t.Hi).Render(" wharf ")
 	left := badge + bgpad(1, t.Bg) + tabs
 	var right string
+	// The remote-access chip is measured against what is left of the bar rather
+	// than simply concatenated: barLine drops the whole right-hand group when it
+	// overflows, so a chip that did not fit would silently take the vault/sync
+	// indicator and the lock hint with it (see remoteAccessChip).
 	switch {
 	case m.signedIn && !m.demo:
-		right = stl(t.Dim, t.Bg).Render(m.email+" · ") + m.syncIndicator(t) + m.forwardChip(t) +
-			stl(t.Dim, t.Bg).Render(" · ") + stl(t.Hi, t.Bg).Render("q") + stl(t.Dim, t.Bg).Render(" lock")
+		head := stl(t.Dim, t.Bg).Render(m.email+" · ") + m.syncIndicator(t) + m.forwardChip(t)
+		tail := stl(t.Dim, t.Bg).Render(" · ") + stl(t.Hi, t.Bg).Render("q") + stl(t.Dim, t.Bg).Render(" lock")
+		right = head + m.remoteAccessChip(t, m.headerRoom(left, head, tail)) + tail
 	case m.signedIn:
 		right = stl(t.Dim, t.Bg).Render(m.email+" · ") + stl(t.Ok, t.Bg).Render("● synced")
 	case m.demo:
 		right = stl(t.Dim, t.Bg).Render("○ local vault · ") + stl(t.Hi, t.Bg).Render("q") + stl(t.Dim, t.Bg).Render(" sign in")
 	default:
-		right = stl(t.Ok, t.Bg).Render("● vault open") + m.forwardChip(t) +
-			stl(t.Dim, t.Bg).Render(" · ") + stl(t.Hi, t.Bg).Render("q") + stl(t.Dim, t.Bg).Render(" lock")
+		head := stl(t.Ok, t.Bg).Render("● vault open") + m.forwardChip(t)
+		tail := stl(t.Dim, t.Bg).Render(" · ") + stl(t.Hi, t.Bg).Render("q") + stl(t.Dim, t.Bg).Render(" lock")
+		right = head + m.remoteAccessChip(t, m.headerRoom(left, head, tail)) + tail
 	}
 	return []string{barLine(t, m.w, " "+left, right+" "), rule(t, m.w)}
 }
@@ -926,6 +932,8 @@ func (m Model) settingsTab(t theme.Theme, contentH int) []string {
 			val, vc = "change ›", t.Hi
 		case "detachkey":
 			val, vc = m.detachName, t.Hi
+		case "remotekey":
+			val, vc = m.remoteName, t.Hi
 		case "proxy":
 			val, vc = m.proxyLabel(), t.Hi
 			if !m.proxy.Dialer().Enabled() {
@@ -1075,6 +1083,13 @@ func (m Model) hintBar(t theme.Theme) []string {
 				hints = append(hints, hk{"p", "to project"})
 			}
 			hints = append(hints, hk{"m", "import"}, hk{"R", "probe"})
+			// r earns a permanent slot on the hosts tab: it is where the grant is
+			// minted, and it is the shortest route to taking one back.
+			if m.raGrant() != nil {
+				hints = append(hints, hk{"r", "revoke remote"})
+			} else {
+				hints = append(hints, hk{"r", "remote access"})
+			}
 		}
 	case 1:
 		if !m.signedIn {
@@ -1112,7 +1127,7 @@ func (m Model) hintBar(t theme.Theme) []string {
 			hints = append(hints, hk{"enter", "sign in"})
 		case "theme":
 			hints = append(hints, hk{"←/→", "theme"}, hk{"enter", "cycle"})
-		case "proxy", "detachkey":
+		case "proxy", "detachkey", "remotekey":
 			hints = append(hints, hk{"enter", "edit"})
 		default:
 			hints = append(hints, hk{"enter", "toggle"})
@@ -1126,6 +1141,11 @@ func (m Model) hintBar(t theme.Theme) []string {
 	// about S (or by opening the help).
 	if n := m.liveSessionCount(); n > 0 {
 		hints = append(hints, hk{"S", plural(n, "session")})
+	}
+	// While a grant is live, A is worth a slot on every tab: the header badge
+	// says something can run commands, and A is where you see what it ran.
+	if m.raGrant() != nil {
+		hints = append(hints, hk{"A", "remote log"})
 	}
 	if m.demo {
 		signLabel := "sign in"
@@ -1179,6 +1199,8 @@ func (m Model) helpView(t theme.Theme) []string {
 		{"a / e / d", "add / edit / delete host"},
 		{"f", "start a port forward (hosts)"},
 		{"F", "show active forwards"},
+		{"r", "grant/revoke remote access on a connected host"},
+		{"A", "remote access: command line, expiry, command log"},
 		{"m", "import hosts (ssh config / Termius)"},
 		{"R", "re-probe all hosts"},
 		{"g", "generate a key (keys tab)"},
@@ -1187,6 +1209,7 @@ func (m Model) helpView(t theme.Theme) []string {
 		{"p", "republish key on mismatch (projects)"},
 		{"esc", "back / clear / detach / cancel"},
 		{m.detachName, "detach from a live session (settings: detach key)"},
+		{m.remoteName, "toggle remote access while attached (settings: remote-access key)"},
 		{"S", "live sessions: reattach, kill, or open another"},
 		{"alt+1..9", "reattach a live session (needs Option-as-Meta)"},
 		{"q", "lock vault — keeps you signed in (sign in/out in demo)"},

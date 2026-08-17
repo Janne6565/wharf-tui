@@ -68,6 +68,10 @@ func (m Model) modalView(t theme.Theme) []string {
 		return m.proxyView(t)
 	case modalDetachKey:
 		return m.detachKeyView(t)
+	case modalRemoteKey:
+		return m.remoteKeyView(t)
+	case modalRemoteAccess:
+		return m.remoteAccessView(t)
 	}
 	return m.mainView(t)
 }
@@ -300,6 +304,11 @@ func (m Model) sessionHintView(t theme.Theme) []string {
 		stl(t.Fg, t.Panel).Render("Wharf hands your terminal to the session. To get back:"),
 		"",
 		key(m.detachName, strings.Repeat(" ", maxInt(1, 9-len(m.detachName)))+"detach — the session keeps running"),
+		// The remote-access key earns a line in the primer for the same reason
+		// the detach key does: it is only pressable from inside the session, so
+		// the dashboard is the last place it can be advertised before the
+		// terminal is handed over.
+		key(m.remoteName, strings.Repeat(" ", maxInt(1, 9-len(m.remoteName)))+"grant/revoke remote access, without detaching"),
 		key("S", "        list live sessions: reattach, kill, open another"),
 		key("enter", "    reattach from a host row marked live"),
 		key("alt+1..9", " reattach by number (needs Option-as-Meta)"),
@@ -504,6 +513,10 @@ func (m Model) quitConfirmView(t theme.Theme) []string {
 	}
 	if nf > 0 {
 		body = append(body, stl(t.Warn, t.Panel).Render(itoa(nf)+" active forward(s) will be closed."))
+	}
+	if g := m.raGrant(); g != nil {
+		body = append(body, stl(t.Warn, t.Panel).Render(
+			"remote access on "+g.HostName()+" will be revoked."))
 	}
 	if len(body) == 0 {
 		body = append(body, stl(t.Dim, t.Panel).Render("Nothing is running."))
