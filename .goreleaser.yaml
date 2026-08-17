@@ -65,6 +65,10 @@ changelog:
   # The cost is that entries are commit subjects rather than PR titles, which
   # is what the conventional-commit groups below match on anyway.
   use: git
+  # Drop the commit hash from each entry. The git changelog prefixes subjects
+  # with the full 40-character SHA, which buries the line that matters; the
+  # release page already links the tag for anyone who wants the commits.
+  abbrev: -1
   sort: asc
   groups:
     - title: Features
