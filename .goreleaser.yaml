@@ -56,7 +56,15 @@ snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
 changelog:
-  use: github
+  # The changelog comes from the local git log, not the GitHub compare API.
+  # `use: github` makes a release depend on one more API call than it needs:
+  # v0.7.0 failed twice in a row on GET /compare/v0.6.0...v0.7.0 returning 404
+  # during a GitHub incident, three seconds in, before anything was built. The
+  # workflow already clones with fetch-depth: 0 precisely so the history is
+  # here — reading it locally cannot fail while api.github.com is degraded.
+  # The cost is that entries are commit subjects rather than PR titles, which
+  # is what the conventional-commit groups below match on anyway.
+  use: git
   sort: asc
   groups:
     - title: Features
