@@ -104,6 +104,7 @@ Verbs are spelled as **flags** precisely so they never claim a name a host could
 | `--reset` | **destructive:** erase this device's vault, session and caches |
 | `--vault <path>` | vault file path, overriding `$WHARF_VAULT` |
 | `--proxy <url>` | egress proxy for outbound SSH, overriding `$WHARF_PROXY` and the saved setting |
+| `--remote <token> -- <cmd>` | run one command on a host through a [remote-access grant](#remote-access) and exit |
 | `--demo` | sample data and a simulated session — no disk I/O, no real SSH |
 
 `--logout` deliberately needs no master password. The session file is sealed under the
@@ -147,7 +148,8 @@ with any password redacted. It is what to paste into a bug report.
 
 Environment: `WHARF_VAULT` (vault file path), `WHARF_CONFIG` (machine-local config file),
 `WHARF_API_BASE` (sync backend base URL), `WHARF_NO_BROWSER` (set to anything to stop
-sign-in opening the pairing page for you), and the proxy variables below.
+sign-in opening the pairing page for you), `WHARF_REMOTE_TOKEN` (see
+[Remote access](#remote-access)), and the proxy variables below.
 
 ### Egress proxy
 
@@ -197,6 +199,247 @@ not keypresses. So the binding has to be a `ctrl` combination, and the ones the 
 shell cannot do without — `ctrl+c`, `ctrl+d`, `ctrl+z`, escape, tab, enter, backspace,
 flow control — are refused with the reason why. A change takes effect immediately,
 including for sessions that are already running.
+
+There are two in-session hotkeys, and they work the same way: the detach key and the
+**remote-access key** (`ctrl+]` by default — see [Remote access](#remote-access)), stored
+beside it as `"remoteKey": "ctrl+]"`. They draw from one set of bindable keys and one set
+of refusals, and they **cannot be bound to the same key**: whichever byte the attach loop
+swallows for one is a byte the other can never see, so binding both to it would silently
+disable one. The capture modal refuses from either direction and names the conflict. If a
+hand-edited config gets past that anyway, detach wins — a session you cannot leave is the
+one failure neither key may cause.
+
+### Remote access
+
+> **macOS and Linux only.** The grant is served on a `0600` unix socket inside a `0700`
+> directory, and the file-mode half of that has no Windows equivalent — a named pipe is
+> secured by an ACL, which is a different design and deserves to be made on its own terms.
+> On Windows both keys still exist and say why they did nothing — `r` inline, `ctrl+]` as
+> a printed line in the session — because a key that silently does nothing is worse than
+> one that refuses out loud.
+> Exec itself is not the missing piece: sessions run in-process there, so
+> `sessd.Remote.Exec` works fine. What is missing is the cross-process capability.
+
+An **AI coding agent** running in your terminal cannot SSH anywhere useful. It has no way
+through a passphrase prompt, a TOFU confirmation or a 2FA challenge, so the usual answer
+is to hand it `~/.ssh` and hope. Remote access is the other answer: press **`r`** on a
+connected host on the dashboard, or **`ctrl+]`** without leaving the session you are
+attached to, and wharf mints a **revocable, auditable, exec-only capability** on that one
+host, then prints (and tries to copy) the command line that uses it:
+
+```
+wharf --remote 8Q2c… -- <your command>
+```
+
+The agent runs that in its own shell. It never sees a key, a password or the vault.
+
+```
+agent's shell                    wharf (TUI)                    session host child
+  │                               │ holds the grant + token      │ owns ssh.Client + PTY
+  │  connect, token frame ──────▶ │ constant-time compare        │
+  │                               │ TTL / revoked / in-flight    │
+  │                               │ audit event ──▶ overlay      │
+  │                               │ exec ──────────────────────▶ │ new channel, no PTY,
+  │ ◀── stdout/stderr/exit ────── │ ◀────────────────────────────│ same ssh.Client
+```
+
+The exec rides the **existing** `ssh.Client`, in a channel of its own. That is the whole
+trick: no second dial, so no second authentication, so a capability handed to an agent
+can never raise a passphrase or TOFU prompt in your face. It is also isolated from the
+PTY session's scrollback ring — nothing the agent runs shows up in your own terminal
+history, only in the audit log.
+
+**The grammar.** Everything after `--` is the command:
+
+```sh
+wharf --remote TOKEN -- curl -sS -d '{"a":1}' localhost:9000/health
+wharf --remote TOKEN --sh -- 'journalctl -u api | tail -50'
+wharf --remote TOKEN --timeout 10m -- go test ./...
+```
+
+The separator is **required**, not optional — it is what makes the command's own flags
+(`curl -sS`) unambiguous, so a forgotten `--` is an error naming the fix rather than
+"unknown flag `curl`". `--timeout` and `--sh` are the only flags allowed before it.
+
+By default the words after `--` are an **argv**, and wharf quotes them **exactly once,
+itself**, before running them under the remote's login shell (`exec "$SHELL" -lc …`).
+This matters more than it sounds. Letting the caller quote and passing the words through
+sends the string across two shell parsers, and the second one re-expands whatever
+survived the first: the canonical `curl -d '{"a":1}'` loses its braces to brace expansion
+or its quotes to word splitting, depending on which shell is on the far end. Quoting once
+makes the far end's shell irrelevant to the payload — arguments arrive byte for byte. The
+login shell is there for the other half of the problem: without `-l`, tooling installed by
+nvm, pyenv, asdf or Homebrew's `shellenv` is simply absent and the agent is told "command
+not found" about something that plainly exists.
+
+`--sh` is the escape hatch for what genuinely wants a shell — pipes, redirection, `&&`.
+It takes **one** argument, the script as a single quoted word, and passes it through
+verbatim.
+
+**Streams.** stdout and stderr are forwarded as they arrive, never buffered wholesale.
+stdin is forwarded when it is not a terminal (a pipe, a file), capped at **720 KiB** — v1
+sends it inside the request rather than streaming it, so it is held in memory in three
+processes at once and, more to the point, has to fit in one 1 MiB frame after
+`encoding/json` base64s it: 1 MiB in is 1.4 MiB on the wire, so the cap is
+`(1 MiB − 64 KiB) × ¾`, with the reserve covering the command and the JSON around it.
+The error names the limit.
+
+**`--timeout` defaults to `2m`.** Finite on purpose: a hung command holds one of the
+grant's four in-flight slots until the grant's whole TTL runs out, and an agent that gets
+no answer retries rather than waits. `--timeout 0` waits as long as the grant lives.
+
+**Exit status:**
+
+| code | meaning |
+| --- | --- |
+| *anything* | the remote command's own exit status, verbatim |
+| `125` | wharf's own failure: no grant accepted the token, a timeout, a bad command line |
+
+125 follows the convention `env(1)` and `timeout(1)` established for exactly this problem
+— a wrapper has to report its own failure through the same channel it is forwarding
+somebody else's exit code on. `1` and `2` were rejected because they are the two codes
+ordinary programs return most often, so a caller could not tell "your command failed" from
+"wharf could not run it"; usage errors use 125 as well, so there is exactly one code to
+test for. **The residual ambiguity is real:** a remote command that itself exits 125 is
+indistinguishable from a wharf-side failure. Everything wharf reports is accompanied by a
+`wharf: ` line on stderr, and that is the tiebreak.
+
+`$WHARF_REMOTE_TOKEN` supplies the token when it is not in argv, for a caller who would
+rather keep it out of `ps`. argv wins when both are set, so a pasted command line always
+beats a stale exported variable.
+
+**On the dashboard.** `r` on the hosts tab mints a grant on the selected host — or revokes
+the standing one, whatever is selected (see below). With no live session on that host it
+sets an inline error instead of dialling, because a grant must ride a connection that
+already exists. There is one grant at a time, app-wide — "which of my three grants is that
+command running under" is a question a security feature should never make you ask. While
+it stands, the header carries a **`⚡ remote <host>` badge**, and **`A`** opens the overlay
+from any tab: the command line as selectable text, the expiry, the command count, and the
+**live audit log** — every command, when it started and how it ended, newest first, capped
+at 200 lines. `x` revokes from there, `c` re-copies.
+
+**What the log guarantees.** Every command that reaches the host gets an entry, and so
+does every one that is turned away — a revoked or expired grant, or one already at its
+four-command ceiling. A burst of refusals is the shape an agent makes when it keeps trying
+after being cut off, and a log that showed only what succeeded would hide exactly that.
+Nothing is dropped on the way: the log is written by the grant itself and is the source of
+truth, and the signal that wakes the UI carries no data, so a coalesced or missed wake-up
+costs a repaint and never a row. That is worth saying because it was not always true —
+the first version fed the log through a bounded queue that discarded events under
+pressure, which an agent could have used to flood the log and run its real command in the
+gap. The one remaining way to lose a row is the **200-entry cap**, and it drops the
+**oldest** first: a sustained flood pushes its own earlier commands off the end, and the
+flood is then the visible thing. The guarantee is "nothing is silently lost", not
+"unbounded history". The log deliberately outlives the grant — revoking is exactly when
+you want to read it — and each row names its own host, so the rows of a grant that was
+replaced or revoked stay legible next to the new one's.
+
+**While attached: `ctrl+]`.** You do not have to leave the shell you are working in. The
+attach loop watches a second control byte beside the detach key, and pressing it toggles
+the grant for *this* session's host and prints the result straight into the terminal:
+
+```
+web1:~$ tail -f /var/log/api.log
+
+wharf: remote access ON for web1 · expires 15:04 · copied to clipboard
+wharf --remote 8Q2c… -- <your command>
+```
+
+It always starts on a fresh line — the remote may have left the cursor mid-prompt, and a
+notice spliced into one is worse than no notice.
+
+Press it again and it revokes, saying so in one line. Press it while a grant is live on a
+**different** host and it replaces that one, naming the host that lost it (`remote access
+ON for web1 — db1 lost it`) — a moved capability must never be silent about what it was
+moved from. The hotkey byte is swallowed by wharf and never reaches the remote; the bytes
+around it in the same read go through in their original order.
+
+The command line is printed in full even when the copy worked, because OSC 52 has no reply
+and some terminals swallow it. That does put the token in **this terminal's scrollback** —
+the same exposure the overlay already accepts, and consistency is worth more than a
+marginal reduction — which is also why `wharf 2>debug.log`, `script(1)` and friends matter
+here: what is on screen is one thing, what is on disk is another.
+
+**It will smudge a full-screen app.** Printing two lines into a terminal that `vim`, `htop`
+or a `tmux` status bar is drawing on corrupts the display until that app repaints. There is
+no general fix and none is planned: wharf does not know what the remote is drawing, and the
+alternatives — suppressing the notice, or clearing and redrawing someone else's screen —
+are each worse than a smudge. The clipboard copy is what makes it survivable in practice:
+press the key, ignore the mess, `ctrl+l`, paste. Worth knowing before it happens, because
+it looks like a bug and is not one.
+
+**Dashboard `r` and the hotkey differ on purpose.** `r` revokes a live grant *whatever the
+cursor is on*, and only mints when there is none — taking a capability back must not depend
+on where a list cursor happens to sit, least of all when that host's session has just died
+and its row may be gone. Attached, the host is unambiguous by construction, so the hotkey
+can do the more useful thing and move the grant here.
+
+The key is **rebindable** exactly like the [detach key](#detach-key) — settings tab →
+*Remote-access key* — and the two cannot collide: whichever byte the attach loop swallows
+for one is a byte the other can never see, so the capture modal refuses from either
+direction and names the conflict (`ctrl+] is already the detach key`) rather than just
+saying no.
+
+**The copy is best-effort, and both surfaces say which happened** — the overlay in a line
+of its own, the hotkey in its status line. It is OSC 52 — the only
+clipboard mechanism that works over SSH, since it asks the terminal emulator on your desk
+to hold the text rather than needing `pbcopy`, `xclip` or a local daemon. Some terminals
+silently drop the sequence (Terminal.app), and wharf **refuses to write it at all when
+stderr is not a terminal**: under `script(1)`, a systemd unit, tmux logging or plain
+`wharf 2>debug.log`, the sequence would put the token in a file, and the token never
+touching disk is a hard rule. So in those cases nothing is copied — the overlay says so
+and shows the line to select by hand, and it never reports a copy that did not happen.
+
+Revocation is synchronous: when it returns, the socket is unlinked, no further command can
+start, and an in-flight one is cancelled — its output stops reaching wharf immediately. It
+fires on **all** of:
+
+| trigger | |
+| --- | --- |
+| `r` again, or `x` in the overlay | you revoke it |
+| TTL | **60 minutes**, fixed at mint time and never extended — a renewable grant is a permanent one with extra steps |
+| the session ending | the grant rides that connection and must not outlive it |
+| `q` (lock the vault) | locking is what you do when you walk away |
+| `ctrl+q` (quit) | closed explicitly, so quitting cannot race a command that is starting |
+
+**What revocation does not do is reach into the host.** A command the agent already
+started may keep running there after the grant is closed. Wharf asks it to stop — an SSH
+`signal` request, SIGTERM then SIGKILL — but that request is advisory and sshd has long
+been reported not to act on it, and closing the channel is no substitute: without a PTY
+there is no controlling terminal to hang up, which is the same reason
+`ssh host 'sleep 3600'` leaves a `sleep` behind while `ssh -t` does not. A cancelled
+command that writes output normally dies of SIGPIPE on its next write; one that writes
+nothing — `sleep 3600`, something already backgrounded — may run to completion. What
+revocation guarantees is that no *further* command can be started and that nothing more
+reaches wharf, not that the host is quiet.
+
+Nothing about a grant is persisted — not to the vault, not to `config.json`, not to a
+filename. A wharf restart is itself a revocation.
+
+**Trust model.** A grant is a bearer token on a `0600` unix socket in a `0700` runtime
+directory. Anyone who can read the token **and** open the socket can run commands on that
+host, as that user, until it is revoked or expires. Not a sandbox, not a restricted
+command set: real shell, on a real host, for the life of the grant. The accepted risks,
+stated plainly: the token transits the clipboard and then an agent's context, which is
+frequently logged and summarised — the short TTL and the single-host binding mitigate
+that, they do not eliminate it, which is why the default TTL should not be raised; a
+prompt-injected agent has that shell and can do whatever the remote user can, so the live
+audit log is a core feature and not decoration — the argument is only as good as the log's
+completeness, which is why that is spelled out above; and the token appears in the agent's shell
+history and in `ps` output, since argv is world-readable (`$WHARF_REMOTE_TOKEN` is the way
+out for a caller who cares). And revocation withdraws the capability, not the consequences
+of what it was already used for: a command already running on the host may finish, as
+described above.
+
+What makes it worth having anyway is the comparison, which is not against "nothing" but
+against what people actually do. Handing an agent `~/.ssh` gives it every host, every key,
+persistently, with no record. Leaving an OpenSSH `ControlMaster` socket around grants a
+full interactive shell to anyone on the machine who can `stat` it, silently, with no log
+and no off-switch. A grant is one host, exec only, in its own channel — no PTY, no
+forwards, no access to the host spec — with a 32-byte token on top of the file mode
+(compared in constant time), an hour's ceiling, five independent things that end it, and
+every command printed as it runs. It is a narrowing of the trust boundary
+[sessions](#sessions-that-outlive-wharf) already accept, not a new safety guarantee.
 
 ## How it works
 
@@ -452,10 +695,13 @@ it, and holds nothing else. `WHARF_RUNTIME_DIR` overrides the location.
 | `f` | show this project's hosts on the hosts tab *(projects tab)* |
 | `m` | import hosts + keys (`~/.ssh/config` or a local Termius profile) |
 | `R` | re-probe reachability |
+| `r` | grant / revoke [remote access](#remote-access) on the selected connected host *(hosts tab)* |
+| `A` | remote access: command line, expiry, live command log |
 | `g` | generate an ed25519 key *(keys tab)* |
 | `s` | sync now *(settings tab, signed in)* |
 | `ctrl+r` | remember the typed password *(password prompt)* |
 | `ctrl+\` | **detach** the attached session *(rebindable in settings)* |
+| `ctrl+]` | toggle [remote access](#remote-access) for this session's host, while attached *(rebindable in settings)* |
 | `S` | live sessions: reattach, kill, or open another |
 | `alt`+`1..9` | reattach a live session *(needs Option-as-Meta — see below)* |
 | `q` | lock the vault |
@@ -467,20 +713,22 @@ it, and holds nothing else. `WHARF_RUNTIME_DIR` overrides the location.
 ```
 main.go                     program entry (Bubble Tea)
 internal/
-  theme/    abyss · phosphor · amber palettes
-  vault/    argon2id + XChaCha20-Poly1305 encrypted vault file
-  store/    hosts & settings document persisted through the vault
-  api/      HTTP client for wharf-backend (pairing, refresh, vault get/put)
-  identity/ cross-client fingerprint of the X25519 project identity key
-  sync/     sync engine: session file, optimistic versioning, conflicts
-  sshx/     SSH engine: auth chain, known_hosts/TOFU, detachable sessions
-  sessd/    session-host child processes + their unix-socket protocol
-  keys/     ~/.ssh scan + ed25519 generation
-  sshcfg/   ~/.ssh/config import
-  termius/  local Termius profile import (IndexedDB + keyring, PuTTY .ppk conversion)
-  probe/    advisory TCP reachability checks
-  data/     demo-mode fixtures
-  ui/       model · update · view (Elm architecture)
+  theme/        abyss · phosphor · amber palettes
+  vault/        argon2id + XChaCha20-Poly1305 encrypted vault file
+  store/        hosts & settings document persisted through the vault
+  api/          HTTP client for wharf-backend (pairing, refresh, vault get/put)
+  identity/     cross-client fingerprint of the X25519 project identity key
+  sync/         sync engine: session file, optimistic versioning, conflicts
+  sshx/         SSH engine: auth chain, known_hosts/TOFU, detachable sessions, exec
+  sessd/        session-host child processes + their unix-socket protocol
+  remoteaccess/ revocable exec-only grants: token, socket, audit (unix only)
+  clipboard/    OSC 52 copy, injectable so headless tests emit no escapes
+  keys/         ~/.ssh scan + ed25519 generation
+  sshcfg/       ~/.ssh/config import
+  termius/      local Termius profile import (IndexedDB + keyring, PuTTY .ppk conversion)
+  probe/        advisory TCP reachability checks
+  data/         demo-mode fixtures
+  ui/           model · update · view (Elm architecture)
 ```
 
 Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) +
@@ -493,6 +741,8 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) +
 - [x] Port forwarding (`-L`/`-R`/`-D`, per host)
 - [x] Sessions that survive quitting wharf (session-host child processes)
 - [x] Team projects backed by the real backend
+- [x] Remote access: revocable exec-only grants for a local agent
+- [x] Grant or revoke remote access from inside an attached session (`ctrl+]`)
 - [ ] Hardware keys (YubiKey resident / `-SK`)
 - [ ] Assign a scanned key to a host from the keys tab
 - [ ] mosh fallback
