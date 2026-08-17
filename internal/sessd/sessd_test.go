@@ -50,6 +50,25 @@ func TestMain(m *testing.M) {
 type testServer struct {
 	host string
 	port int
+
+	// recv records everything the interactive shell handler read from the
+	// client. The attach tests assert on it because it is the only place that
+	// can prove a byte was withheld: the client cannot tell a byte it never
+	// sent from one the remote never echoed back.
+	recv *safeBuffer
+
+	// running counts the exec channels the server is currently serving. It is
+	// what lets a test assert that cancelling a context actually stopped the
+	// command on the far side, rather than only stopping the client waiting for
+	// it — the difference between a revoked capability and a leaked one.
+	mu      sync.Mutex
+	running int
+}
+
+func (ts *testServer) execsRunning() int {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return ts.running
 }
 
 func (ts *testServer) spec() sshx.HostSpec {
@@ -60,7 +79,9 @@ func (ts *testServer) spec() sshx.HostSpec {
 	}
 }
 
-// startServer runs an echoing, password-authenticating sshd on 127.0.0.1:0.
+// startServer runs a password-authenticating sshd on 127.0.0.1:0. A shell
+// session echoes what is typed at it; an exec session runs the tiny command
+// language runTestCommand speaks.
 func startServer(t *testing.T) *testServer {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -71,8 +92,23 @@ func startServer(t *testing.T) *testServer {
 	if err != nil {
 		t.Fatalf("signer: %v", err)
 	}
+	ts := &testServer{host: "127.0.0.1", recv: &safeBuffer{}}
 	srv := &gliderssh.Server{
 		Handler: func(s gliderssh.Session) {
+			// A command means an exec channel, which is what sshx.Session.Exec
+			// opens; no command means the interactive shell every other test
+			// here drives.
+			if raw := s.RawCommand(); raw != "" {
+				ts.mu.Lock()
+				ts.running++
+				ts.mu.Unlock()
+				code := runTestCommand(s, raw)
+				ts.mu.Lock()
+				ts.running--
+				ts.mu.Unlock()
+				_ = s.Exit(code)
+				return
+			}
 			_, winCh, isPty := s.Pty()
 			if isPty {
 				go func() {
@@ -80,7 +116,9 @@ func startServer(t *testing.T) *testServer {
 					}
 				}()
 			}
-			_, _ = io.Copy(s, s)
+			// Echo, mirroring into recv so a test can see what the remote
+			// was actually handed.
+			_, _ = io.Copy(io.MultiWriter(s, ts.recv), s)
 		},
 		PasswordHandler: func(_ gliderssh.Context, pass string) bool { return pass == testPassword },
 	}
@@ -93,7 +131,63 @@ func startServer(t *testing.T) *testServer {
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close(); _ = ln.Close() })
 
-	return &testServer{host: "127.0.0.1", port: ln.Addr().(*net.TCPAddr).Port}
+	ts.port = ln.Addr().(*net.TCPAddr).Port
+	return ts
+}
+
+// runTestCommand interprets the command language the exec tests speak, and
+// returns the exit status. Real shells are not available in CI in any
+// predictable form — `echo` is a builtin here, `sh` is busybox there — and the
+// exec tests assert on exact bytes, so the "remote" is spelled out instead:
+//
+//	out <words>   write to stdout        err <words>  write to stderr
+//	exit <n>      finish with status n   sleep <ms>   pause
+//	big <n>       write n bytes of a repeating a-z pattern to stdout
+//	tick <n> <ms> write a dot n times, stopping early once the write fails
+//
+// Steps are separated by ";" and run in order. tick is how a test observes that
+// the far side noticed a cancellation: once the channel is closed under it, the
+// write errors and the handler returns.
+func runTestCommand(s gliderssh.Session, raw string) int {
+	code := 0
+	for _, step := range strings.Split(raw, ";") {
+		f := strings.Fields(step)
+		if len(f) == 0 {
+			continue
+		}
+		arg := func(i int) int {
+			if i >= len(f) {
+				return 0
+			}
+			n, _ := strconv.Atoi(f[i])
+			return n
+		}
+		switch f[0] {
+		case "out":
+			_, _ = io.WriteString(s, strings.Join(f[1:], " "))
+		case "err":
+			_, _ = io.WriteString(s.Stderr(), strings.Join(f[1:], " "))
+		case "exit":
+			code = arg(1)
+		case "sleep":
+			time.Sleep(time.Duration(arg(1)) * time.Millisecond)
+		case "big":
+			n := arg(1)
+			buf := make([]byte, n)
+			for i := range buf {
+				buf[i] = byte('a' + i%26)
+			}
+			_, _ = s.Write(buf)
+		case "tick":
+			for range arg(1) {
+				if _, err := io.WriteString(s, "."); err != nil {
+					return code
+				}
+				time.Sleep(time.Duration(arg(2)) * time.Millisecond)
+			}
+		}
+	}
+	return code
 }
 
 // recorder stands in for the UI's tea.Program.Send: it auto-accepts TOFU and

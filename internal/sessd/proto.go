@@ -44,14 +44,17 @@ const (
 	kindInfo        frameKind = 6 // request an infoResponse
 	kindKill        frameKind = 7 // terminate the session and exit
 	kindPromptReply frameKind = 8 // JSON promptReply, answering a kindPrompt
+	kindExec        frameKind = 9 // JSON execRequest: run a command in its own channel
 
 	// host → client
-	kindOutput frameKind = 20 // raw bytes from the remote
-	kindPrompt frameKind = 21 // JSON promptRequest: TOFU or a secret
-	kindInfoOK frameKind = 22 // JSON infoResponse
-	kindDialOK frameKind = 23 // the shell is running
-	kindEnded  frameKind = 24 // JSON endedNotice: the session is over
-	kindError  frameKind = 25 // JSON errorNotice: the request failed
+	kindOutput  frameKind = 20 // raw bytes from the remote
+	kindPrompt  frameKind = 21 // JSON promptRequest: TOFU or a secret
+	kindInfoOK  frameKind = 22 // JSON infoResponse
+	kindDialOK  frameKind = 23 // the shell is running
+	kindEnded   frameKind = 24 // JSON endedNotice: the session is over
+	kindError   frameKind = 25 // JSON errorNotice: the request failed
+	kindExecOut frameKind = 26 // JSON execOutput: a chunk of an exec's output
+	kindExecEnd frameKind = 27 // JSON execEnd: that exec is over
 )
 
 // maxFrame caps a single frame's payload. Output frames are chunked well below
@@ -62,7 +65,29 @@ const maxFrame = 1 << 20
 // protocolVersion is reported in infoResponse. A client that does not
 // understand a host's version refuses to attach rather than mis-framing its
 // stream; the socket is still listed, so the session can be killed.
-const protocolVersion = 1
+//
+// Version 2 added exec (kindExec/kindExecOut/kindExecEnd). The bump matters
+// because sessions deliberately outlive the TUI: the moment after an upgrade,
+// the hosts still running are all version 1, and a version-1 host drops an
+// unknown frame kind on the floor without so much as an error frame. A client
+// that assumed exec worked would wait for a reply that is never coming.
+const protocolVersion = 2
+
+// minAdoptProtocol is the oldest host a client will adopt. Version 2 is purely
+// additive — it introduced new frame kinds and changed the meaning of none — so
+// refusing a version-1 host would orphan every session running under the
+// binary the user just upgraded from, to buy nothing. Adoption records the
+// version instead and features negotiate against it (see execProtocol).
+//
+// The asymmetry is deliberate: an older host is adopted, a *newer* one is still
+// refused. A newer host may send kinds this build has no case for, and those
+// fall through readLoop's default into ctl, where they would be mistaken for
+// somebody's dial or info reply.
+const minAdoptProtocol = 1
+
+// execProtocol is the first protocol version that can run an exec. A host below
+// it is not broken, it is simply older than the feature.
+const execProtocol = 2
 
 // promptKind distinguishes the two interactive prompts the auth chain raises.
 const (
@@ -155,6 +180,53 @@ type infoResponse struct {
 	Cols      int    `json:"cols"`
 	Rows      int    `json:"rows"`
 }
+
+// execRequest asks the host to run one non-interactive command. Every frame of
+// the exchange carries ID, because several execs may be in flight on the same
+// socket at once and the socket is a single ordered byte stream: without an
+// explicit correlation id there is nothing to tell one command's stdout from
+// another's. The id is minted by the client, which is the side that has to
+// match replies to callers.
+type execRequest struct {
+	ID      string `json:"id"` // correlation id, client-generated
+	Command string `json:"command"`
+	Stdin   []byte `json:"stdin,omitempty"`
+	Timeout int    `json:"timeoutMs,omitempty"`
+	// Cancel turns the frame into a cancellation of the exec already running
+	// under ID rather than a new one. It is a flag on this struct instead of a
+	// fourth frame kind because the alternative — letting a canceled client just
+	// stop listening — leaves the command running on the real host for as long
+	// as it likes, which is exactly the authority a revocable grant is supposed
+	// to be able to withdraw. A host from an older build ignores the field and
+	// merely finishes the command, which is the pre-existing behaviour.
+	Cancel bool `json:"cancel,omitempty"`
+}
+
+// execOutput is one chunk of an exec's output. Data is chunked well below
+// maxFrame by the host (see execWriter): it is base64-encoded by encoding/json,
+// so the frame is roughly a third larger than the bytes it carries.
+type execOutput struct {
+	ID     string `json:"id"`
+	Stream string `json:"stream"` // "out" | "err"
+	Data   []byte `json:"data"`   // base64 in JSON
+}
+
+// execEnd terminates an exec exactly once, whether it ran or not. Code is the
+// remote exit status and is meaningful only when Err is empty: a command that
+// ran and failed is a code, while Err means wharf never learned an outcome.
+type execEnd struct {
+	ID   string `json:"id"`
+	Code int    `json:"code"`
+	Err  string `json:"err,omitempty"`
+}
+
+// execStreamOut and execStreamErr name the two streams an exec multiplexes over
+// one socket. They are strings rather than a bool so a third stream could be
+// added without changing the meaning of frames already on the wire.
+const (
+	execStreamOut = "out"
+	execStreamErr = "err"
+)
 
 type endedNotice struct {
 	Err string `json:"err,omitempty"`

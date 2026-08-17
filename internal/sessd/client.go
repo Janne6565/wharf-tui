@@ -208,9 +208,10 @@ func (p *Pool) Adopt() (int, error) {
 			// another chance on the next run rather than being unlinked here.
 			r.closeConn()
 			continue
-		case info.Protocol != protocolVersion:
-			// A different build's host. Its session may well be real, so the
-			// socket stays; this wharf just cannot frame a stream to it.
+		case info.Protocol < minAdoptProtocol || info.Protocol > protocolVersion:
+			// A host this build cannot frame a stream to — in practice a newer
+			// one, since minAdoptProtocol is the oldest that ever existed. Its
+			// session may well be real, so the socket stays.
 			r.closeConn()
 			continue
 		case !info.Alive:
@@ -230,6 +231,10 @@ func (p *Pool) Adopt() (int, error) {
 			Port: info.Port,
 		}
 		r.startedAt = time.Unix(info.StartedAt, 0)
+		// Remember what this host can actually do. An adopted host may predate
+		// features this binary has, and the honest answer to "can it exec?" is
+		// its own version, not ours.
+		r.protocol = info.Protocol
 		r.setAlive(true)
 		p.register(r)
 		n++
@@ -349,6 +354,11 @@ type Remote struct {
 	// by a later wharf without any bookkeeping.
 	id        string
 	startedAt time.Time
+	// protocol is the version the host on the other end speaks. It is this
+	// build's version for a session we spawned — the child is this very binary —
+	// and whatever the host reported for an adopted one, which may be older.
+	// Features negotiate against it rather than assuming parity; see Exec.
+	protocol int
 
 	wmu  sync.Mutex
 	conn net.Conn
@@ -361,6 +371,22 @@ type Remote struct {
 	ctl      chan ctlFrame // dial/info replies
 	done     chan struct{}
 	doneOnce sync.Once
+
+	// execs routes exec replies to the caller that asked for them, keyed by the
+	// correlation id in the frame.
+	//
+	// This deliberately does not go through ctl. That channel is unkeyed and
+	// depth-4, and requestInfo and dial already race for whatever lands in it —
+	// which is survivable only because at most one of them is ever meaningfully
+	// in flight. Exec has no such property: a grant runs several commands at
+	// once by design, and an unkeyed channel would hand one caller another
+	// caller's stdout and exit code. On a capability that proxies exit statuses
+	// back to somebody's shell, cross-delivery is not a glitch, it is a wrong
+	// answer reported as a right one. Hence a registry, and hence explicit
+	// kindExecOut/kindExecEnd arms in readLoop so exec frames can never reach
+	// the default that feeds ctl.
+	execMu sync.Mutex
+	execs  map[string]*execCall
 }
 
 // ctlFrame is a control reply routed from the read loop to a waiting caller.
@@ -375,8 +401,13 @@ func newRemote(p *Pool, sock string, c net.Conn) *Remote {
 		sock: sock,
 		id:   sessionIDFor(sock),
 		conn: c,
-		ctl:  make(chan ctlFrame, 4),
-		done: make(chan struct{}),
+		// Optimistic, and corrected downward by Adopt once the host has said
+		// what it is: a spawned child is this binary, so parity is the truth
+		// for every session that did not come from a previous run.
+		protocol: protocolVersion,
+		ctl:      make(chan ctlFrame, 4),
+		done:     make(chan struct{}),
+		execs:    map[string]*execCall{},
 	}
 	go r.readLoop()
 	return r
@@ -482,6 +513,28 @@ func (r *Remote) readLoop() {
 				continue
 			}
 			go r.relayPrompt(req)
+
+		case kindExecOut:
+			// Written on this goroutine rather than dispatched to another, for
+			// the same reason kindOutput is: the socket is what orders an exec's
+			// output, and handing chunks to goroutines would let a command's
+			// stdout arrive scrambled — or after its own exit code.
+			var out execOutput
+			if err := json.Unmarshal(payload, &out); err != nil {
+				continue
+			}
+			if call := r.lookupExec(out.ID); call != nil {
+				call.write(out.Stream, out.Data)
+			}
+
+		case kindExecEnd:
+			var end execEnd
+			if err := json.Unmarshal(payload, &end); err != nil {
+				continue
+			}
+			if call := r.lookupExec(end.ID); call != nil {
+				call.finish(end)
+			}
 
 		case kindEnded:
 			var notice endedNotice

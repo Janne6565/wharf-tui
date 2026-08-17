@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -278,6 +279,54 @@ func (r *Remote) Done() <-chan struct{} { return r.sess.Done() }
 // Attach hands this terminal to the session until the user detaches (ctrl+\)
 // or it dies.
 func (r *Remote) Attach(detach byte) tea.ExecCommand { return r.sess.Attach(detach) }
+
+// AttachWith is Attach with the in-session hotkeys wired up. The options are
+// copied field by field into sshx's own struct rather than passed through,
+// because internal/ui may not learn that on Windows a sessd attach is really an
+// sshx attach — the two types are deliberately separate.
+//
+// The remote-access callback itself is the UI's to supply on both platforms.
+// remoteaccess.Open returns ErrUnsupported here, so what it prints is that
+// explanation; a key that silently does nothing would be worse than one that
+// says why, and this layer is not the place to decide which.
+func (r *Remote) AttachWith(opts AttachOptions) tea.ExecCommand {
+	return r.sess.AttachWith(sshx.AttachOptions{
+		Detach:         opts.Detach,
+		RemoteAccess:   opts.RemoteAccess,
+		OnRemoteAccess: opts.OnRemoteAccess,
+	})
+}
+
+// Exec runs a command on this session's host and streams its output, returning
+// the remote exit code. Its contract is the unix Remote.Exec's, to the letter:
+// a command that ran and failed is a non-zero code with a nil error, while an
+// error means wharf never learned an outcome.
+//
+// There is no socket, no framing and no correlation registry here because there
+// is no process boundary to cross — the session is in this process, and
+// sshx.Session.Exec is already safe to call concurrently.
+//
+// Nothing calls it today, and nothing can: the only caller is a
+// remoteaccess.Grant, and remoteaccess.Open returns ErrUnsupported on Windows
+// because the grant socket is unix-only. It is written out properly rather than
+// stubbed with an error for two reasons. It has to exist at all because
+// remoteaccess declares var _ Executor = (*sessd.Remote)(nil) in a file with no
+// build tag, which must compile here. And the reason the feature is unavailable
+// on Windows is the listening descriptor a detached child would need, not
+// anything about running a command — so when the grant server grows a named-pipe
+// transport, this is already correct instead of being a lie that has to be
+// noticed first.
+func (r *Remote) Exec(ctx context.Context, req ExecRequest, stdout, stderr io.Writer) (int, error) {
+	res, err := r.sess.Exec(ctx, sshx.ExecRequest{
+		Command: req.Command,
+		Stdin:   req.Stdin,
+		Timeout: req.Timeout,
+	}, stdout, stderr)
+	if err != nil {
+		return 0, err
+	}
+	return res.Code, nil
+}
 
 // Close terminates the session.
 func (r *Remote) Close() error {

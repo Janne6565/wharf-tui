@@ -38,6 +38,12 @@ type Host struct {
 	attached *conn // client currently streaming, if any
 	conns    map[*conn]struct{}
 	ended    bool
+	// execs is every exec currently running, keyed by the client's correlation
+	// id, so a cancel frame can reach the one command it names. Guarded by mu
+	// with the rest of the host's state: an exec is created and canceled from
+	// different goroutines, and a second mutex here would only invite the two
+	// to be taken in different orders.
+	execs map[string]context.CancelFunc
 
 	done chan struct{} // closed when the session is over and Serve should return
 }
@@ -77,6 +83,7 @@ func Serve(ln net.Listener, sockPath string) error {
 		sockPath:  sockPath,
 		startedAt: time.Now(),
 		conns:     map[*conn]struct{}{},
+		execs:     map[string]context.CancelFunc{},
 		done:      make(chan struct{}),
 	}
 	go h.acceptLoop()
@@ -329,6 +336,23 @@ func (c *conn) handle(kind frameKind, payload []byte) bool {
 		// raises prompts whose answers arrive as frames on this very
 		// connection, and a blocked reader could never deliver them.
 		go c.dial(req)
+
+	case kindExec:
+		req, err := decodeExecRequest(payload)
+		if err != nil {
+			// Not fatal to the connection: it is also carrying an interactive
+			// session, and a garbled exec must not cost the user their shell.
+			// With no id there is nothing to answer, so this is the one exec
+			// frame that gets no reply.
+			return true
+		}
+		if req.Cancel {
+			h.cancelExec(req.ID)
+			return true
+		}
+		// Same rule as kindDial: on its own goroutine, because the cancel frame
+		// that stops this command arrives on this very connection's read loop.
+		go c.exec(req)
 
 	case kindAttach:
 		var req attachRequest

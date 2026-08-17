@@ -134,9 +134,39 @@ func TestAdoptRetiresSessionlessHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	go func() { _ = Serve(ln, sock) }()
-	// Let the host come up, but stay well inside idleGrace so this asserts what
-	// Adopt does rather than what the watchdog would eventually do.
-	waitFor(t, "the host to listen", func() bool { return !hostGone(sock) })
+
+	// Wait for the host to come up — but with a connection that stays open, and
+	// with a real round trip.
+	//
+	// Not hostGone: it dials and hangs up, and Host.drop reads "no session and
+	// no clients left" as "nothing can ever give this process a purpose" and
+	// shuts the host down. So a throwaway probe retires the very host this test
+	// is about to adopt. Adopt then races that shutdown — its connection is
+	// broken, or is handed kindEnded, before the info reply arrives — takes the
+	// deliberate "reachable but not answering, leave the socket" branch, and
+	// the socket survives until Serve's goroutine gets around to unlinking it,
+	// which is asynchronous with respect to the assertion below. That is the
+	// flake, and it is the probe's doing, not Adopt's.
+	//
+	// A dial alone would not prove readiness either: a bound unix socket
+	// completes a connect from the backlog even if nothing is accepting yet.
+	// One kindInfo round trip proves the accept loop is actually serving, and
+	// holding the connection keeps the host alive until Adopt has had its turn,
+	// which is what this test set out to measure.
+	probe, err := net.DialTimeout("unix", sock, 10*time.Second)
+	if err != nil {
+		t.Fatalf("the host should be accepting connections: %v", err)
+	}
+	defer func() { _ = probe.Close() }()
+	if err := writeFrame(probe, kindInfo, nil); err != nil {
+		t.Fatalf("probing the host: %v", err)
+	}
+	if err := probe.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if kind, _, err := readFrame(probe); err != nil || kind != kindInfoOK {
+		t.Fatalf("the host should answer an info probe, got kind %d, err %v", kind, err)
+	}
 
 	pool, _ := newPool(t, sockDir, knownHosts)
 	n, err := pool.Adopt()
