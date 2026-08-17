@@ -22,4 +22,12 @@ var (
 	// ErrAuthFailed wraps the underlying handshake error when the server
 	// rejected every authentication method.
 	ErrAuthFailed = errors.New("sshx: authentication failed")
+
+	// ErrSessionClosed is returned by Session.Exec when the session is already
+	// gone, or dies with a command in flight. It is a sentinel of its own
+	// rather than the transport's "use of closed network connection" because
+	// the caller has to tell "the host went away" apart from "the command
+	// failed" — those reach the user as very different things, and only the
+	// second one carries a remote exit code.
+	ErrSessionClosed = errors.New("sshx: session closed")
 )
