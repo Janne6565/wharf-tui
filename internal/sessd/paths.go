@@ -61,6 +61,38 @@ func RuntimeDir() (string, error) {
 	return dir, nil
 }
 
+// GrantSocketPath returns a fresh, validated path for a remote-access grant
+// socket. Grants live in a "grants" directory beside the session sockets rather
+// than among them: everything in the sessions directory is a session to
+// Pool.Adopt, and a grant socket dropped in there would be probed, found mute
+// and unlinked on the next start.
+//
+// The token is deliberately not part of the name. A filename is metadata anyone
+// who can list the directory can read, and the grant's whole premise is that
+// the token exists only in memory — see docs/REMOTE-ACCESS.md. The name is the
+// same <prefix>-<10 hex>.sock shape sessions use, so it stays inside the
+// maxSockPath budget socketPath enforces.
+func GrantSocketPath() (string, error) {
+	// RuntimeDir is what validates the base directory's ownership and mode, so
+	// it is called for its checks as much as for its answer; the grants
+	// directory is its sibling.
+	sessions, err := RuntimeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(filepath.Dir(sessions), "grants")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("sessd: creating %s: %w", dir, err)
+	}
+	// Verify rather than trust, exactly as RuntimeDir does for sessions:
+	// MkdirAll leaves an existing directory alone, and a group- or
+	// world-reachable one would hand the grant socket to anyone on the machine.
+	if err := checkPrivateDir(dir); err != nil {
+		return "", err
+	}
+	return socketPath(dir, "grant")
+}
+
 // checkPrivateParent enforces that the directory holding the socket directory
 // is ours and not writable by anyone else. Unlike checkPrivateDir it never
 // chmods: the base can be user-chosen (WHARF_RUNTIME_DIR), and silently
