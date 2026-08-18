@@ -604,15 +604,17 @@ silently does nothing is worse than one that says why.
 Raw mode, so `\r\n`, and short. On grant:
 
 ```
-  wharf: remote access ON for web1, expires 15:04 — copied to clipboard
+  wharf: remote access ON for web1, expires 15:04 — sent to clipboard
   wharf --remote <token> -- <your command>
 ```
 
 On revoke: one line. On failure: one line naming the cause.
 
-The command line is printed in full even when the OSC 52 copy succeeds, because
-the copy is silently swallowed by some terminals and the printed line is the
-only fallback. That does put the token in the local terminal's scrollback —
+The wording is "sent", never "copied": writing the sequence is the whole of what
+is knowable, since OSC 52 has no reply and a terminal configured to refuse
+clipboard writes — iTerm2 refuses by default — discards it in silence. The
+command line is therefore printed in full even when the copy succeeds, because
+the printed line is the only fallback. That does put the token in the local terminal's scrollback —
 the same exposure the dashboard overlay already accepts, and consistency is
 worth more here than a marginal reduction.
 

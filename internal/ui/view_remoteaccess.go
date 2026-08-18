@@ -96,7 +96,11 @@ func (m Model) remoteAccessView(t theme.Theme) []string {
 	}
 	body = append(body, "")
 	if copied {
-		body = append(body, stl(t.Ok, t.Panel).Render("✓ copied to the clipboard (OSC 52)"))
+		// Deliberately "sent", not "copied": the write succeeding is the whole of
+		// what is knowable. A terminal that refuses clipboard writes — iTerm2's
+		// default — swallows the sequence without a word, and the line above is
+		// what the user falls back to.
+		body = append(body, stl(t.Ok, t.Panel).Render("✓ sent to the clipboard (OSC 52)"))
 	} else {
 		// Never claim a copy that did not happen — and say both why and what to
 		// do instead, since "not copied" on its own reads as a bug. A grant this

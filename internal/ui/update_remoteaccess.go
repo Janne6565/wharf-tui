@@ -408,8 +408,13 @@ func remoteAccessOutcomeText(out remoteaccess.Outcome, copyState *raCopyStatus, 
 	// taken from. Nothing here has to reconstruct that, and nothing here may
 	// drop it.
 	status := "wharf: " + out.String() + " · expires " + g.ExpiresAt().Format("15:04")
+	// "sent", not "copied": a nil error from the hook proves the bytes reached
+	// the terminal, never that the terminal accepted them — OSC 52 has no reply,
+	// and a terminal configured to refuse clipboard writes (iTerm2 does by
+	// default) discards them in silence. Claiming a copy there is how the user
+	// ends up looking for a bug in wharf instead of in a checkbox.
 	if ok, why := copyState.copy(g, copyFn); ok {
-		status += " · copied to clipboard"
+		status += " · sent to clipboard"
 	} else if why != "" {
 		status += " · not copied (" + why + ")"
 	} else {
@@ -464,7 +469,9 @@ func (m Model) remoteAccessKey(key string) (tea.Model, tea.Cmd) {
 		if ok, why := m.raCopy.copy(g, m.copyToClipboard); !ok {
 			return m.setToast("clipboard copy failed: "+why, "err"), nil
 		}
-		return m.setToast("command copied", "ok"), nil
+		// "sent", not "copied" — see remoteAccessOutcomeText on why the stronger
+		// claim is not available.
+		return m.setToast("command sent to the clipboard", "ok"), nil
 	case "x", "d":
 		g := m.raGrant()
 		if g == nil {

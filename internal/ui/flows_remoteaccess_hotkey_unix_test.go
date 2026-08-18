@@ -57,7 +57,7 @@ func TestTheInSessionHotkeyMintsAGrantAndPrintsTheCommandLine(t *testing.T) {
 	if !strings.Contains(text, g.CommandLine()) {
 		t.Fatalf("the printed text must carry the whole command line — OSC 52 reaches nobody in some terminals:\n%s", text)
 	}
-	for _, want := range []string{"remote access ON for web1", "expires ", "copied to clipboard"} {
+	for _, want := range []string{"remote access ON for web1", "expires ", "sent to clipboard"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("the status line should contain %q:\n%s", want, text)
 		}

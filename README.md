@@ -341,7 +341,7 @@ the grant for *this* session's host and prints the result straight into the term
 ```
 web1:~$ tail -f /var/log/api.log
 
-wharf: remote access ON for web1 · expires 15:04 · copied to clipboard
+wharf: remote access ON for web1 · expires 15:04 · sent to clipboard
 wharf --remote 8Q2c… -- <your command>
 ```
 
