@@ -39,6 +39,29 @@ var preferredKexAlgos = []string{
 // standalone port forwards (StartForward) build on the *ssh.Client it returns;
 // ctx governs only this connect/handshake phase, never the client's lifetime.
 func (m *Manager) connect(ctx context.Context, hs HostSpec) (*ssh.Client, error) {
+	// One ring across all rounds: the keys (and any passphrase prompts they
+	// cost) are collected once and handed out in MaxAuthTries-sized batches.
+	ring := &keyRing{}
+	var err error
+	for round := 0; round < maxKeyRounds; round++ {
+		var client *ssh.Client
+		client, err = m.connectOnce(ctx, hs, ring)
+		if err == nil {
+			return client, nil
+		}
+		// Only an exhausted key budget is worth another connection, and only
+		// while keys remain: a rejected host key, a canceled prompt or a dead
+		// address must fail on the spot.
+		if !ring.hasMore() || !(errors.Is(err, ErrAuthFailed) || errors.Is(err, ErrTooManyAuthAttempts)) {
+			return nil, err
+		}
+	}
+	return nil, err
+}
+
+// connectOnce is one TCP dial plus handshake, offering whatever batch of keys
+// ring hands out for this round.
+func (m *Manager) connectOnce(ctx context.Context, hs HostSpec, ring *keyRing) (*ssh.Client, error) {
 	port := hs.Port
 	if port == 0 {
 		port = 22
@@ -52,7 +75,7 @@ func (m *Manager) connect(ctx context.Context, hs HostSpec) (*ssh.Client, error)
 
 	config := &ssh.ClientConfig{
 		User:              hs.User,
-		Auth:              m.authMethods(ctx, hs),
+		Auth:              m.authMethods(ctx, hs, ring),
 		HostKeyCallback:   m.hostKeyCallback(ctx, hs, db),
 		HostKeyAlgorithms: db.HostKeyAlgorithms(addr),
 		Config:            ssh.Config{KeyExchanges: preferredKexAlgos},
@@ -74,7 +97,8 @@ func (m *Manager) connect(ctx context.Context, hs HostSpec) (*ssh.Client, error)
 	return ssh.NewClient(sshConn, chans, reqs), nil
 }
 
-// Dial connects, authenticates (agent -> key file -> password ->
+// Dial connects, authenticates (key mode: agent + key file + vault keys in one
+// public-key method, then keyboard-interactive; password mode: password then
 // keyboard-interactive), requests a PTY of cols x rows, starts the remote
 // shell and the output pump, and registers the session under hs.ID.
 func (m *Manager) Dial(ctx context.Context, hs HostSpec, cols, rows int) (*Session, error) {
@@ -165,6 +189,14 @@ func classifyHandshakeErr(err error) error {
 		errors.Is(err, context.Canceled),
 		errors.Is(err, context.DeadlineExceeded):
 		return err
+	// OpenSSH capitalizes the message and x/crypto/ssh's own server does not,
+	// so the match is case-insensitive.
+	case strings.Contains(strings.ToLower(err.Error()), "too many authentication failures"):
+		// The server hung up mid-chain rather than rejecting us: it counted more
+		// auth attempts than MaxAuthTries allows. Say which knob that is — the
+		// raw disconnect reads like a network fault.
+		return fmt.Errorf("%w: it accepted only a few key offers before hanging up "+
+			"(MaxAuthTries); offer fewer keys, or set this host to password auth", ErrTooManyAuthAttempts)
 	case strings.Contains(err.Error(), "unable to authenticate"):
 		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
 	default:

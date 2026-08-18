@@ -28,10 +28,12 @@ func agentSocket(t *testing.T) {
 
 // The "Use SSH agent keys" setting has to reach the auth chain: it used to be
 // stored and never read, so key-mode auth always offered $SSH_AUTH_SOCK.
+//
+// The assertion is on the signers the public-key method actually collects, not
+// on how many ssh.AuthMethod values the chain holds: every key source now feeds
+// one merged publickey method (see publicKeySigners), so the count is constant.
 func TestUseAgentGatesAgentAuthMethod(t *testing.T) {
-	// A listening socket is enough — authMethods only needs the dial to
-	// succeed to add the agent method; nothing speaks the protocol here.
-	agentSocket(t)
+	serveAgent(t, mustEd25519(t))
 
 	mgr := NewManager(filepath.Join(t.TempDir(), "known_hosts"), true)
 	if !mgr.UseAgent() {
@@ -39,13 +41,21 @@ func TestUseAgentGatesAgentAuthMethod(t *testing.T) {
 	}
 	hs := HostSpec{ID: "h1", AuthMethod: AuthKey}
 
-	withAgent := len(mgr.authMethods(context.Background(), hs))
-	mgr.SetUseAgent(false)
-	without := len(mgr.authMethods(context.Background(), hs))
+	withAgent, err := mgr.publicKeySigners(context.Background(), hs, &keyRing{})()
+	if err != nil {
+		t.Fatalf("collect signers with the agent on: %v", err)
+	}
+	if len(withAgent) != 1 {
+		t.Fatalf("agent on should offer the agent's 1 key, got %d", len(withAgent))
+	}
 
-	if withAgent != without+1 {
-		t.Fatalf("turning the agent off should drop exactly one auth method, got %d then %d",
-			withAgent, without)
+	mgr.SetUseAgent(false)
+	without, err := mgr.publicKeySigners(context.Background(), hs, &keyRing{})()
+	if err != nil {
+		t.Fatalf("collect signers with the agent off: %v", err)
+	}
+	if len(without) != 0 {
+		t.Fatalf("agent off should offer nothing, got %d signers", len(without))
 	}
 }
 
@@ -55,9 +65,9 @@ func TestUseAgentIrrelevantInPasswordMode(t *testing.T) {
 
 	mgr := NewManager(filepath.Join(t.TempDir(), "known_hosts"), true)
 	hs := HostSpec{ID: "h1", AuthMethod: AuthPassword}
-	on := len(mgr.authMethods(context.Background(), hs))
+	on := len(mgr.authMethods(context.Background(), hs, &keyRing{}))
 	mgr.SetUseAgent(false)
-	if off := len(mgr.authMethods(context.Background(), hs)); off != on {
+	if off := len(mgr.authMethods(context.Background(), hs, &keyRing{})); off != on {
 		t.Fatalf("password mode should be unaffected by the agent setting: %d vs %d", on, off)
 	}
 }

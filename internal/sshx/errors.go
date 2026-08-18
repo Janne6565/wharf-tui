@@ -23,6 +23,14 @@ var (
 	// rejected every authentication method.
 	ErrAuthFailed = errors.New("sshx: authentication failed")
 
+	// ErrTooManyAuthAttempts is returned when the server cut the handshake
+	// with "Too many authentication failures". Every public key offered counts
+	// against the server's MaxAuthTries (6 by default), so a large vault key
+	// list can exhaust the budget before the right key is reached. It is a
+	// sentinel of its own because the fix is the user's (offer fewer keys /
+	// point the host at its key), not a retry.
+	ErrTooManyAuthAttempts = errors.New("sshx: server refused further authentication attempts")
+
 	// ErrSessionClosed is returned by Session.Exec when the session is already
 	// gone, or dies with a command in flight. It is a sentinel of its own
 	// rather than the transport's "use of closed network connection" because
