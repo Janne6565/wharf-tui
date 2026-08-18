@@ -99,9 +99,10 @@ const (
 	ssConflict                  // both sides changed; user must resolve
 )
 
-// host-form field indices. fAuth is the two-way selector; fKey and fPassword
-// are conditional — only the one matching the selected mode is shown and
-// navigable (key path in key mode, masked password in password mode).
+// host-form field indices. fAuth is the two-way selector; fKey, fVaultKey and
+// fPassword are conditional — only those matching the selected mode are shown
+// and navigable (key path + vault key in key mode, masked password in password
+// mode).
 const (
 	fName = iota
 	fUser
@@ -110,6 +111,7 @@ const (
 	fTags
 	fAuth     // auth-method selector (key | password)
 	fKey      // key path — shown in key mode only
+	fVaultKey // bound vault key selector — key mode, and only with synced keys
 	fPassword // masked password — shown in password mode only
 	fProject  // project selector (personal | writable projects) — real mode only
 	fCount
@@ -434,7 +436,7 @@ type Model struct {
 
 	formEditID     string         // "" = add, else the ID being edited
 	formEditProjID string         // source project of the host being edited ("" personal)
-	formVals       [fCount]string // Name, User, Addr, Port, Tags, AuthMethod, KeyPath, Password, ProjectID
+	formVals       [fCount]string // Name, User, Addr, Port, Tags, AuthMethod, KeyPath, KeyID, Password, ProjectID
 	formFocus      int
 	formErr        string
 
@@ -536,6 +538,9 @@ type Model struct {
 	importHosts   []store.Host
 	importKeys    []store.VaultKey
 	importSkipped []string
+	// importHostKeys maps host name → vault key name for the pending import,
+	// turned into store.Host.KeyID bindings once the keys are in the vault.
+	importHostKeys map[string]string
 	// importSource is which importer produced importHosts ("ssh_config" or
 	// termius.Source). It selects the summary wording and, because only a
 	// Termius profile carries passwords, the upsert path.

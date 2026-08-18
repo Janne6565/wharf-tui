@@ -17,7 +17,9 @@ import (
 //	AuthPassword: password → keyboard-interactive; never offers a public key.
 //	key mode (anything else, incl. "" / legacy "auto"): one public-key method
 //	              fed by agent → key file → vault keys, then
-//	              keyboard-interactive; never offers a password.
+//	              keyboard-interactive; never offers a password. A host bound to
+//	              one vault key (hs.KeyBound) offers that key and skips the
+//	              agent.
 //
 // Every public-key source goes into a SINGLE ssh.PublicKeysCallback. This is
 // not cosmetic: x/crypto/ssh records tried methods by *name*, so once one
@@ -108,7 +110,10 @@ func (m *Manager) publicKeySigners(ctx context.Context, hs HostSpec, ring *keyRi
 			}
 		}
 
-		if m.UseAgent() {
+		// A host bound to its own key skips the agent: the binding exists
+		// precisely so the server's small try budget is not spent on keys that
+		// belong to other hosts.
+		if m.UseAgent() && !hs.KeyBound {
 			collect(m.agentSigners())
 		}
 		if hs.KeyPath != "" {

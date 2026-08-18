@@ -91,4 +91,10 @@ type HostSpec struct {
 	// VaultKeys are personal synced keys offered in key mode after the local
 	// key file, before keyboard-interactive. Empty in password mode.
 	VaultKeys []VaultKeySpec
+	// KeyBound says VaultKeys is this host's *bound* key rather than the whole
+	// vault: the user (or an import that knew the answer) named the key this
+	// host authenticates with. A bound host does not offer the agent's keys —
+	// the point of binding is to spend the server's MaxAuthTries on the one key
+	// that can work instead of walking a fleet-wide list.
+	KeyBound bool
 }

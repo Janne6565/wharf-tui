@@ -136,3 +136,79 @@ func TestTermiusApplyImportsKeys(t *testing.T) {
 		t.Errorf("re-import added a duplicate: %d keys, want 1", got)
 	}
 }
+
+// A Termius profile records which key each host uses. That binding is the whole
+// reason a 20-key vault stays usable — the alternative is offering every key to
+// every host until the server's MaxAuthTries runs out — so the import must carry
+// it over, resolved to the ID the key ends up with in the vault.
+func TestTermiusApplyBindsHostsToTheirKey(t *testing.T) {
+	tm, _ := openedModel(t)
+	msg := importDoneMsg{
+		hosts: []store.Host{
+			{Name: "prod", User: "u", Addr: "a", Port: 22, Source: termius.Source},
+			{Name: "unbound", User: "u", Addr: "b", Port: 22, Source: termius.Source},
+		},
+		keys: []store.VaultKey{
+			{Name: "work", Type: "RSA", Material: "bWF0ZXJpYWw="},
+			{Name: "other", Type: "RSA", Material: "bWF0ZXJpYWw="},
+		},
+		hostKeys: map[string]string{"prod": "work"},
+		source:   termius.Source,
+	}
+	tm, _ = step(tm, msg)
+	tm = drainCmd(t, tm, applyImport(t, tm))
+
+	m := tm.(Model)
+	want, ok := keyIDByName(m, "work")
+	if !ok {
+		t.Fatal("the imported key is not in the vault")
+	}
+	for _, h := range m.st.Hosts() {
+		switch h.Name {
+		case "prod":
+			if h.KeyID != want {
+				t.Errorf("prod bound to %q, want the id of key \"work\" (%q)", h.KeyID, want)
+			}
+		case "unbound":
+			if h.KeyID != "" {
+				t.Errorf("a host the profile names no key for must stay unbound, got %q", h.KeyID)
+			}
+		}
+	}
+}
+
+// A second import binds to the key already in the vault rather than leaving the
+// host unbound: applyImportedKeys skips a name that exists, so the binding has
+// to resolve against the whole vault, not just this run's additions.
+func TestTermiusReimportRebindsToTheExistingKey(t *testing.T) {
+	tm, _ := openedModel(t)
+	msg := importDoneMsg{
+		hosts:    []store.Host{{Name: "prod", User: "u", Addr: "a", Port: 22, Source: termius.Source}},
+		keys:     []store.VaultKey{{Name: "work", Type: "RSA", Material: "bWF0ZXJpYWw="}},
+		hostKeys: map[string]string{"prod": "work"},
+		source:   termius.Source,
+	}
+	tm, _ = step(tm, msg)
+	tm = drainCmd(t, tm, applyImport(t, tm))
+	first := tm.(Model).st.Hosts()[0].KeyID
+
+	tm, _ = step(tm, msg)
+	tm = drainCmd(t, tm, applyImport(t, tm))
+
+	m := tm.(Model)
+	if got := m.st.Hosts()[0].KeyID; got != first || got == "" {
+		t.Fatalf("re-import rebound prod to %q, want the unchanged %q", got, first)
+	}
+	if n := len(m.st.Keys()); n != 1 {
+		t.Fatalf("re-import left %d keys, want 1", n)
+	}
+}
+
+func keyIDByName(m Model, name string) (string, bool) {
+	for _, k := range m.st.Keys() {
+		if k.Name == name {
+			return k.ID, true
+		}
+	}
+	return "", false
+}

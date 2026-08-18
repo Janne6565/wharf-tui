@@ -203,7 +203,7 @@ func (m Model) submitForwardForm() (tea.Model, tea.Cmd) {
 	m.dialHostID = h.ID
 	m.fwdInFlight = true
 	m.modal = modalConnecting
-	hs := sshx.HostSpec{ID: h.ID, Name: h.Name, User: h.User, Addr: h.Addr, Port: h.Port, KeyPath: h.KeyPath, AuthMethod: h.AuthMethod, Password: h.Password, VaultKeys: m.vaultKeySpecs(h.AuthMethod)}
+	hs := m.hostSpec(h)
 	return m, startForwardCmd(m.mgr, ctx, hs, spec)
 }
 

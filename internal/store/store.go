@@ -19,11 +19,12 @@ import (
 // schemaVersion is the document version this build writes. The document has
 // grown by version: 1 was hosts + settings, 2 added the vault identity, 3
 // added synced SSH keys, 4 added the identity's ML-KEM-768 seed (the
-// post-quantum half of the hybrid project-DEK wrapping). Open still accepts
-// the older versions 1-3 (upgraded in-memory and rewritten as 4 on the next
-// Save); any newer version is a hard error, since an old build cannot
-// round-trip fields it does not know without silently dropping them.
-const schemaVersion = 4
+// post-quantum half of the hybrid project-DEK wrapping), 5 added Host.KeyID,
+// the binding from a host to the one vault key it authenticates with. Open
+// still accepts the older versions 1-4 (upgraded in-memory and rewritten as 5
+// on the next Save); any newer version is a hard error, since an old build
+// cannot round-trip fields it does not know without silently dropping them.
+const schemaVersion = 5
 
 // Backend persists the raw payload. *vault.Vault satisfies this.
 type Backend interface {
@@ -42,6 +43,15 @@ type Host struct {
 	Port    int      `json:"port"`
 	Tags    []string `json:"tags,omitempty"`
 	KeyPath string   `json:"keyPath,omitempty"`
+	// KeyID (schema 5) binds this host to one synced vault key, by VaultKey.ID.
+	// Empty means unbound: key mode then offers the agent, KeyPath and every
+	// vault key in turn. A binding is what keeps a large vault usable — each
+	// key offered spends one of the server's MaxAuthTries — and it is what an
+	// import that knows the answer (Termius records it per host) carries over.
+	// A reference to a key that no longer exists is treated as unbound rather
+	// than as an error: RemoveKey clears it, but a vault synced from another
+	// device can still arrive with one.
+	KeyID string `json:"keyId,omitempty"`
 	// AuthMethod restricts the SSH auth chain: "key" (default) | "password".
 	// Add/Update normalize the empty string and the legacy "auto" value to
 	// "key"; a document read straight from disk may still hold "" or "auto".
@@ -255,6 +265,12 @@ func (s *Store) upsertImported(hs []Host, withSecrets bool) (added, updated, ski
 		merged := in
 		merged.ID = existing.ID
 		merged.LastSeen = existing.LastSeen
+		if merged.KeyID == "" {
+			// A source that does not name a key (ssh_config always, Termius for
+			// a host with no identity key) must not drop a binding the user
+			// made by hand.
+			merged.KeyID = existing.KeyID
+		}
 		if !withSecrets {
 			merged.AuthMethod = existing.AuthMethod
 			merged.Password = existing.Password
@@ -310,13 +326,20 @@ func (s *Store) AddKey(k VaultKey) (VaultKey, error) {
 	return stored, nil
 }
 
-// RemoveKey deletes the synced key with the given ID.
+// RemoveKey deletes the synced key with the given ID and unbinds every host
+// that pointed at it, so a removed key never leaves hosts naming something the
+// vault no longer holds.
 func (s *Store) RemoveKey(id string) error {
 	keys, err := removeKeyIn(s.keys, id)
 	if err != nil {
 		return err
 	}
 	s.keys = keys
+	for i := range s.hosts {
+		if s.hosts[i].KeyID == id {
+			s.hosts[i].KeyID = ""
+		}
+	}
 	return nil
 }
 

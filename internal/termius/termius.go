@@ -38,6 +38,12 @@ type Result struct {
 	WithPassword int
 	// Skipped lists hosts that could not be imported, with the reason.
 	Skipped []string
+	// HostKeys maps a host's name to the name of the key it authenticates with,
+	// for the hosts where Termius records one. Names, not IDs: the vault assigns
+	// its own IDs when the keys land, and a re-import binds to the key already
+	// there. Hosts are keyed by name because that is the identity the importer's
+	// own merge uses.
+	HostKeys map[string]string
 }
 
 // Import reads a local Termius profile and converts it to Wharf hosts.
@@ -87,14 +93,18 @@ func Import(opts Options) (Result, error) {
 
 	res := Result{KeySource: key.Source, Groups: len(groups)}
 
-	importedKeys, keySkips := importKeys(tbl["keys"], dec)
+	importedKeys, keyNames, keySkips := importKeys(tbl["keys"], dec)
 	res.Keys = importedKeys
 	res.Skipped = append(res.Skipped, keySkips...)
+	res.HostKeys = map[string]string{}
 	for _, h := range hosts {
-		converted, err := convertHost(h, configs, identities, groups, tags, dec)
+		converted, keyName, err := convertHost(h, configs, identities, groups, tags, keyNames, dec)
 		if err != nil {
 			res.Skipped = append(res.Skipped, err.Error())
 			continue
+		}
+		if keyName != "" {
+			res.HostKeys[converted.Name] = keyName
 		}
 		if converted.Password != "" {
 			res.WithPassword++
@@ -119,24 +129,27 @@ func Import(opts Options) (Result, error) {
 }
 
 // convertHost joins a Termius host with its ssh_config and identity and maps
-// the result onto store.Host.
+// the result onto store.Host. The second return is the name of the key the host
+// authenticates with (empty when Termius records none), which the caller binds
+// once the keys have landed in the vault.
 func convertHost(h map[string]any, configs, identities map[string]map[string]any,
-	groups map[string]string, tags map[string][]string, dec *decryptor) (store.Host, error) {
+	groups map[string]string, tags map[string][]string, keyNames map[string]string,
+	dec *decryptor) (store.Host, string, error) {
 
 	id := fmt.Sprint(h["id"])
 
 	addr, err := dec.str(h, "address")
 	if err != nil {
-		return store.Host{}, fmt.Errorf("host %s: address: %w", id, err)
+		return store.Host{}, "", fmt.Errorf("host %s: address: %w", id, err)
 	}
 	if addr == "" {
 		// Termius allows a host whose address comes from a template or an
 		// agent-forwarded chain; Wharf has nowhere to put that.
-		return store.Host{}, fmt.Errorf("host %s has no address", id)
+		return store.Host{}, "", fmt.Errorf("host %s has no address", id)
 	}
 	label, err := dec.str(h, "label")
 	if err != nil {
-		return store.Host{}, fmt.Errorf("host %s: label: %w", id, err)
+		return store.Host{}, "", fmt.Errorf("host %s: label: %w", id, err)
 	}
 	if label == "" {
 		label = addr
@@ -150,7 +163,10 @@ func convertHost(h map[string]any, configs, identities map[string]map[string]any
 	}
 
 	// The username, port and credentials live on the linked ssh_config, not on
-	// the host row.
+	// the host row. keyRef is the Termius key row this host authenticates with,
+	// wherever it is recorded.
+	var keyRef any
+
 	if cfg := lookupRef(h["ssh_config"], configs); cfg != nil {
 		if u, err := dec.str(cfg, "username"); err == nil && u != "" {
 			out.User = u
@@ -160,12 +176,17 @@ func convertHost(h map[string]any, configs, identities map[string]map[string]any
 		}
 		pw, err := dec.str(cfg, "password")
 		if err != nil {
-			return store.Host{}, fmt.Errorf("host %s: password: %w", id, err)
+			return store.Host{}, "", fmt.Errorf("host %s: password: %w", id, err)
 		}
 		out.Password = pw
 
+		keyRef = cfg["ssh_key"]
+
 		// An ssh_config may point at a stored identity instead of carrying the
-		// credentials itself.
+		// credentials itself — and in practice usually does: a profile whose
+		// hosts all reuse saved identities records the username, password AND
+		// key there, leaving every ssh_config row blank. Reading the key only
+		// off the config was why such a profile imported with no key at all.
 		if ident := lookupRef(cfg["identity"], identities); ident != nil {
 			if out.User == "" {
 				if u, err := dec.str(ident, "username"); err == nil {
@@ -177,12 +198,14 @@ func convertHost(h map[string]any, configs, identities map[string]map[string]any
 					out.Password = pw
 				}
 			}
+			if keyRef == nil {
+				keyRef = ident["ssh_key"]
+			}
 		}
 
 		// Key mode is Wharf's default; only a host that has a password and no
 		// key is switched to password mode, matching how it actually connects.
-		hasKey := cfg["ssh_key"] != nil
-		if !hasKey && out.Password != "" {
+		if keyRef == nil && out.Password != "" {
 			out.AuthMethod = "password"
 		} else {
 			out.AuthMethod = "key"
@@ -204,7 +227,10 @@ func convertHost(h map[string]any, configs, identities map[string]map[string]any
 	t = append(t, tags[fmt.Sprint(h["id"])]...)
 	out.Tags = dedupeStrings(t)
 
-	return out, nil
+	// A key row that was skipped on import (no private half, unsupported type)
+	// has no name here, and the host stays unbound rather than pointing at a
+	// key the vault does not hold.
+	return out, keyNames[refID(keyRef)], nil
 }
 
 // --- record helpers -----------------------------------------------------------

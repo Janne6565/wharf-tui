@@ -10,7 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -153,7 +153,7 @@ func TestDuplicateKeyIsOfferedOnce(t *testing.T) {
 	}
 	pemBytes := marshalPEM(t, shared)
 
-	var offers int32
+	var offers offerLog
 	ts := startCountingKeyServer(t, signer.PublicKey(), &offers)
 
 	m := NewManager(filepath.Join(t.TempDir(), "known_hosts"), false)
@@ -173,7 +173,7 @@ func TestDuplicateKeyIsOfferedOnce(t *testing.T) {
 
 	// x/crypto probes a key before signing for it, so the accepted key is seen
 	// twice; a second copy of the same key would push this to four.
-	if n := atomic.LoadInt32(&offers); n > 2 {
+	if n := offers.count(); n > 2 {
 		t.Fatalf("the shared key was offered %d times, want it deduplicated", n)
 	}
 }
@@ -199,10 +199,43 @@ func marshalPEM(t *testing.T, key ed25519.PrivateKey) []byte {
 	return pem.EncodeToMemory(block)
 }
 
-// startCountingKeyServer accepts only authorized and counts every public key
-// the client offers, so a test can assert on how much of the server's
-// MaxAuthTries budget an auth chain spends.
-func startCountingKeyServer(t *testing.T, authorized gossh.PublicKey, offers *int32) *testServer {
+// offerLog records every public key a client offers, so a test can assert both
+// on which keys reached the server and on how much of its MaxAuthTries budget
+// the chain spent.
+type offerLog struct {
+	mu   sync.Mutex
+	keys [][]byte
+}
+
+func (l *offerLog) add(key gossh.PublicKey) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.keys = append(l.keys, key.Marshal())
+}
+
+func (l *offerLog) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.keys)
+}
+
+// has reports whether key was offered at all (a key is offered twice when the
+// server accepts it: once probed, once signed).
+func (l *offerLog) has(key gossh.PublicKey) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	want := key.Marshal()
+	for _, got := range l.keys {
+		if bytes.Equal(want, got) {
+			return true
+		}
+	}
+	return false
+}
+
+// startCountingKeyServer accepts only authorized and logs every public key the
+// client offers.
+func startCountingKeyServer(t *testing.T, authorized gossh.PublicKey, log *offerLog) *testServer {
 	t.Helper()
 	signer := newHostSigner(t)
 	want := authorized.Marshal()
@@ -210,7 +243,7 @@ func startCountingKeyServer(t *testing.T, authorized gossh.PublicKey, offers *in
 	srv := &gliderssh.Server{
 		Handler: echoHandler(nil, nil),
 		PublicKeyHandler: func(ctx gliderssh.Context, key gliderssh.PublicKey) bool {
-			atomic.AddInt32(offers, 1)
+			log.add(key)
 			return bytes.Equal(want, key.Marshal())
 		},
 	}
@@ -246,7 +279,7 @@ func TestKeysBeyondMaxAuthTriesAreReachedInLaterBatches(t *testing.T) {
 		authorized = pub // the LAST key is the one the server accepts
 	}
 
-	var offers int32
+	var offers offerLog
 	ts := startCountingKeyServer(t, authorized, &offers)
 
 	t.Setenv("SSH_AUTH_SOCK", "")
@@ -267,7 +300,7 @@ func TestKeysBeyondMaxAuthTriesAreReachedInLaterBatches(t *testing.T) {
 
 	// Every key had to be offered to reach the last one; the point of the test
 	// is that this happened across connections instead of dying on the first.
-	if n := atomic.LoadInt32(&offers); n < total {
+	if n := offers.count(); n < total {
 		t.Fatalf("only %d keys were offered, want all %d", n, total)
 	}
 }
@@ -282,7 +315,7 @@ func TestKeyBatchingStopsWhenKeysRunOut(t *testing.T) {
 	}
 	_, unrelated := newVaultKeyPEM(t, "")
 
-	var offers int32
+	var offers offerLog
 	ts := startCountingKeyServer(t, unrelated, &offers)
 
 	t.Setenv("SSH_AUTH_SOCK", "")
@@ -298,7 +331,7 @@ func TestKeyBatchingStopsWhenKeysRunOut(t *testing.T) {
 	if _, err := m.Dial(ctx, hs, 80, 24); err == nil {
 		t.Fatal("dial should have failed: no offered key is authorized")
 	}
-	if n := atomic.LoadInt32(&offers); int(n) > len(vaultKeys) {
+	if n := offers.count(); int(n) > len(vaultKeys) {
 		t.Fatalf("%d offers for %d keys: a key was retried across rounds", n, len(vaultKeys))
 	}
 }
@@ -313,5 +346,81 @@ func TestTooManyAuthFailuresIsTyped(t *testing.T) {
 		if err := classifyHandshakeErr(errors.New(msg)); !errors.Is(err, ErrTooManyAuthAttempts) {
 			t.Fatalf("classify(%q) = %v, want ErrTooManyAuthAttempts", msg, err)
 		}
+	}
+}
+
+// A host bound to one vault key offers that key alone. The agent is skipped on
+// purpose: binding exists so the server's small try budget is spent on the one
+// key that can work, and an agent holding a fleet's worth of keys would eat it.
+func TestBoundHostSkipsTheAgent(t *testing.T) {
+	agentKey := mustEd25519(t)
+	serveAgent(t, agentKey)
+	agentPub, err := gossh.NewSignerFromKey(agentKey)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+
+	pemBytes, pub := newVaultKeyPEM(t, "")
+	var offers offerLog
+	ts := startCountingKeyServer(t, pub, &offers)
+
+	m := NewManager(filepath.Join(t.TempDir(), "known_hosts"), false)
+	m.SetNotify(newRecorder().notify)
+	if !m.UseAgent() {
+		t.Fatal("the agent should be on by default")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	hs := ts.hostSpec()
+	hs.VaultKeys = []VaultKeySpec{{Name: "bound", PEM: pemBytes}}
+	hs.KeyBound = true
+
+	sess, err := m.Dial(ctx, hs, 80, 24)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	if offers.has(agentPub.PublicKey()) {
+		t.Fatal("the agent's key was offered to a host bound to a vault key")
+	}
+	if !offers.has(pub) {
+		t.Fatal("the bound key was never offered")
+	}
+}
+
+// Without the binding the agent is still offered first — an unbound host has no
+// reason to ignore it.
+func TestUnboundHostStillOffersTheAgent(t *testing.T) {
+	agentKey := mustEd25519(t)
+	serveAgent(t, agentKey)
+	agentPub, err := gossh.NewSignerFromKey(agentKey)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+
+	pemBytes, pub := newVaultKeyPEM(t, "")
+	var offers offerLog
+	ts := startCountingKeyServer(t, pub, &offers)
+
+	m := NewManager(filepath.Join(t.TempDir(), "known_hosts"), false)
+	m.SetNotify(newRecorder().notify)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	hs := ts.hostSpec()
+	hs.VaultKeys = []VaultKeySpec{{Name: "vault", PEM: pemBytes}}
+
+	sess, err := m.Dial(ctx, hs, 80, 24)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	if !offers.has(agentPub.PublicKey()) {
+		t.Fatal("an unbound host must still offer the agent's keys")
 	}
 }

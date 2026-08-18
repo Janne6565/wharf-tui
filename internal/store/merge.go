@@ -32,7 +32,11 @@ func (r MergeResult) Any() bool { return r.HostsAdded > 0 || r.KeysAdded > 0 }
 //     colliding one is skipped and counted, never silently overwritten and
 //     never renamed behind the user's back.
 //   - A carried-over entry keeps its content but is re-IDed on an ID collision,
-//     so two independently generated IDs can never alias.
+//     so two independently generated IDs can never alias. A host's KeyID is
+//     rewritten to follow its key: to the key's new ID when it was re-IDed, and
+//     to the base side's key of the same name when the local one was skipped as
+//     a duplicate. A binding that resolves to nothing on either side is dropped
+//     rather than carried as a dangling reference.
 //   - Settings, schema and the vault identity are taken from base untouched:
 //     the identity is the keypair the server publishes for this account, and
 //     replacing it with a local one would make every project DEK unwrappable.
@@ -53,6 +57,27 @@ func Merge(base, local []byte) ([]byte, MergeResult, error) {
 	merged := baseDoc
 	merged.Schema = schemaVersion
 
+	// Keys first: the hosts carried over below have to be re-pointed at whatever
+	// ID their key ended up with on the merged side.
+	rebind := map[string]string{}
+	for _, k := range localDoc.Keys {
+		if i := indexKeyByNameIn(merged.Keys, k.Name); i >= 0 {
+			// The account already has a key by this name. The local host that
+			// used it should use that one — same name, same role — rather than
+			// keep pointing at a key this merge never carries over.
+			rebind[k.ID] = merged.Keys[i].ID
+			res.KeysSkipped++
+			continue
+		}
+		oldID := k.ID
+		if k.ID == "" || indexKeyByIDIn(merged.Keys, k.ID) >= 0 {
+			k.ID = newID()
+		}
+		rebind[oldID] = k.ID
+		merged.Keys = append(merged.Keys, k)
+		res.KeysAdded++
+	}
+
 	for _, h := range localDoc.Hosts {
 		if indexByNameIn(merged.Hosts, h.Name) >= 0 {
 			res.HostsSkipped++
@@ -61,20 +86,17 @@ func Merge(base, local []byte) ([]byte, MergeResult, error) {
 		if h.ID == "" || indexByIDIn(merged.Hosts, h.ID) >= 0 {
 			h.ID = newID()
 		}
+		if h.KeyID != "" {
+			// Only a key that survived the merge may stay bound; anything else
+			// would name a key the merged vault does not hold.
+			if to, ok := rebind[h.KeyID]; ok {
+				h.KeyID = to
+			} else if indexKeyByIDIn(merged.Keys, h.KeyID) < 0 {
+				h.KeyID = ""
+			}
+		}
 		merged.Hosts = append(merged.Hosts, cloneHost(h))
 		res.HostsAdded++
-	}
-
-	for _, k := range localDoc.Keys {
-		if indexKeyByNameIn(merged.Keys, k.Name) >= 0 {
-			res.KeysSkipped++
-			continue
-		}
-		if k.ID == "" || indexKeyByIDIn(merged.Keys, k.ID) >= 0 {
-			k.ID = newID()
-		}
-		merged.Keys = append(merged.Keys, k)
-		res.KeysAdded++
 	}
 
 	payload, err := json.Marshal(merged)

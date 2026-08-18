@@ -164,6 +164,10 @@ type importDoneMsg struct {
 	hosts   []store.Host
 	keys    []store.VaultKey
 	skipped []string
+	// hostKeys maps a host name to the name of the key it authenticates with,
+	// for sources that record one (Termius does). Resolved to vault key IDs at
+	// apply time, once the keys have IDs.
+	hostKeys map[string]string
 	// source is which importer ran; the summary and the upsert path branch on
 	// it, because only a Termius profile carries per-host passwords.
 	source string
@@ -197,11 +201,12 @@ func (m Model) termiusImportCmd() tea.Cmd {
 			parts = append(parts, itoa(len(res.Keys))+" key(s)")
 		}
 		return importDoneMsg{
-			hosts:   res.Hosts,
-			keys:    res.Keys,
-			skipped: res.Skipped,
-			source:  termius.Source,
-			note:    strings.Join(parts, " · "),
+			hosts:    res.Hosts,
+			keys:     res.Keys,
+			hostKeys: res.HostKeys,
+			skipped:  res.Skipped,
+			source:   termius.Source,
+			note:     strings.Join(parts, " · "),
 		}
 	}
 }

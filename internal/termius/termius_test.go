@@ -61,7 +61,7 @@ func TestConvertHostJoinsConfig(t *testing.T) {
 	groups := map[string]string{"9": "prod"}
 	tags := map[string][]string{"1": {"eu", "web"}}
 
-	got, err := convertHost(host, configs, nil, groups, tags, dec)
+	got, _, err := convertHost(host, configs, nil, groups, tags, nil, dec)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestConvertHostAuthMode(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := convertHost(base(), map[string]map[string]any{"1": tc.cfg}, nil, nil, nil, dec)
+			got, _, err := convertHost(base(), map[string]map[string]any{"1": tc.cfg}, nil, nil, nil, nil, dec)
 			if err != nil {
 				t.Fatalf("convert: %v", err)
 			}
@@ -121,7 +121,7 @@ func TestConvertHostFallsBackToIdentity(t *testing.T) {
 	configs := map[string]map[string]any{"1": {"id": int64(1), "identity": ref(8)}}
 	identities := map[string]map[string]any{"8": {"id": int64(8), "username": "ci", "password": "pw"}}
 
-	got, err := convertHost(host, configs, identities, nil, nil, dec)
+	got, _, err := convertHost(host, configs, identities, nil, nil, nil, dec)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestConvertHostDefaults(t *testing.T) {
 	dec := plainDecryptor(t)
 	host := map[string]any{"id": int64(1), "address": "box.example"}
 
-	got, err := convertHost(host, nil, nil, nil, nil, dec)
+	got, _, err := convertHost(host, nil, nil, nil, nil, nil, dec)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestConvertHostDefaults(t *testing.T) {
 // has nowhere to put those, so they are reported rather than imported blank.
 func TestConvertHostWithoutAddressIsSkipped(t *testing.T) {
 	dec := plainDecryptor(t)
-	if _, err := convertHost(map[string]any{"id": int64(1), "label": "x"}, nil, nil, nil, nil, dec); err == nil {
+	if _, _, err := convertHost(map[string]any{"id": int64(1), "label": "x"}, nil, nil, nil, nil, nil, dec); err == nil {
 		t.Fatal("want an error for a host with no address, got nil")
 	}
 }
@@ -196,5 +196,77 @@ func TestDropDeleted(t *testing.T) {
 		if id := r["id"].(int64); id == 2 || id == 3 {
 			t.Errorf("deleted row %d survived", id)
 		}
+	}
+}
+
+// The credential-carrying row in a real profile is the ssh_identity, not the
+// ssh_config: a profile whose hosts all reuse saved identities leaves every
+// ssh_config blank. Reading the key only off the config imported such a fleet
+// with no key binding at all — and, for a host that also had a password, in the
+// wrong auth mode.
+func TestIdentityKeyBindsTheHost(t *testing.T) {
+	dec := plainDecryptor(t)
+	configs := map[string]map[string]any{
+		"1": {"id": int64(1), "identity": ref(7)},
+	}
+	identities := map[string]map[string]any{
+		"7": {"id": int64(7), "username": "deploy", "ssh_key": ref(3)},
+	}
+	keyNames := map[string]string{"3": "work"}
+	host := map[string]any{"id": int64(1), "label": "prod", "address": "10.0.0.1", "ssh_config": ref(1)}
+
+	got, keyName, err := convertHost(host, configs, identities, nil, nil, keyNames, dec)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if keyName != "work" {
+		t.Errorf("key name = %q, want %q", keyName, "work")
+	}
+	if got.AuthMethod != "key" {
+		t.Errorf("auth method = %q, want key", got.AuthMethod)
+	}
+	if got.User != "deploy" {
+		t.Errorf("user = %q, want deploy", got.User)
+	}
+}
+
+// An identity that carries a key AND a password is a key host: the key is what
+// Termius would offer first, and password mode would never offer it at all.
+func TestIdentityKeyWithPasswordStaysKeyMode(t *testing.T) {
+	dec := plainDecryptor(t)
+	configs := map[string]map[string]any{"1": {"id": int64(1), "identity": ref(7)}}
+	identities := map[string]map[string]any{
+		"7": {"id": int64(7), "username": "deploy", "password": "s3cret", "ssh_key": ref(3)},
+	}
+	host := map[string]any{"id": int64(1), "label": "prod", "address": "10.0.0.1", "ssh_config": ref(1)}
+
+	got, keyName, err := convertHost(host, configs, identities, nil, nil, map[string]string{"3": "work"}, dec)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if got.AuthMethod != "key" {
+		t.Errorf("auth method = %q, want key", got.AuthMethod)
+	}
+	if keyName != "work" {
+		t.Errorf("key name = %q, want work", keyName)
+	}
+	if got.Password != "s3cret" {
+		t.Errorf("the identity's password should still be carried, got %q", got.Password)
+	}
+}
+
+// A key row that the import skipped (no private half) must not leave the host
+// bound to a name the vault will never hold.
+func TestUnimportableKeyLeavesTheHostUnbound(t *testing.T) {
+	dec := plainDecryptor(t)
+	configs := map[string]map[string]any{"1": {"id": int64(1), "username": "u", "ssh_key": ref(3)}}
+	host := map[string]any{"id": int64(1), "label": "prod", "address": "10.0.0.1", "ssh_config": ref(1)}
+
+	_, keyName, err := convertHost(host, configs, nil, nil, nil, map[string]string{}, dec)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if keyName != "" {
+		t.Fatalf("key name = %q, want empty", keyName)
 	}
 }

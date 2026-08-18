@@ -34,19 +34,47 @@ func (m Model) dial(h store.Host) (tea.Model, tea.Cmd) {
 	m.dialCancel = cancel
 	m.dialHostID = h.ID
 	m.modal = modalConnecting
-	spec := sshx.HostSpec{ID: h.ID, Name: h.Name, User: h.User, Addr: h.Addr, Port: h.Port, KeyPath: h.KeyPath, AuthMethod: h.AuthMethod, Password: h.Password, VaultKeys: m.vaultKeySpecs(h.AuthMethod)}
+	spec := m.hostSpec(h)
 	return m, dialCmd(m.pool, ctx, spec, m.w, m.h)
 }
 
-// vaultKeySpecs returns the personal synced keys offered to the SSH auth chain.
+// hostSpec builds the engine's connection recipe from a stored host, resolving
+// the host's bound vault key (or the whole vault when it has none).
+func (m Model) hostSpec(h store.Host) sshx.HostSpec {
+	keys, bound := m.vaultKeySpecs(h)
+	return sshx.HostSpec{
+		ID: h.ID, Name: h.Name, User: h.User, Addr: h.Addr, Port: h.Port,
+		KeyPath: h.KeyPath, AuthMethod: h.AuthMethod, Password: h.Password,
+		VaultKeys: keys, KeyBound: bound,
+	}
+}
+
+// vaultKeySpecs returns the personal synced keys offered to the SSH auth chain,
+// and whether they are this host's bound key rather than the whole vault.
+//
+// A host bound to a key (store.Host.KeyID) offers exactly that key: every key
+// offered spends one of the server's MaxAuthTries, so walking a fleet-wide list
+// is what makes a large vault slow — or, on a strict server, unusable. A
+// binding whose key is no longer in the vault falls back to the full list
+// rather than to nothing: the key was removed or the vault came from another
+// device, and refusing to try anything would be a worse answer than trying
+// everything.
+//
 // Key mode only — password mode never offers keys (mirrors the engine's own
 // mode split). The store's name-sorted order is preserved; entries whose
 // Material is not valid base64 are skipped. Project hosts connect through the
 // same site with the same personal keys, since a project blob never carries
 // private key material.
-func (m Model) vaultKeySpecs(authMethod string) []sshx.VaultKeySpec {
-	if m.st == nil || authMethod == sshx.AuthPassword {
-		return nil
+func (m Model) vaultKeySpecs(h store.Host) ([]sshx.VaultKeySpec, bool) {
+	if m.st == nil || h.AuthMethod == sshx.AuthPassword {
+		return nil, false
+	}
+	if h.KeyID != "" {
+		if k, ok := m.st.KeyByID(h.KeyID); ok {
+			if pem, err := base64.StdEncoding.DecodeString(k.Material); err == nil {
+				return []sshx.VaultKeySpec{{Name: k.Name, PEM: pem}}, true
+			}
+		}
 	}
 	var specs []sshx.VaultKeySpec
 	for _, k := range m.st.Keys() {
@@ -56,7 +84,7 @@ func (m Model) vaultKeySpecs(authMethod string) []sshx.VaultKeySpec {
 		}
 		specs = append(specs, sshx.VaultKeySpec{Name: k.Name, PEM: pem})
 	}
-	return specs
+	return specs, false
 }
 
 // attach hands the terminal to a session via tea.Exec, suspending the tick loop

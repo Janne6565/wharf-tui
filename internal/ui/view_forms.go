@@ -93,8 +93,8 @@ func (m Model) hostFormView(t theme.Theme) []string {
 	if m.formEditID != "" {
 		title = "edit host"
 	}
-	labels := [fCount]string{"name", "user", "address", "port", "tags", "auth", "key path", "password", "project"}
-	hints := [fCount]string{"", "", "host or ip", "default 22", "comma-separated", "", "~/.ssh/id_…", "", ""}
+	labels := [fCount]string{"name", "user", "address", "port", "tags", "auth", "key path", "vault key", "password", "project"}
+	hints := [fCount]string{"", "", "host or ip", "default 22", "comma-separated", "", "~/.ssh/id_…", "", "", ""}
 
 	var body []string
 	for i := 0; i < fCount; i++ {
@@ -106,6 +106,8 @@ func (m Model) hostFormView(t theme.Theme) []string {
 		switch i {
 		case fAuth:
 			line += m.authSelector(t, focused)
+		case fVaultKey:
+			line += m.vaultKeySelector(t, focused)
 		case fProject:
 			line += m.projectSelector(t, focused)
 		case fPassword:
@@ -147,6 +149,21 @@ func (m Model) authSelector(t theme.Theme, focused bool) string {
 		}
 	}
 	seg := b.String()
+	if focused {
+		seg += m.cur(t.Hi, t.Panel)
+	}
+	return seg
+}
+
+// vaultKeySelector renders the bound-key selector: the key this host
+// authenticates with, or "any" to keep offering the whole vault.
+//
+// The hint says why binding is worth doing rather than only what the control
+// is: every key offered spends one of the server's few authentication tries, so
+// on a vault of any size "any" is the slow option, not the neutral one.
+func (m Model) vaultKeySelector(t theme.Theme, focused bool) string {
+	label := m.vaultKeyLabel(m.formVals[fVaultKey])
+	seg := stl(t.Hi, t.Sel).Render(" "+label+" ") + stl(t.Dim, t.Panel).Render("  ‹ › to change")
 	if focused {
 		seg += m.cur(t.Hi, t.Panel)
 	}
@@ -199,6 +216,23 @@ func authDetail(h store.Host) string {
 		return "key " + h.KeyPath
 	}
 	return "key (agent)"
+}
+
+// hostAuthDetail is authDetail plus the bound vault key, which only the model
+// can resolve to a name. A bound host says so: it is the difference between one
+// key offered and the whole vault walked.
+func (m Model) hostAuthDetail(h store.Host) string {
+	base := authDetail(h)
+	if h.AuthMethod == sshx.AuthPassword || h.KeyID == "" || m.st == nil {
+		return base
+	}
+	if k, ok := m.st.KeyByID(h.KeyID); ok {
+		if h.KeyPath == "" {
+			return "key " + k.Name + " (vault)"
+		}
+		return base + " + " + k.Name + " (vault)"
+	}
+	return base
 }
 
 // --- change master password -------------------------------------------------

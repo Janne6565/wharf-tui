@@ -17,9 +17,12 @@ import (
 // and PEM (imported verbatim, since the engine parses them) as well as PuTTY
 // .ppk (converted, since it does not). Keys that cannot be made usable are
 // returned as skip reasons rather than imported broken.
-func importKeys(rows []map[string]any, dec *decryptor) ([]store.VaultKey, []string) {
+func importKeys(rows []map[string]any, dec *decryptor) ([]store.VaultKey, map[string]string, []string) {
 	var out []store.VaultKey
 	var skipped []string
+	// Termius key row id → the name the key ends up with in the vault, so a
+	// host that references a key can be bound to it after the renames below.
+	names := map[string]string{}
 
 	// Termius allows duplicate key labels; the vault requires unique names
 	// (case-insensitively), so collisions are suffixed rather than dropped.
@@ -49,13 +52,14 @@ func importKeys(rows []map[string]any, dec *decryptor) ([]store.VaultKey, []stri
 			continue
 		}
 		vk.Name = uniqueName(vk.Name, used)
+		names[fmt.Sprint(r["id"])] = vk.Name
 		out = append(out, vk)
 	}
 
 	sort.Slice(out, func(i, j int) bool {
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
-	return out, skipped
+	return out, names, skipped
 }
 
 // buildKey turns one decrypted Termius key row into a vault key.

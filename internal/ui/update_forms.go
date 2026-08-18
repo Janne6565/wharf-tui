@@ -40,6 +40,62 @@ func cycleAuth(cur string, dir int) string {
 	return authMethods[idx]
 }
 
+// vaultKeyOptions is the bound-key selector's option list: "" (any key) first,
+// then every synced vault key by ID, in the store's name-sorted order. It is
+// always at least one entry long, so a vault with no keys renders no selector.
+func (m Model) vaultKeyOptions() []string {
+	opts := []string{""}
+	if m.st == nil {
+		return opts
+	}
+	for _, k := range m.st.Keys() {
+		opts = append(opts, k.ID)
+	}
+	return opts
+}
+
+// vaultKeyLabel names a bound-key option for the form and the detail pane. A
+// binding whose key is gone reads as unbound, which is how the engine treats it.
+func (m Model) vaultKeyLabel(id string) string {
+	if id == "" {
+		return "any (all vault keys)"
+	}
+	if m.st != nil {
+		if k, ok := m.st.KeyByID(id); ok {
+			return k.Name
+		}
+	}
+	return "any (all vault keys)"
+}
+
+// cycleVaultKey advances the bound-key selector by dir (+1 / -1), wrapping.
+func (m Model) cycleVaultKey(cur string, dir int) string {
+	opts := m.vaultKeyOptions()
+	idx := 0
+	for i, o := range opts {
+		if o == cur {
+			idx = i
+			break
+		}
+	}
+	return opts[(idx+dir+len(opts))%len(opts)]
+}
+
+// boundKeyID is the KeyID the host form saves: the selected key, or none when
+// the selector is hidden or the selection no longer names a key in the vault.
+// A hidden selector must not silently drop a binding made on another device, so
+// it keeps whatever the form was opened with.
+func (m Model) boundKeyID() string {
+	id := m.formVals[fVaultKey]
+	if id == "" || m.st == nil {
+		return id
+	}
+	if _, ok := m.st.KeyByID(id); !ok {
+		return ""
+	}
+	return id
+}
+
 // fieldVisible reports whether host-form field i is currently shown. The two
 // conditional fields (key path, password) toggle on the selected auth mode; the
 // hidden one is skipped by navigation and never rendered.
@@ -47,6 +103,12 @@ func (m Model) fieldVisible(i int) bool {
 	switch i {
 	case fKey:
 		return m.formVals[fAuth] != sshx.AuthPassword
+	case fVaultKey:
+		// Nothing to pick from until the vault holds synced keys, and nothing to
+		// pick for a password host. Not gated on being signed in the way the
+		// project selector is: vault keys are local-first and exist without an
+		// account.
+		return m.formVals[fAuth] != sshx.AuthPassword && !m.demo && len(m.vaultKeyOptions()) > 1
 	case fPassword:
 		return m.formVals[fAuth] == sshx.AuthPassword
 	case fProject:
@@ -168,6 +230,7 @@ func (m Model) editSelectedHost() (tea.Model, tea.Cmd) {
 	m.formVals[fPort] = strconv.Itoa(h.Port)
 	m.formVals[fTags] = strings.Join(h.Tags, ", ")
 	m.formVals[fKey] = h.KeyPath
+	m.formVals[fVaultKey] = h.KeyID
 	// Only two modes exist; a legacy "" / "auto" host edits as key.
 	if h.AuthMethod == sshx.AuthPassword {
 		m.formVals[fAuth] = sshx.AuthPassword
@@ -202,6 +265,16 @@ func (m Model) hostFormKey(key string) (tea.Model, tea.Cmd) {
 			m.formVals[fAuth] = cycleAuth(m.formVals[fAuth], -1)
 		case "right", " ":
 			m.formVals[fAuth] = cycleAuth(m.formVals[fAuth], +1)
+		}
+		return m, nil
+	}
+	// The bound-key field is a selector over "any" plus every synced vault key.
+	if m.formFocus == fVaultKey {
+		switch key {
+		case "left":
+			m.formVals[fVaultKey] = m.cycleVaultKey(m.formVals[fVaultKey], -1)
+		case "right", " ":
+			m.formVals[fVaultKey] = m.cycleVaultKey(m.formVals[fVaultKey], +1)
 		}
 		return m, nil
 	}
@@ -246,6 +319,7 @@ func (m Model) submitHostForm() (tea.Model, tea.Cmd) {
 		Port:    port,
 		Tags:    parseTags(m.formVals[fTags]),
 		KeyPath: strings.TrimSpace(m.formVals[fKey]),
+		KeyID:   m.boundKeyID(),
 		// Always "key" or "password" now. Both KeyPath and Password are persisted
 		// as typed even though only one is relevant to the selected mode: the
 		// engine ignores the irrelevant one, so keeping both is lossless if the
@@ -609,6 +683,7 @@ func (m Model) handleImportDone(msg importDoneMsg) (tea.Model, tea.Cmd) {
 	}
 	m.importHosts = msg.hosts
 	m.importKeys = msg.keys
+	m.importHostKeys = msg.hostKeys
 	m.importSkipped = msg.skipped
 	m.importSource = msg.source
 	m.importNote = msg.note
@@ -650,6 +725,34 @@ func (m *Model) applyImportedKeys() int {
 	return added
 }
 
+// bindImportedHosts turns the source's host→key-name mapping into KeyID
+// bindings against the vault's keys.
+//
+// It resolves by name against the whole vault, not just the keys this import
+// added: a re-import finds the key already there (applyImportedKeys skips a name
+// that exists) and binds to it rather than leaving the host unbound. A name
+// that resolves to nothing leaves the host unbound — better than a reference to
+// a key the vault does not hold.
+func (m *Model) bindImportedHosts() {
+	if len(m.importHostKeys) == 0 || m.st == nil {
+		return
+	}
+	byName := map[string]string{}
+	for _, k := range m.st.Keys() {
+		byName[strings.ToLower(strings.TrimSpace(k.Name))] = k.ID
+	}
+	for i, h := range m.importHosts {
+		keyName, ok := m.importHostKeys[h.Name]
+		if !ok {
+			continue
+		}
+		if id := byName[strings.ToLower(strings.TrimSpace(keyName))]; id != "" {
+			m.importHosts[i].KeyID = id
+		}
+	}
+	m.importHostKeys = nil
+}
+
 // importSourceKey handles the "import from where?" chooser.
 func (m Model) importSourceKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
@@ -670,6 +773,11 @@ func (m Model) importSourceKey(key string) (tea.Model, tea.Cmd) {
 func (m Model) importSummaryKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "y", "Y", "enter":
+		// Keys land first: a host can only be bound to a key that already has
+		// its vault ID.
+		keysAdded := m.applyImportedKeys()
+		m.bindImportedHosts()
+
 		var added, updated, skipped int
 		if m.importSource == termius.Source {
 			// Only a Termius profile brings passwords with it.
@@ -677,7 +785,6 @@ func (m Model) importSummaryKey(key string) (tea.Model, tea.Cmd) {
 		} else {
 			added, updated, skipped = m.st.UpsertImported(m.importHosts)
 		}
-		keysAdded := m.applyImportedKeys()
 		m.modal = modalNone
 		m, syncCmd := m.saveVault()
 		summary := itoa(added) + " added · " + itoa(updated) + " updated · " + itoa(skipped) + " skipped"

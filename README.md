@@ -466,11 +466,19 @@ every command printed as it runs. It is a narrowing of the trust boundary
   picker: reattach to a specific session, kill one (`x` twice — a live shell is not
   something to lose to a stray key), or start another with `n`.
 - **Two auth modes per host.** **key** (the default): ssh-agent → configured key
-  file (passphrase prompted in the TUI) → keyboard-interactive (2FA). **password**:
-  stored/prompted password → keyboard-interactive — it never offers public keys,
-  so servers with a strict `MaxAuthTries` aren't burned on key attempts they'll
-  never accept. The host form shows only the field the mode needs (key path or
-  password). Host keys are verified against `~/.ssh/known_hosts`; unknown hosts
+  file (passphrase prompted in the TUI) → synced vault keys → keyboard-interactive
+  (2FA). **password**: stored/prompted password → keyboard-interactive — it never
+  offers public keys, so servers with a strict `MaxAuthTries` aren't burned on key
+  attempts they'll never accept. The host form shows only the fields the mode needs
+  (key path + vault key, or password).
+- **A host can be bound to one vault key.** Pick it in the host form (`vault key`,
+  `‹ ›` to change) and that key is the only one offered — the agent is skipped
+  too. This matters once the vault holds more than a handful of keys: a server
+  allows about six authentication attempts per connection, and an unbound host
+  spends them walking the list. Unbound hosts still offer everything, in batches
+  small enough that the server does not hang up, so a large vault works either
+  way — binding just makes it one attempt instead of many. A **Termius import
+  carries the binding over**, since the profile records which key each host uses. Host keys are verified against `~/.ssh/known_hosts`; unknown hosts
   show a fingerprint confirmation (TOFU), and a **changed** host key is a hard
   refusal — no override.
 - **Passwords can be saved per host** (they live only inside the encrypted
@@ -744,6 +752,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) +
 - [x] Remote access: revocable exec-only grants for a local agent
 - [x] Grant or revoke remote access from inside an attached session (`ctrl+]`)
 - [ ] Hardware keys (YubiKey resident / `-SK`)
+- [x] Bind a host to one synced key (host form, and carried over by the Termius import)
 - [ ] Assign a scanned key to a host from the keys tab
 - [ ] mosh fallback
 
